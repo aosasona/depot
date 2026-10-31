@@ -17,7 +17,8 @@ use depot_auth::{
 };
 use depot_core::{ProjectValidationError, validate_project_slug, validate_repository_url};
 use depot_store::{
-    NewProject, ProjectSummary, SessionUser, Store, StoreError, UserRole, UserSummary,
+    JobEvent, JobStatus, NewJob, NewProject, ProjectSummary, SessionUser, Store, StoreError,
+    UserRole, UserSummary,
 };
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -130,6 +131,37 @@ struct UpdateProjectRequest {
     branch: String,
 }
 
+/// Accepted inspection job identifier returned after durable enqueueing.
+#[derive(Debug, Serialize)]
+struct EnqueuedJobResponse {
+    job_id: String,
+}
+
+/// Authenticated durable job status with parsed result and ordered events.
+#[derive(Debug, Serialize)]
+struct JobStatusResponse {
+    id: String,
+    kind: String,
+    project_id: Option<String>,
+    state: String,
+    attempts: i64,
+    max_attempts: i64,
+    result: Option<serde_json::Value>,
+    last_error: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    events: Vec<JobEventResponse>,
+}
+
+/// One sanitized ordered event attached to a job status response.
+#[derive(Debug, Serialize)]
+struct JobEventResponse {
+    sequence: i64,
+    level: String,
+    message: String,
+    created_at: i64,
+}
+
 /// Stable JSON error shape shared by all API endpoints.
 #[derive(Debug, Serialize)]
 struct ErrorEnvelope {
@@ -173,7 +205,52 @@ pub fn router(store: Store) -> Router {
                 .patch(update_project)
                 .delete(delete_project),
         )
+        .route(
+            "/api/v1/projects/{project_id}/inspect",
+            post(enqueue_project_inspection),
+        )
+        .route("/api/v1/jobs/{job_id}", get(get_job_status))
         .with_state(ApiState { store })
+}
+
+/// Enqueues one inspection per current project revision using an active dedup key.
+async fn enqueue_project_inspection(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<(StatusCode, Json<EnqueuedJobResponse>), ApiError> {
+    require_mutation(&state.store, &jar, &headers).await?;
+    let project = state.store.project_by_id(&project_id).await?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let deduplication_key = format!("inspect:{}:{}", project.id, project.updated_at);
+    let job = state
+        .store
+        .enqueue_job(NewJob {
+            kind: "inspect_repository",
+            project_id: Some(&project.id),
+            payload_json: "{}",
+            deduplication_key: &deduplication_key,
+            max_attempts: 3,
+            now_unix: now,
+        })
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(EnqueuedJobResponse { job_id: job.id }),
+    ))
+}
+
+/// Returns current durable state and ordered events for an authenticated user.
+async fn get_job_status(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(job_id): axum::extract::Path<String>,
+) -> Result<Json<JobStatusResponse>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    let status = state.store.job_status(&job_id).await?;
+    let events = state.store.job_events(&job_id).await?;
+    Ok(Json(job_status_response(status, events)))
 }
 
 /// Lists projects for any authenticated member of the shared v0.1 workspace.
@@ -443,6 +520,33 @@ fn project_response(project: ProjectSummary) -> ProjectResponse {
     }
 }
 
+/// Parses trusted worker JSON while keeping malformed results non-fatal to status reads.
+fn job_status_response(status: JobStatus, events: Vec<JobEvent>) -> JobStatusResponse {
+    JobStatusResponse {
+        id: status.id,
+        kind: status.kind,
+        project_id: status.project_id,
+        state: status.state,
+        attempts: status.attempts,
+        max_attempts: status.max_attempts,
+        result: status
+            .result_json
+            .and_then(|value| serde_json::from_str(&value).ok()),
+        last_error: status.last_error,
+        created_at: status.created_at,
+        updated_at: status.updated_at,
+        events: events
+            .into_iter()
+            .map(|event| JobEventResponse {
+                sequence: event.sequence,
+                level: event.level,
+                message: event.message,
+                created_at: event.created_at,
+            })
+            .collect(),
+    }
+}
+
 /// Lists local accounts for active administrators only.
 async fn list_users(
     State(state): State<ApiState>,
@@ -660,6 +764,11 @@ impl IntoResponse for ApiError {
                 StatusCode::NOT_FOUND,
                 "project_not_found",
                 "The requested project does not exist.",
+            ),
+            Self::Store(StoreError::JobNotFound) => (
+                StatusCode::NOT_FOUND,
+                "job_not_found",
+                "The requested job does not exist.",
             ),
             Self::Store(StoreError::InvalidRole(_))
             | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (
@@ -1065,6 +1174,35 @@ mod tests {
             .await
             .expect("request completes");
         assert_eq!(json_body(list).await.as_array().map(Vec::len), Some(1));
+
+        let inspection = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/api/v1/projects/{project_id}/inspect"))
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", &session.csrf_token)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(inspection.status(), StatusCode::ACCEPTED);
+        let inspection_body = json_body(inspection).await;
+        let job_id = inspection_body["job_id"].as_str().expect("job has id");
+        let job_status = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/api/v1/jobs/{job_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(json_body(job_status).await["state"], "queued");
 
         let delete = app
             .oneshot(

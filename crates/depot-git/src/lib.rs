@@ -208,4 +208,23 @@ mod tests {
         assert_eq!(detect_builder(&path).0, DetectedBuilder::Static);
         fs::remove_dir_all(path).expect("test directory is removed");
     }
+
+    /// Exercises a real public remote only when an operator explicitly supplies its URL.
+    #[tokio::test]
+    #[ignore = "requires DEPOT_LIVE_GIT_URL and external network access"]
+    async fn live_public_repository_resolves_commit() {
+        let repository_url = std::env::var("DEPOT_LIVE_GIT_URL")
+            .expect("DEPOT_LIVE_GIT_URL must name a public repository");
+        let workspace = test_directory();
+        let result = super::inspect_repository(
+            &repository_url,
+            "main",
+            &workspace,
+            std::time::Duration::from_secs(120),
+        )
+        .await
+        .expect("public repository inspection succeeds");
+        assert_eq!(result.commit_sha.len(), 40);
+        fs::remove_dir_all(workspace).expect("test workspace root is removed");
+    }
 }

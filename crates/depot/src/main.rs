@@ -162,7 +162,7 @@ async fn worker(config: Config, once: bool) -> Result<(), AppError> {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let claimed = store.claim_job(&worker_id, now, 60).await?;
         if let Some(job) = claimed {
-            process_job(&store, &worker_id, job).await?;
+            process_job(&store, &config.worker, &worker_id, job).await?;
         }
         if once {
             return Ok(());
@@ -180,22 +180,73 @@ async fn worker(config: Config, once: bool) -> Result<(), AppError> {
     }
 }
 
-/// Fails unsupported jobs explicitly until their real capability handler is installed.
+/// Records durable events and completion state around one claimed job attempt.
 async fn process_job(
     store: &Store,
+    worker_config: &depot_core::WorkerConfig,
     worker_id: &str,
     job: depot_store::Job,
 ) -> Result<(), AppError> {
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    let message = format!("unsupported job kind: {}", job.kind);
     store
-        .append_job_event(&job.id, "error", &message, now)
+        .append_job_event(&job.id, "info", "Worker claimed durable job.", now)
         .await?;
-    store
-        .fail_job(&job.id, worker_id, &message, 30, now)
-        .await?;
-    tracing::warn!(job_id = %job.id, kind = %job.kind, "job handler is not installed");
+    match execute_job(store, worker_config, &job).await {
+        Ok(result_json) => {
+            let completed_at = time::OffsetDateTime::now_utc().unix_timestamp();
+            store
+                .append_job_event(
+                    &job.id,
+                    "info",
+                    "Repository inspection completed.",
+                    completed_at,
+                )
+                .await?;
+            store
+                .complete_job(&job.id, worker_id, Some(&result_json), completed_at)
+                .await?;
+        }
+        Err(message) => {
+            let failed_at = time::OffsetDateTime::now_utc().unix_timestamp();
+            store
+                .append_job_event(&job.id, "error", &message, failed_at)
+                .await?;
+            store
+                .fail_job(&job.id, worker_id, &message, 30, failed_at)
+                .await?;
+            tracing::warn!(job_id = %job.id, kind = %job.kind, "job attempt failed");
+        }
+    }
     Ok(())
+}
+
+/// Executes a supported job kind and returns its bounded JSON result.
+async fn execute_job(
+    store: &Store,
+    worker_config: &depot_core::WorkerConfig,
+    job: &depot_store::Job,
+) -> Result<String, String> {
+    if job.kind != "inspect_repository" {
+        return Err(format!("Unsupported job kind: {}", job.kind));
+    }
+    let project_id = job
+        .project_id
+        .as_deref()
+        .ok_or_else(|| "Inspection job has no project reference.".to_owned())?;
+    let project = store
+        .project_by_id(project_id)
+        .await
+        .map_err(|_| "Inspection project no longer exists.".to_owned())?;
+    let inspection = depot_git::inspect_repository(
+        &project.repository_url,
+        &project.branch,
+        std::path::Path::new(&worker_config.workspace_root),
+        std::time::Duration::from_secs(worker_config.git_timeout_seconds),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    serde_json::to_string(&inspection)
+        .map_err(|_| "Repository inspection result could not be encoded.".to_owned())
 }
 
 /// Installs structured logging with a safe, operator-configurable filter.

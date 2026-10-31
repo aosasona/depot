@@ -11,9 +11,11 @@ clap.workspace = true
 depot-api = { path = "../depot-api" }
 depot-auth = { path = "../depot-auth" }
 depot-core = { path = "../depot-core" }
+depot-git = { path = "../depot-git" }
 depot-store = { path = "../depot-store" }
 rust-embed.workspace = true
 serde.workspace = true
+serde_json = "1.0.154"
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true

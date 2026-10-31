@@ -142,6 +142,30 @@ pub struct NewJob<'a> {
     pub now_unix: i64,
 }
 
+/// Safe job state and result fields exposed to authenticated API consumers.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobStatus {
+    pub id: String,
+    pub kind: String,
+    pub project_id: Option<String>,
+    pub state: String,
+    pub attempts: i64,
+    pub max_attempts: i64,
+    pub result_json: Option<String>,
+    pub last_error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// One ordered, sanitized event emitted during durable job processing.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct JobEvent {
+    pub sequence: i64,
+    pub level: String,
+    pub message: String,
+    pub created_at: i64,
+}
+
 /// Durable access to Depot's SQLite database.
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -175,6 +199,8 @@ pub enum StoreError {
     ProjectNotFound,
     #[error("the requested job does not exist or its lease is no longer owned")]
     JobLeaseLost,
+    #[error("the requested job does not exist")]
+    JobNotFound,
 }
 
 impl Store {
@@ -645,13 +671,15 @@ impl Store {
         &self,
         job_id: &str,
         worker_id: &str,
+        result_json: Option<&str>,
         now_unix: i64,
     ) -> Result<(), StoreError> {
         let result = sqlx::query(
             "UPDATE jobs SET state = 'succeeded', lease_owner = NULL,
-                    lease_expires_at = NULL, updated_at = ?
+                    lease_expires_at = NULL, result_json = ?, updated_at = ?
              WHERE id = ? AND state = 'running' AND lease_owner = ?",
         )
+        .bind(result_json)
         .bind(now_unix)
         .bind(job_id)
         .bind(worker_id)
@@ -661,6 +689,52 @@ impl Store {
             return Err(StoreError::JobLeaseLost);
         }
         Ok(())
+    }
+
+    /// Loads job status and result without exposing internal payload values.
+    pub async fn job_status(&self, job_id: &str) -> Result<JobStatus, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, kind, project_id, state, attempts, max_attempts,
+                    result_json, last_error, created_at, updated_at
+             FROM jobs WHERE id = ?",
+        )
+        .bind(job_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::JobNotFound)?;
+        Ok(JobStatus {
+            id: row.try_get("id")?,
+            kind: row.try_get("kind")?,
+            project_id: row.try_get("project_id")?,
+            state: row.try_get("state")?,
+            attempts: row.try_get("attempts")?,
+            max_attempts: row.try_get("max_attempts")?,
+            result_json: row.try_get("result_json")?,
+            last_error: row.try_get("last_error")?,
+            created_at: row.try_get("created_at")?,
+            updated_at: row.try_get("updated_at")?,
+        })
+    }
+
+    /// Lists ordered sanitized events for a durable job.
+    pub async fn job_events(&self, job_id: &str) -> Result<Vec<JobEvent>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT sequence, level, message, created_at
+             FROM job_events WHERE job_id = ? ORDER BY sequence",
+        )
+        .bind(job_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(JobEvent {
+                    sequence: row.try_get("sequence")?,
+                    level: row.try_get("level")?,
+                    message: row.try_get("message")?,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
     }
 
     /// Records a failure and either requeues with delay or exhausts retry attempts.
@@ -1016,11 +1090,11 @@ mod tests {
         assert_eq!(recovered.id, first.id);
         assert_eq!(recovered.attempts, 2);
         assert!(matches!(
-            store.complete_job(&first.id, "worker-a", 142).await,
+            store.complete_job(&first.id, "worker-a", None, 142).await,
             Err(StoreError::JobLeaseLost)
         ));
         store
-            .complete_job(&first.id, "worker-b", 143)
+            .complete_job(&first.id, "worker-b", Some("{}"), 143)
             .await
             .expect("current lease owner completes");
     }
