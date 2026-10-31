@@ -113,11 +113,11 @@ worker checks out the configured branch and rejects the job if that branch does
 not resolve to the requested SHA. Keep the token in a CI secret, never in a
 repository variable or workflow file.
 
-The repository includes CI builds, tagged Linux binary releases, and a reusable
-curl deployment workflow under `.github/workflows/`. Copy `deploy.yml` into the
-application repository (so `github.sha` identifies that application), add
-`DEPOT_DEPLOY_TOKEN` as a GitHub Actions secret, and provide the Depot URL when
-dispatching it.
+The repository includes CI builds, Linux binary builds triggered after a GitHub
+Release is published, and a reusable curl deployment workflow under
+`.github/workflows/`. Copy `deploy.yml` into the application repository (so
+`github.sha` identifies that application), add `DEPOT_DEPLOY_TOKEN` as a GitHub
+Actions secret, and provide the Depot URL when dispatching it.
 
 ### 6. Connect host Caddy
 
