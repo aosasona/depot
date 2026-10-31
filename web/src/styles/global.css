@@ -24,6 +24,16 @@ body {
   min-height: 100vh;
   background: var(--bg);
 }
+button,
+input {
+  font: inherit;
+}
+button:focus-visible,
+input:focus-visible,
+a:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 3px;
+}
 a {
   color: inherit;
 }
@@ -111,6 +121,123 @@ h1 {
   height: 0.65rem;
   background: var(--accent);
 }
+.auth-shell {
+  min-height: 100vh;
+  background-image:
+    linear-gradient(#1d1d1d 1px, transparent 1px),
+    linear-gradient(90deg, #1d1d1d 1px, transparent 1px);
+  background-size: 48px 48px;
+}
+.auth-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.2fr) minmax(360px, 0.8fr);
+  width: min(1200px, 92vw);
+  margin: 8vh auto 0;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.auth-intro,
+.auth-panel {
+  min-height: 560px;
+  padding: clamp(2rem, 5vw, 5rem);
+}
+.auth-intro {
+  border-right: 1px solid var(--border);
+}
+.auth-intro h1 {
+  font-size: clamp(3rem, 6vw, 6rem);
+}
+.auth-panel {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  background: var(--surface);
+}
+.auth-panel h2 {
+  margin: 0.5rem 0 1rem;
+  font-size: clamp(2rem, 4vw, 3.5rem);
+  line-height: 0.95;
+  letter-spacing: -0.045em;
+}
+.step-label {
+  margin: 0;
+  color: var(--accent);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.1em;
+}
+.panel-copy {
+  margin-bottom: 2rem;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.field {
+  display: grid;
+  gap: 0.55rem;
+  margin: 1rem 0;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.field input {
+  width: 100%;
+  min-height: 48px;
+  padding: 0 0.9rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 1rem;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.field input:hover {
+  border-color: var(--muted);
+}
+.primary-action {
+  width: 100%;
+  min-height: 52px;
+  margin-top: 1rem;
+  border: 1px solid var(--accent);
+  background: var(--accent);
+  color: var(--accent-foreground);
+  cursor: pointer;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+.primary-action:hover:not(:disabled) {
+  background: var(--text);
+  border-color: var(--text);
+}
+.primary-action:disabled {
+  cursor: wait;
+  opacity: 0.55;
+}
+.notice {
+  padding: 1rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--muted);
+  line-height: 1.5;
+}
+.notice.danger {
+  border-color: #f36c6c;
+  color: #f36c6c;
+}
+.text-action {
+  border: 0;
+  background: transparent;
+  color: var(--accent);
+  cursor: pointer;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+  font-weight: 700;
+  text-transform: uppercase;
+}
 @media (max-width: 600px) {
   .technical-label {
     display: none;
@@ -126,6 +253,23 @@ h1 {
   }
   .status-panel code {
     grid-column: 2;
+  }
+}
+@media (max-width: 860px) {
+  .auth-grid {
+    grid-template-columns: 1fr;
+    width: 100%;
+    margin-top: 2rem;
+    border-right: 0;
+    border-left: 0;
+  }
+  .auth-intro,
+  .auth-panel {
+    min-height: auto;
+  }
+  .auth-intro {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
   }
 }
 @media (prefers-reduced-motion: reduce) {
