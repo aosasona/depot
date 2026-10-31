@@ -195,6 +195,30 @@ pub struct JobEvent {
     pub created_at: i64,
 }
 
+/// Immutable source identity and current lifecycle state for one deployment attempt.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Deployment {
+    pub id: String,
+    pub project_id: String,
+    pub job_id: String,
+    pub commit_sha: String,
+    pub trigger_kind: String,
+    pub status: String,
+    pub failure_reason: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+    pub finished_at: Option<i64>,
+}
+
+/// Validated values used to atomically create a manual deployment and build job.
+#[derive(Debug)]
+pub struct NewDeployment<'a> {
+    pub project_id: &'a str,
+    pub commit_sha: &'a str,
+    pub created_by_user_id: &'a str,
+    pub now_unix: i64,
+}
+
 /// Durable access to Depot's SQLite database.
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -230,6 +254,8 @@ pub enum StoreError {
     JobLeaseLost,
     #[error("the requested job does not exist")]
     JobNotFound,
+    #[error("the requested deployment does not exist")]
+    DeploymentNotFound,
 }
 
 impl Store {
@@ -734,6 +760,86 @@ impl Store {
         job_from_row(row)
     }
 
+    /// Atomically creates one manual deployment attempt and its durable build job.
+    pub async fn create_deployment(
+        &self,
+        input: NewDeployment<'_>,
+    ) -> Result<Deployment, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let deployment_id = Uuid::now_v7().to_string();
+        let job_id = Uuid::now_v7().to_string();
+        let deduplication_key = format!("deploy:{}:{}", input.project_id, input.commit_sha);
+        let payload_json = format!(r#"{{"deployment_id":"{deployment_id}"}}"#);
+        sqlx::query(
+            "INSERT INTO jobs
+             (id, kind, project_id, payload_json, state, deduplication_key,
+              attempts, max_attempts, available_at, created_at, updated_at)
+             VALUES (?, 'deploy_project', ?, ?, 'queued', ?, 0, 3, ?, ?, ?)",
+        )
+        .bind(&job_id)
+        .bind(input.project_id)
+        .bind(payload_json)
+        .bind(deduplication_key)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO deployments
+             (id, project_id, job_id, commit_sha, trigger_kind, status,
+              created_by_user_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'manual', 'queued', ?, ?, ?)",
+        )
+        .bind(&deployment_id)
+        .bind(input.project_id)
+        .bind(&job_id)
+        .bind(input.commit_sha)
+        .bind(input.created_by_user_id)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        insert_project_audit(
+            &mut transaction,
+            input.created_by_user_id,
+            "deployment.create",
+            input.project_id,
+            input.now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        self.deployment_by_id(&deployment_id).await
+    }
+
+    /// Lists deployment history for one project from newest to oldest.
+    pub async fn list_deployments(&self, project_id: &str) -> Result<Vec<Deployment>, StoreError> {
+        self.project_by_id(project_id).await?;
+        let rows = sqlx::query(
+            "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
+                    failure_reason, created_at, updated_at, finished_at
+             FROM deployments WHERE project_id = ? ORDER BY created_at DESC, id DESC",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(deployment_from_row).collect()
+    }
+
+    /// Loads one deployment attempt by its opaque identifier.
+    pub async fn deployment_by_id(&self, deployment_id: &str) -> Result<Deployment, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
+                    failure_reason, created_at, updated_at, finished_at
+             FROM deployments WHERE id = ?",
+        )
+        .bind(deployment_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::DeploymentNotFound)?;
+        deployment_from_row(row)
+    }
+
     /// Claims the oldest eligible job, including work whose previous lease expired.
     pub async fn claim_job(
         &self,
@@ -1043,6 +1149,22 @@ fn job_from_row(row: SqliteRow) -> Result<Job, StoreError> {
     })
 }
 
+/// Maps one deployment history row into its domain representation.
+fn deployment_from_row(row: SqliteRow) -> Result<Deployment, StoreError> {
+    Ok(Deployment {
+        id: row.try_get("id")?,
+        project_id: row.try_get("project_id")?,
+        job_id: row.try_get("job_id")?,
+        commit_sha: row.try_get("commit_sha")?,
+        trigger_kind: row.try_get("trigger_kind")?,
+        status: row.try_get("status")?,
+        failure_reason: row.try_get("failure_reason")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+        finished_at: row.try_get("finished_at")?,
+    })
+}
+
 /// Appends a project lifecycle audit event inside the caller's transaction.
 async fn insert_project_audit(
     transaction: &mut Transaction<'_, Sqlite>,
@@ -1067,8 +1189,8 @@ async fn insert_project_audit(
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapAdmin, NewJob, NewProject, NewUser, Store, StoreError, UpdateServiceConfig,
-        UserRole,
+        BootstrapAdmin, NewDeployment, NewJob, NewProject, NewUser, Store, StoreError,
+        UpdateServiceConfig, UserRole,
     };
 
     /// Creates one administrator in a fresh store for project-focused tests.
@@ -1222,6 +1344,53 @@ mod tests {
         assert_eq!(updated.exposed_port, Some(8080));
         assert_eq!(updated.healthcheck_path.as_deref(), Some("/health"));
         assert_eq!(updated.updated_at, 210);
+    }
+
+    /// Proves deployment history and its durable build job are created atomically.
+    #[tokio::test]
+    async fn deployment_creation_persists_immutable_history_and_job() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let project = store
+            .create_project(NewProject {
+                slug: "deployable",
+                name: "Deployable",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/project.git",
+                branch: "main",
+                now_unix: 200,
+            })
+            .await
+            .expect("project is created");
+        let commit_sha = "0123456789abcdef0123456789abcdef01234567";
+        let deployment = store
+            .create_deployment(NewDeployment {
+                project_id: &project.id,
+                commit_sha,
+                created_by_user_id: &admin_id,
+                now_unix: 210,
+            })
+            .await
+            .expect("deployment is created");
+        assert_eq!(deployment.commit_sha, commit_sha);
+        assert_eq!(deployment.status, "queued");
+        assert_eq!(deployment.trigger_kind, "manual");
+
+        let claimed = store
+            .claim_job("worker", 211, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("build job exists");
+        assert_eq!(claimed.id, deployment.job_id);
+        assert_eq!(claimed.kind, "deploy_project");
+        assert!(claimed.payload_json.contains(&deployment.id));
+        assert_eq!(
+            store
+                .list_deployments(&project.id)
+                .await
+                .expect("history loads"),
+            vec![deployment]
+        );
     }
 
     /// Proves active deduplication and expired-lease recovery survive worker restarts.

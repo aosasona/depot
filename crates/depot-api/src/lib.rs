@@ -17,8 +17,8 @@ use depot_auth::{
 };
 use depot_core::{ProjectValidationError, validate_project_slug, validate_repository_url};
 use depot_store::{
-    JobEvent, JobStatus, NewJob, NewProject, ProjectSummary, ServiceConfig, SessionUser, Store,
-    StoreError, UpdateServiceConfig, UserRole, UserSummary,
+    Deployment, JobEvent, JobStatus, NewDeployment, NewJob, NewProject, ProjectSummary,
+    ServiceConfig, SessionUser, Store, StoreError, UpdateServiceConfig, UserRole, UserSummary,
 };
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -210,6 +210,22 @@ enum ApiError {
     Forbidden,
     ProjectValidation(ProjectValidationError),
     InvalidProjectField(&'static str),
+    ProjectNotInspected,
+}
+
+/// Durable deployment history returned to authenticated workspace members.
+#[derive(Debug, Serialize)]
+struct DeploymentResponse {
+    id: String,
+    project_id: String,
+    job_id: String,
+    commit_sha: String,
+    trigger_kind: String,
+    status: String,
+    failure_reason: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+    finished_at: Option<i64>,
 }
 
 /// Builds the versioned authentication routes backed by the supplied store.
@@ -240,6 +256,11 @@ pub fn router(store: Store) -> Router {
             "/api/v1/projects/{project_id}/config",
             get(get_service_config).put(update_service_config),
         )
+        .route(
+            "/api/v1/projects/{project_id}/deployments",
+            get(list_deployments).post(create_deployment),
+        )
+        .route("/api/v1/deployments/{deployment_id}", get(get_deployment))
         .route("/api/v1/jobs/{job_id}", get(get_job_status))
         .with_state(ApiState { store })
 }
@@ -315,6 +336,66 @@ async fn get_service_config(
     require_user(&state.store, &jar).await?;
     Ok(Json(service_config_response(
         state.store.service_config(&project_id).await?,
+    )))
+}
+
+/// Lists immutable deployment attempts for one authenticated project.
+async fn list_deployments(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<Json<Vec<DeploymentResponse>>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    let deployments = state.store.list_deployments(&project_id).await?;
+    Ok(Json(
+        deployments.into_iter().map(deployment_response).collect(),
+    ))
+}
+
+/// Creates a manual deployment from the latest successfully inspected commit.
+async fn create_deployment(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<(StatusCode, Json<DeploymentResponse>), ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let project = state.store.project_by_id(&project_id).await?;
+    let inspection_job_id = project
+        .latest_inspection_job_id
+        .ok_or(ApiError::ProjectNotInspected)?;
+    let inspection = state.store.job_status(&inspection_job_id).await?;
+    let result = inspection
+        .result_json
+        .filter(|_| inspection.state == "succeeded")
+        .and_then(|value| serde_json::from_str::<serde_json::Value>(&value).ok())
+        .ok_or(ApiError::ProjectNotInspected)?;
+    let commit_sha = result
+        .get("commit_sha")
+        .and_then(serde_json::Value::as_str)
+        .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
+        .ok_or(ApiError::ProjectNotInspected)?;
+    let deployment = state
+        .store
+        .create_deployment(NewDeployment {
+            project_id: &project_id,
+            commit_sha,
+            created_by_user_id: &actor.id,
+            now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
+        })
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(deployment_response(deployment))))
+}
+
+/// Loads one deployment attempt for an authenticated workspace member.
+async fn get_deployment(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(deployment_id): axum::extract::Path<String>,
+) -> Result<Json<DeploymentResponse>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    Ok(Json(deployment_response(
+        state.store.deployment_by_id(&deployment_id).await?,
     )))
 }
 
@@ -671,6 +752,22 @@ fn service_config_response(config: ServiceConfig) -> ServiceConfigResponse {
     }
 }
 
+/// Maps a durable deployment into its stable authenticated API contract.
+fn deployment_response(deployment: Deployment) -> DeploymentResponse {
+    DeploymentResponse {
+        id: deployment.id,
+        project_id: deployment.project_id,
+        job_id: deployment.job_id,
+        commit_sha: deployment.commit_sha,
+        trigger_kind: deployment.trigger_kind,
+        status: deployment.status,
+        failure_reason: deployment.failure_reason,
+        created_at: deployment.created_at,
+        updated_at: deployment.updated_at,
+        finished_at: deployment.finished_at,
+    }
+}
+
 /// Parses trusted worker JSON while keeping malformed results non-fatal to status reads.
 fn job_status_response(status: JobStatus, events: Vec<JobEvent>) -> JobStatusResponse {
     JobStatusResponse {
@@ -920,6 +1017,16 @@ impl IntoResponse for ApiError {
                 StatusCode::NOT_FOUND,
                 "job_not_found",
                 "The requested job does not exist.",
+            ),
+            Self::Store(StoreError::DeploymentNotFound) => (
+                StatusCode::NOT_FOUND,
+                "deployment_not_found",
+                "The requested deployment does not exist.",
+            ),
+            Self::ProjectNotInspected => (
+                StatusCode::CONFLICT,
+                "project_not_inspected",
+                "Inspect the current project revision before deploying it.",
             ),
             Self::Store(StoreError::InvalidRole(_))
             | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (
