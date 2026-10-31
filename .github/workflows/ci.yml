@@ -31,6 +31,16 @@ jobs:
       - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
       - run: cargo test --workspace
       - run: cargo build --release -p depot
+      - name: Verify installation package
+        run: |
+          sh -n scripts/install.sh
+          install_root="${RUNNER_TEMP}/depot-install"
+          DESTDIR="${install_root}" ./scripts/install.sh vm target/release/depot
+          DESTDIR="${install_root}" ./scripts/install.sh caddy-agent target/release/depot
+          test -x "${install_root}/usr/local/bin/depot"
+          test -f "${install_root}/etc/systemd/system/depot.service"
+          test -f "${install_root}/etc/systemd/system/depot-worker.service"
+          test -f "${install_root}/etc/systemd/system/depot-caddy-agent.service"
       - uses: actions/upload-artifact@v4
         with:
           name: depot-linux-x86_64-${{ github.sha }}

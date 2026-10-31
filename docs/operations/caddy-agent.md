@@ -29,6 +29,13 @@ sudo install -d -m 0750 /etc/depot /etc/caddy/depot
 sudo install -m 0640 deploy/caddy-agent.example.toml /etc/depot/caddy-agent.toml
 ```
 
+The repository installer performs these file and systemd-unit steps without
+editing the operator-owned Caddyfile:
+
+```sh
+sudo ./scripts/install.sh caddy-agent ./depot-linux-x86_64
+```
+
 Generate a token without putting it in shell history, place it in
 `/etc/depot/caddy-agent.toml`, and set restrictive ownership and permissions:
 

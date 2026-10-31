@@ -28,6 +28,9 @@ just release
 `just release` builds the Vite dashboard before compiling it into
 `target/release/depot`.
 
+For a packaged release and systemd installation, follow the
+[VM installation and deployment smoke test](docs/operations/installation.md).
+
 ### 2. Create the VM configuration
 
 ```sh

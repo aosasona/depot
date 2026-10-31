@@ -1,0 +1,27 @@
+[Unit]
+Description=Depot restricted Caddy reconciliation agent
+After=network-online.target caddy.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=depot-caddy
+Group=caddy
+ExecStart=/usr/local/bin/depot caddy-agent --config /etc/depot/caddy-agent.toml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/etc/caddy/depot
+UMask=0027
+
+[Install]
+WantedBy=multi-user.target

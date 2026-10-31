@@ -1,0 +1,27 @@
+[Unit]
+Description=Depot deployment worker
+After=network-online.target docker.service depot.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=depot-worker
+Group=depot
+ExecStart=/usr/local/bin/depot worker --config /etc/depot/config.toml
+Restart=on-failure
+RestartSec=5s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadWritePaths=/var/lib/depot
+UMask=0007
+
+[Install]
+WantedBy=multi-user.target
