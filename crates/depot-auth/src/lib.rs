@@ -5,7 +5,8 @@ use argon2::{
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
 use depot_store::{
-    BootstrapAdmin, NewSession, NewUser, SessionUser, Store, StoreError, UserRole, UserSummary,
+    BootstrapAdmin, DeployToken, DeployTokenIdentity, NewDeployToken, NewSession, NewUser,
+    SessionUser, Store, StoreError, UserRole, UserSummary,
 };
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
@@ -17,6 +18,7 @@ const PASSWORD_SALT_BYTES: usize = 16;
 const MINIMUM_PASSWORD_LENGTH: usize = 12;
 const SESSION_TOKEN_BYTES: usize = 32;
 const CSRF_TOKEN_BYTES: usize = 32;
+const DEPLOY_TOKEN_BYTES: usize = 32;
 
 /// A newly issued plaintext bootstrap token shown once to the operator.
 #[derive(Debug)]
@@ -34,6 +36,13 @@ pub struct IssuedSession {
     pub user: SessionUser,
 }
 
+/// A newly issued deploy credential whose plaintext is returned only once.
+#[derive(Debug)]
+pub struct IssuedDeployToken {
+    pub token: String,
+    pub metadata: DeployToken,
+}
+
 /// Authentication failures safe for callers to classify without leaking secrets.
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -49,8 +58,48 @@ pub enum AuthError {
     InvalidSession,
     #[error("the CSRF token is invalid")]
     InvalidCsrf,
+    #[error("the deploy token is invalid or revoked")]
+    InvalidDeployToken,
     #[error(transparent)]
     Store(#[from] StoreError),
+}
+
+/// Issues a project-scoped deployment credential and stores only its digest.
+pub async fn issue_deploy_token(
+    store: &Store,
+    project_id: &str,
+    label: &str,
+    actor_user_id: &str,
+) -> Result<IssuedDeployToken, AuthError> {
+    let token = format!(
+        "dpt_{}",
+        encode_hex(&rand::random::<[u8; DEPLOY_TOKEN_BYTES]>())
+    );
+    let now_unix = OffsetDateTime::now_utc().unix_timestamp();
+    let metadata = store
+        .create_deploy_token(NewDeployToken {
+            project_id,
+            label,
+            token_hash: &hash_token(&token),
+            created_by_user_id: actor_user_id,
+            now_unix,
+        })
+        .await?;
+    Ok(IssuedDeployToken { token, metadata })
+}
+
+/// Authenticates and records use of a project-scoped deployment credential.
+pub async fn authenticate_deploy_token(
+    store: &Store,
+    token: &str,
+) -> Result<DeployTokenIdentity, AuthError> {
+    store
+        .use_deploy_token(
+            &hash_token(token),
+            OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?
+        .ok_or(AuthError::InvalidDeployToken)
 }
 
 /// Generates a one-time setup credential and persists only its SHA-256 digest.

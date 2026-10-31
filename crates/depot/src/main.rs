@@ -10,7 +10,7 @@ use axum::{
     routing::get,
 };
 use clap::{Parser, Subcommand};
-use depot_auth::issue_bootstrap_token;
+use depot_auth::{issue_bootstrap_token, issue_deploy_token};
 use depot_core::Config;
 use depot_store::Store;
 use hyper::client::conn::http1;
@@ -42,6 +42,21 @@ enum Command {
         /// Number of minutes before the displayed setup token expires.
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(i64).range(1..=120))]
         expires_in_minutes: i64,
+    },
+    /// Creates a project-scoped bearer token for curl and CI deployments.
+    DeployToken {
+        /// TOML configuration path; local development defaults apply when omitted.
+        #[arg(long, env = "DEPOT_CONFIG")]
+        config: Option<PathBuf>,
+        /// Opaque project identifier shown by the dashboard and API.
+        #[arg(long)]
+        project_id: String,
+        /// Active user recorded as the credential creator and deployment actor.
+        #[arg(long)]
+        created_by_user_id: String,
+        /// Human-readable purpose retained after the secret is hidden.
+        #[arg(long, default_value = "CI deployment")]
+        label: String,
     },
     /// Serves the API, private gateway, and embedded web application.
     Serve {
@@ -118,6 +133,8 @@ enum AppError {
     DomainsRead(#[source] std::io::Error),
     #[error("desired domains file must be a JSON string array: {0}")]
     DomainsParse(#[source] serde_json::Error),
+    #[error("deploy token label must contain 1-80 characters")]
+    InvalidDeployTokenLabel,
 }
 
 /// Parses the command line and runs the selected Depot process mode.
@@ -130,6 +147,20 @@ async fn main() -> Result<(), AppError> {
             config,
             expires_in_minutes,
         } => setup(load_config(config.as_deref())?, expires_in_minutes).await,
+        Command::DeployToken {
+            config,
+            project_id,
+            created_by_user_id,
+            label,
+        } => {
+            create_deploy_token(
+                load_config(config.as_deref())?,
+                &project_id,
+                &created_by_user_id,
+                &label,
+            )
+            .await
+        }
         Command::Serve { config } => serve(load_config(config.as_deref())?).await,
         Command::Migrate { config } => migrate(load_config(config.as_deref())?).await,
         Command::Doctor { config } => doctor(load_config(config.as_deref())?).await,
@@ -139,6 +170,25 @@ async fn main() -> Result<(), AppError> {
             domains_file,
         } => caddy_agent(&config, domains_file.as_deref()).await,
     }
+}
+
+/// Creates and prints one project deploy token exactly once for operator delivery.
+async fn create_deploy_token(
+    config: Config,
+    project_id: &str,
+    created_by_user_id: &str,
+    label: &str,
+) -> Result<(), AppError> {
+    let label = label.trim();
+    if label.is_empty() || label.len() > 80 {
+        return Err(AppError::InvalidDeployTokenLabel);
+    }
+    let store = Store::connect(&config.database.url).await?;
+    let issued = issue_deploy_token(&store, project_id, label, created_by_user_id).await?;
+    println!("Depot project deploy token (shown once):");
+    println!("{}", issued.token);
+    println!("Token ID: {}", issued.metadata.id);
+    Ok(())
 }
 
 /// Applies one complete desired-domain snapshot through the restricted host reconciler.

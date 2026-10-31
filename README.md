@@ -6,8 +6,10 @@ gateway, durable worker, and restricted host-side Caddy agent.
 
 Depot is under active development. Public Git inspection, Dockerfile builds,
 container readiness, project domains, and Host-based gateway routing are
-implemented. Railpack, static artifact releases, webhooks, private Git
-credentials, secrets, and rollback are not complete yet.
+implemented. Railpack, static artifact releases, provider-signed webhooks,
+private Git credentials, secrets, and rollback are not complete yet. GitHub
+Actions and other CI systems can trigger exact-commit deployments with a
+project-scoped bearer token.
 
 ## Quick start: main Depot binary
 
@@ -81,7 +83,43 @@ Dockerfile builder, set the container port and readiness path, then deploy.
 Successful services are published on ephemeral loopback ports and selected by
 the internal gateway through exact project-domain matches.
 
-### 5. Connect host Caddy
+### 5. Deploy with curl or GitHub Actions
+
+Create a project-scoped token on the Depot VM. Project and user IDs are exposed
+by the authenticated API and dashboard. The plaintext token is printed once;
+Depot stores only its SHA-256 digest.
+
+```sh
+depot deploy-token \
+  --config /etc/depot/config.toml \
+  --project-id 019a... \
+  --created-by-user-id 019a... \
+  --label "GitHub Actions"
+```
+
+Store the result as `DEPOT_DEPLOY_TOKEN`, then deploy a full 40-character
+commit SHA:
+
+```sh
+curl --fail-with-body --silent --show-error \
+  --request POST "https://depot.example.com/api/v1/deploy" \
+  --header "Authorization: Bearer ${DEPOT_DEPLOY_TOKEN}" \
+  --header "Content-Type: application/json" \
+  --data "{\"commit_sha\":\"$(git rev-parse HEAD)\"}"
+```
+
+The API returns `202 Accepted` after durably enqueueing the deployment. The
+worker checks out the configured branch and rejects the job if that branch does
+not resolve to the requested SHA. Keep the token in a CI secret, never in a
+repository variable or workflow file.
+
+The repository includes CI builds, tagged Linux binary releases, and a reusable
+curl deployment workflow under `.github/workflows/`. Copy `deploy.yml` into the
+application repository (so `github.sha` identifies that application), add
+`DEPOT_DEPLOY_TOKEN` as a GitHub Actions secret, and provide the Depot URL when
+dispatching it.
+
+### 6. Connect host Caddy
 
 Caddy runs on the Proxmox host and forwards public HTTPS traffic to the single
 private `server.bind` gateway. Follow

@@ -1,0 +1,35 @@
+name: Deploy with Depot
+on:
+  workflow_call:
+    inputs:
+      depot_url:
+        description: Public URL of the Depot control plane
+        required: true
+        type: string
+    secrets:
+      depot_deploy_token:
+        description: Project-scoped token created by depot deploy-token
+        required: true
+  workflow_dispatch:
+    inputs:
+      depot_url:
+        description: Public URL of the Depot control plane
+        required: true
+        type: string
+permissions:
+  contents: read
+jobs:
+  deploy:
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Enqueue exact commit
+        env:
+          DEPOT_URL: ${{ inputs.depot_url }}
+          DEPOT_DEPLOY_TOKEN: ${{ secrets.depot_deploy_token }}
+          COMMIT_SHA: ${{ github.sha }}
+        run: |
+          curl --fail-with-body --silent --show-error \
+            --request POST "${DEPOT_URL%/}/api/v1/deploy" \
+            --header "Authorization: Bearer ${DEPOT_DEPLOY_TOKEN}" \
+            --header "Content-Type: application/json" \
+            --data "{\"commit_sha\":\"${COMMIT_SHA}\"}"

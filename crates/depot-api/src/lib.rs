@@ -12,8 +12,9 @@ use axum_extra::extract::{
     cookie::{Cookie, SameSite},
 };
 use depot_auth::{
-    AuthError, authenticate_session, create_first_admin, create_managed_user,
-    login as authenticate_login, logout as revoke_login, validate_csrf,
+    AuthError, authenticate_deploy_token, authenticate_session, create_first_admin,
+    create_managed_user, issue_deploy_token, login as authenticate_login, logout as revoke_login,
+    validate_csrf,
 };
 use depot_core::{
     ProjectValidationError, validate_domain_hostname, validate_project_slug,
@@ -214,6 +215,7 @@ enum ApiError {
     ProjectValidation(ProjectValidationError),
     InvalidProjectField(&'static str),
     ProjectNotInspected,
+    InvalidDeployRequest,
 }
 
 /// Durable deployment history returned to authenticated workspace members.
@@ -252,6 +254,28 @@ struct CreateDomainRequest {
     hostname: String,
 }
 
+/// Label used to identify a project deployment credential after issuance.
+#[derive(Debug, Deserialize)]
+struct CreateDeployTokenRequest {
+    label: String,
+}
+
+/// One-time response containing a new project deployment credential.
+#[derive(Debug, Serialize)]
+struct DeployTokenResponse {
+    id: String,
+    project_id: String,
+    label: String,
+    token: String,
+    created_at: i64,
+}
+
+/// Commit selected by a CI system for an authenticated deployment.
+#[derive(Debug, Deserialize)]
+struct HookDeployRequest {
+    commit_sha: String,
+}
+
 /// Builds the versioned authentication routes backed by the supplied store.
 pub fn router(store: Store) -> Router {
     Router::new()
@@ -284,6 +308,15 @@ pub fn router(store: Store) -> Router {
             "/api/v1/projects/{project_id}/deployments",
             get(list_deployments).post(create_deployment),
         )
+        .route(
+            "/api/v1/projects/{project_id}/deploy-tokens",
+            post(create_deploy_token),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/deploy-tokens/{token_id}",
+            axum::routing::delete(revoke_deploy_token),
+        )
+        .route("/api/v1/deploy", post(hook_deploy))
         .route("/api/v1/deployments/{deployment_id}", get(get_deployment))
         .route(
             "/api/v1/projects/{project_id}/domains",
@@ -413,10 +446,92 @@ async fn create_deployment(
             project_id: &project_id,
             commit_sha,
             created_by_user_id: &actor.id,
+            trigger_kind: "manual",
             now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
         })
         .await?;
     Ok((StatusCode::ACCEPTED, Json(deployment_response(deployment))))
+}
+
+/// Creates a one-time-visible project credential after session and CSRF checks.
+async fn create_deploy_token(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(request): Json<CreateDeployTokenRequest>,
+) -> Result<(StatusCode, Json<DeployTokenResponse>), ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let label = request.label.trim();
+    if label.is_empty() || label.len() > 80 {
+        return Err(ApiError::InvalidDeployRequest);
+    }
+    let issued = issue_deploy_token(&state.store, &project_id, label, &actor.id).await?;
+    Ok((
+        StatusCode::CREATED,
+        Json(DeployTokenResponse {
+            id: issued.metadata.id,
+            project_id: issued.metadata.project_id,
+            label: issued.metadata.label,
+            token: issued.token,
+            created_at: issued.metadata.created_at,
+        }),
+    ))
+}
+
+/// Revokes a project deploy credential after session and CSRF checks.
+async fn revoke_deploy_token(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path((project_id, token_id)): axum::extract::Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    require_mutation(&state.store, &jar, &headers).await?;
+    state.store.project_by_id(&project_id).await?;
+    state
+        .store
+        .revoke_deploy_token(
+            &project_id,
+            &token_id,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Enqueues an exact commit using a project-scoped bearer credential.
+async fn hook_deploy(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    Json(request): Json<HookDeployRequest>,
+) -> Result<(StatusCode, Json<DeploymentResponse>), ApiError> {
+    let token = bearer_token(&headers).ok_or(AuthError::InvalidDeployToken)?;
+    let identity = authenticate_deploy_token(&state.store, token).await?;
+    let commit_sha = request.commit_sha.trim().to_ascii_lowercase();
+    if commit_sha.len() != 40 || !commit_sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Err(ApiError::InvalidDeployRequest);
+    }
+    let deployment = state
+        .store
+        .create_deployment(NewDeployment {
+            project_id: &identity.project_id,
+            commit_sha: &commit_sha,
+            created_by_user_id: &identity.created_by_user_id,
+            trigger_kind: "webhook",
+            now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
+        })
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(deployment_response(deployment))))
+}
+
+/// Extracts a strict HTTP bearer token without accepting alternate schemes.
+fn bearer_token(headers: &HeaderMap) -> Option<&str> {
+    headers
+        .get(axum::http::header::AUTHORIZATION)?
+        .to_str()
+        .ok()?
+        .strip_prefix("Bearer ")
+        .filter(|token| !token.is_empty() && !token.contains(char::is_whitespace))
 }
 
 /// Loads one deployment attempt for an authenticated workspace member.
@@ -1068,6 +1183,11 @@ impl IntoResponse for ApiError {
                 "invalid_csrf",
                 "The request could not be verified.",
             ),
+            Self::Auth(AuthError::InvalidDeployToken) => (
+                StatusCode::UNAUTHORIZED,
+                "invalid_deploy_token",
+                "The deploy token is invalid or revoked.",
+            ),
             Self::Forbidden => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
@@ -1156,6 +1276,11 @@ impl IntoResponse for ApiError {
                 "project_not_inspected",
                 "Inspect the current project revision before deploying it.",
             ),
+            Self::InvalidDeployRequest => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_deploy_request",
+                "Provide a 40-character Git commit SHA and a valid token label.",
+            ),
             Self::Store(StoreError::InvalidRole(_))
             | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1199,8 +1324,10 @@ mod tests {
         body::Body,
         http::{Request, StatusCode, header},
     };
-    use depot_auth::{create_first_admin, create_managed_user, issue_bootstrap_token, login};
-    use depot_store::{Store, UserRole};
+    use depot_auth::{
+        create_first_admin, create_managed_user, issue_bootstrap_token, issue_deploy_token, login,
+    };
+    use depot_store::{NewProject, Store, UserRole};
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
     use time::Duration;
@@ -1228,6 +1355,73 @@ mod tests {
             .filter_map(|value| value.to_str().ok()?.split(';').next())
             .collect::<Vec<_>>()
             .join("; ")
+    }
+
+    /// Proves a project bearer credential can deploy an exact SHA and fails after revocation.
+    #[tokio::test]
+    async fn deploy_hook_uses_revocable_project_token() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let bootstrap = issue_bootstrap_token(&store, Duration::minutes(5))
+            .await
+            .expect("bootstrap token issues");
+        let admin_id = create_first_admin(
+            &store,
+            &bootstrap.token,
+            "admin@example.com",
+            "a secure initial password".to_owned(),
+        )
+        .await
+        .expect("admin is created");
+        let project = store
+            .create_project(NewProject {
+                slug: "hook-test",
+                name: "Hook test",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/project.git",
+                branch: "main",
+                now_unix: 100,
+            })
+            .await
+            .expect("project is created");
+        let issued = issue_deploy_token(&store, &project.id, "GitHub Actions", &admin_id)
+            .await
+            .expect("deploy token issues");
+        let token_id = issued.metadata.id.clone();
+        let app = router(store.clone());
+        let commit_sha = "0123456789abcdef0123456789abcdef01234567";
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/deploy")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", issued.token))
+                    .body(Body::from(json!({ "commit_sha": commit_sha }).to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let body = json_body(response).await;
+        assert_eq!(body["commit_sha"], commit_sha);
+        assert_eq!(body["trigger_kind"], "webhook");
+
+        assert!(
+            store
+                .revoke_deploy_token(&project.id, &token_id, 200)
+                .await
+                .expect("token revokes")
+        );
+        let response = app
+            .oneshot(
+                Request::post("/api/v1/deploy")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::AUTHORIZATION, format!("Bearer {}", issued.token))
+                    .body(Body::from(json!({ "commit_sha": commit_sha }).to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Proves repository-relative build paths cannot escape the checked-out source.

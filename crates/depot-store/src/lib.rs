@@ -219,7 +219,36 @@ pub struct NewDeployment<'a> {
     pub project_id: &'a str,
     pub commit_sha: &'a str,
     pub created_by_user_id: &'a str,
+    pub trigger_kind: &'a str,
     pub now_unix: i64,
+}
+
+/// Non-secret metadata for a project-scoped deployment credential.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeployToken {
+    pub id: String,
+    pub project_id: String,
+    pub label: String,
+    pub created_at: i64,
+    pub last_used_at: Option<i64>,
+}
+
+/// Secret digest and metadata required to persist a new deploy token.
+#[derive(Debug)]
+pub struct NewDeployToken<'a> {
+    pub project_id: &'a str,
+    pub label: &'a str,
+    pub token_hash: &'a [u8],
+    pub created_by_user_id: &'a str,
+    pub now_unix: i64,
+}
+
+/// Project identity resolved from a valid deploy token.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct DeployTokenIdentity {
+    pub token_id: String,
+    pub project_id: String,
+    pub created_by_user_id: String,
 }
 
 /// One project hostname and its routing reconciliation state.
@@ -287,6 +316,89 @@ pub enum StoreError {
 }
 
 impl Store {
+    /// Persists a project deploy credential while retaining only its digest.
+    pub async fn create_deploy_token(
+        &self,
+        input: NewDeployToken<'_>,
+    ) -> Result<DeployToken, StoreError> {
+        self.project_by_id(input.project_id).await?;
+        let id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO project_deploy_tokens
+             (id, project_id, label, token_hash, created_by_user_id, created_at)
+             VALUES (?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(input.project_id)
+        .bind(input.label)
+        .bind(input.token_hash)
+        .bind(input.created_by_user_id)
+        .bind(input.now_unix)
+        .execute(&self.pool)
+        .await?;
+        Ok(DeployToken {
+            id,
+            project_id: input.project_id.to_owned(),
+            label: input.label.to_owned(),
+            created_at: input.now_unix,
+            last_used_at: None,
+        })
+    }
+
+    /// Resolves and marks one active deploy credential as used.
+    pub async fn use_deploy_token(
+        &self,
+        token_hash: &[u8],
+        now_unix: i64,
+    ) -> Result<Option<DeployTokenIdentity>, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query(
+            "SELECT project_deploy_tokens.id, project_deploy_tokens.project_id,
+                    project_deploy_tokens.created_by_user_id
+             FROM project_deploy_tokens
+             JOIN users ON users.id = project_deploy_tokens.created_by_user_id
+             WHERE token_hash = ? AND revoked_at IS NULL AND users.active = 1",
+        )
+        .bind(token_hash)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let Some(row) = row else {
+            transaction.rollback().await?;
+            return Ok(None);
+        };
+        let identity = DeployTokenIdentity {
+            token_id: row.try_get("id")?,
+            project_id: row.try_get("project_id")?,
+            created_by_user_id: row.try_get("created_by_user_id")?,
+        };
+        sqlx::query("UPDATE project_deploy_tokens SET last_used_at = ? WHERE id = ?")
+            .bind(now_unix)
+            .bind(&identity.token_id)
+            .execute(&mut *transaction)
+            .await?;
+        transaction.commit().await?;
+        Ok(Some(identity))
+    }
+
+    /// Revokes one deploy credential belonging to the selected project.
+    pub async fn revoke_deploy_token(
+        &self,
+        project_id: &str,
+        token_id: &str,
+        now_unix: i64,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE project_deploy_tokens SET revoked_at = ?
+             WHERE id = ? AND project_id = ? AND revoked_at IS NULL",
+        )
+        .bind(now_unix)
+        .bind(token_id)
+        .bind(project_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
     /// Opens SQLite with WAL, foreign keys, and a bounded contention timeout.
     pub async fn connect(database_url: &str) -> Result<Self, StoreError> {
         let options = SqliteConnectOptions::from_str(database_url)
@@ -975,7 +1087,7 @@ impl Store {
         let mut transaction = self.pool.begin().await?;
         let deployment_id = Uuid::now_v7().to_string();
         let job_id = Uuid::now_v7().to_string();
-        let deduplication_key = format!("deploy:{}:{}", input.project_id, input.commit_sha);
+        let deduplication_key = format!("deploy:{deployment_id}");
         let payload_json = format!(r#"{{"deployment_id":"{deployment_id}"}}"#);
         sqlx::query(
             "INSERT INTO jobs
@@ -996,12 +1108,13 @@ impl Store {
             "INSERT INTO deployments
              (id, project_id, job_id, commit_sha, trigger_kind, status,
               created_by_user_id, created_at, updated_at)
-             VALUES (?, ?, ?, ?, 'manual', 'queued', ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?)",
         )
         .bind(&deployment_id)
         .bind(input.project_id)
         .bind(&job_id)
         .bind(input.commit_sha)
+        .bind(input.trigger_kind)
         .bind(input.created_by_user_id)
         .bind(input.now_unix)
         .bind(input.now_unix)
@@ -1754,6 +1867,7 @@ mod tests {
                 project_id: &project.id,
                 commit_sha,
                 created_by_user_id: &admin_id,
+                trigger_kind: "manual",
                 now_unix: 210,
             })
             .await

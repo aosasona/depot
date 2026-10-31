@@ -1,0 +1,30 @@
+name: Release binary
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: write
+jobs:
+  linux-x86_64:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.91"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+          cache-dependency-path: web/pnpm-lock.yaml
+      - run: pnpm --dir web install --frozen-lockfile
+      - run: pnpm --dir web build
+      - run: cargo build --locked --release -p depot
+      - run: cp target/release/depot depot-linux-x86_64
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: depot-linux-x86_64
+          generate_release_notes: true
