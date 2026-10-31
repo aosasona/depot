@@ -15,7 +15,10 @@ use depot_auth::{
     AuthError, authenticate_session, create_first_admin, create_managed_user,
     login as authenticate_login, logout as revoke_login, validate_csrf,
 };
-use depot_store::{SessionUser, Store, StoreError, UserRole, UserSummary};
+use depot_core::{ProjectValidationError, validate_project_slug, validate_repository_url};
+use depot_store::{
+    NewProject, ProjectSummary, SessionUser, Store, StoreError, UserRole, UserSummary,
+};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -97,6 +100,36 @@ struct UpdateUserRequest {
     active: bool,
 }
 
+/// Project representation returned to every authenticated workspace member.
+#[derive(Debug, Serialize)]
+struct ProjectResponse {
+    id: String,
+    slug: String,
+    name: String,
+    owner_user_id: String,
+    repository_url: String,
+    branch: String,
+    created_at: i64,
+    updated_at: i64,
+}
+
+/// Authenticated request to create a project from a Git source.
+#[derive(Debug, Deserialize)]
+struct CreateProjectRequest {
+    slug: String,
+    name: String,
+    repository_url: String,
+    branch: String,
+}
+
+/// Mutable project metadata; stable slug and ownership are intentionally omitted.
+#[derive(Debug, Deserialize)]
+struct UpdateProjectRequest {
+    name: String,
+    repository_url: String,
+    branch: String,
+}
+
 /// Stable JSON error shape shared by all API endpoints.
 #[derive(Debug, Serialize)]
 struct ErrorEnvelope {
@@ -116,6 +149,8 @@ enum ApiError {
     Auth(AuthError),
     Store(StoreError),
     Forbidden,
+    ProjectValidation(ProjectValidationError),
+    InvalidProjectField(&'static str),
 }
 
 /// Builds the versioned authentication routes backed by the supplied store.
@@ -131,7 +166,113 @@ pub fn router(store: Store) -> Router {
         .route("/api/v1/system/readiness", get(system_readiness))
         .route("/api/v1/users", get(list_users).post(create_user))
         .route("/api/v1/users/{user_id}", axum::routing::patch(update_user))
+        .route("/api/v1/projects", get(list_projects).post(create_project))
+        .route(
+            "/api/v1/projects/{project_id}",
+            get(get_project)
+                .patch(update_project)
+                .delete(delete_project),
+        )
         .with_state(ApiState { store })
+}
+
+/// Lists projects for any authenticated member of the shared v0.1 workspace.
+async fn list_projects(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<ProjectResponse>>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    let projects = state.store.list_projects().await?;
+    Ok(Json(projects.into_iter().map(project_response).collect()))
+}
+
+/// Loads one project for any authenticated workspace member.
+async fn get_project(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<Json<ProjectResponse>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    Ok(Json(project_response(
+        state.store.project_by_id(&project_id).await?,
+    )))
+}
+
+/// Creates a validated project and attributes ownership to the current user.
+async fn create_project(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Json(request): Json<CreateProjectRequest>,
+) -> Result<(StatusCode, Json<ProjectResponse>), ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    validate_project_input(
+        Some(&request.slug),
+        &request.name,
+        &request.repository_url,
+        &request.branch,
+    )?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let project = state
+        .store
+        .create_project(NewProject {
+            slug: &request.slug,
+            name: request.name.trim(),
+            owner_user_id: &actor.id,
+            repository_url: &request.repository_url,
+            branch: request.branch.trim(),
+            now_unix: now,
+        })
+        .await?;
+    Ok((StatusCode::CREATED, Json(project_response(project))))
+}
+
+/// Updates mutable Git source metadata after session-bound CSRF validation.
+async fn update_project(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(request): Json<UpdateProjectRequest>,
+) -> Result<Json<ProjectResponse>, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    validate_project_input(
+        None,
+        &request.name,
+        &request.repository_url,
+        &request.branch,
+    )?;
+    let project = state
+        .store
+        .update_project(
+            &project_id,
+            request.name.trim(),
+            &request.repository_url,
+            request.branch.trim(),
+            &actor.id,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(Json(project_response(project)))
+}
+
+/// Deletes a project after CSRF verification; deployed-child guards arrive with releases.
+async fn delete_project(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    state
+        .store
+        .delete_project(
+            &project_id,
+            &actor.id,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Distinguishes process liveness from readiness to serve control-plane requests.
@@ -237,6 +378,68 @@ fn user_response(user: SessionUser) -> UserResponse {
         id: user.id,
         email: user.email,
         role: user.role.as_str(),
+    }
+}
+
+/// Requires any active authenticated account for a shared-workspace read.
+async fn require_user(store: &Store, jar: &CookieJar) -> Result<SessionUser, ApiError> {
+    authenticate_session(store, session_token(jar)?)
+        .await
+        .map_err(ApiError::from)
+}
+
+/// Requires an active session and its bound CSRF value for workspace mutations.
+async fn require_mutation(
+    store: &Store,
+    jar: &CookieJar,
+    headers: &HeaderMap,
+) -> Result<SessionUser, ApiError> {
+    let token = session_token(jar)?;
+    let csrf_token = headers
+        .get(CSRF_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(AuthError::InvalidCsrf)?;
+    validate_csrf(store, token, csrf_token)
+        .await
+        .map_err(ApiError::from)
+}
+
+/// Applies project identity, Git target, and compact metadata validation.
+fn validate_project_input(
+    slug: Option<&str>,
+    name: &str,
+    repository_url: &str,
+    branch: &str,
+) -> Result<(), ApiError> {
+    if let Some(slug) = slug {
+        validate_project_slug(slug)?;
+    }
+    if name.trim().is_empty() || name.trim().len() > 100 {
+        return Err(ApiError::InvalidProjectField(
+            "Project name must contain 1-100 characters.",
+        ));
+    }
+    if branch.trim().is_empty() || branch.trim().len() > 255 || branch.chars().any(char::is_control)
+    {
+        return Err(ApiError::InvalidProjectField(
+            "Branch must contain 1-255 printable characters.",
+        ));
+    }
+    validate_repository_url(repository_url)?;
+    Ok(())
+}
+
+/// Maps a stored project into the stable API contract.
+fn project_response(project: ProjectSummary) -> ProjectResponse {
+    ProjectResponse {
+        id: project.id,
+        slug: project.slug,
+        name: project.name,
+        owner_user_id: project.owner_user_id,
+        repository_url: project.repository_url,
+        branch: project.branch,
+        created_at: project.created_at,
+        updated_at: project.updated_at,
     }
 }
 
@@ -369,6 +572,13 @@ impl From<StoreError> for ApiError {
     }
 }
 
+impl From<ProjectValidationError> for ApiError {
+    /// Preserves project validation categories for stable client error mapping.
+    fn from(error: ProjectValidationError) -> Self {
+        Self::ProjectValidation(error)
+    }
+}
+
 impl IntoResponse for ApiError {
     /// Converts internal failures to stable status codes without leaking sensitive details.
     fn into_response(self) -> Response {
@@ -403,6 +613,24 @@ impl IntoResponse for ApiError {
                 "forbidden",
                 "You do not have permission to perform this action.",
             ),
+            Self::ProjectValidation(ProjectValidationError::InvalidSlug) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_project_slug",
+                "Use 2-63 lowercase letters, numbers, or hyphens for the slug.",
+            ),
+            Self::ProjectValidation(ProjectValidationError::InvalidRepositoryUrl) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_repository_url",
+                "Use a valid HTTPS or SSH repository URL without embedded credentials.",
+            ),
+            Self::ProjectValidation(ProjectValidationError::PrivateRepositoryHost) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "private_repository_host",
+                "Repository URLs cannot target localhost or private IP addresses.",
+            ),
+            Self::InvalidProjectField(message) => {
+                (StatusCode::UNPROCESSABLE_ENTITY, "invalid_project", message)
+            }
             Self::Store(StoreError::EmailAlreadyExists)
             | Self::Auth(AuthError::Store(StoreError::EmailAlreadyExists)) => (
                 StatusCode::CONFLICT,
@@ -420,6 +648,18 @@ impl IntoResponse for ApiError {
                 StatusCode::NOT_FOUND,
                 "user_not_found",
                 "The requested user does not exist.",
+            ),
+            Self::Store(StoreError::ProjectSlugAlreadyExists)
+            | Self::Auth(AuthError::Store(StoreError::ProjectSlugAlreadyExists)) => (
+                StatusCode::CONFLICT,
+                "project_slug_exists",
+                "A project with that slug already exists.",
+            ),
+            Self::Store(StoreError::ProjectNotFound)
+            | Self::Auth(AuthError::Store(StoreError::ProjectNotFound)) => (
+                StatusCode::NOT_FOUND,
+                "project_not_found",
+                "The requested project does not exist.",
             ),
             Self::Store(StoreError::InvalidRole(_))
             | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (
@@ -736,5 +976,108 @@ mod tests {
             .await
             .expect("request completes");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+    }
+
+    /// Proves an authenticated member can create, read, update, and delete a project.
+    #[tokio::test]
+    async fn project_crud_requires_session_and_csrf() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let issued = issue_bootstrap_token(&store, Duration::minutes(5))
+            .await
+            .expect("token issues");
+        create_first_admin(
+            &store,
+            &issued.token,
+            "admin@example.com",
+            "correct horse battery staple".to_owned(),
+        )
+        .await
+        .expect("admin is created");
+        let session = login(
+            &store,
+            "admin@example.com",
+            "correct horse battery staple".to_owned(),
+            Duration::hours(1),
+        )
+        .await
+        .expect("admin logs in");
+        let cookie = format!("depot_session={}", session.token);
+        let app = router(store);
+
+        let create = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/projects")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", &session.csrf_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "slug": "first-project",
+                            "name": "First project",
+                            "repository_url": "https://github.com/example/project.git",
+                            "branch": "main"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(create.status(), StatusCode::CREATED);
+        let project = json_body(create).await;
+        let project_id = project["id"].as_str().expect("project has id");
+
+        let update = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PATCH")
+                    .uri(format!("/api/v1/projects/{project_id}"))
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", &session.csrf_token)
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "name": "Updated project",
+                            "repository_url": "https://github.com/example/project.git",
+                            "branch": "stable"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(json_body(update).await["branch"], "stable");
+
+        let list = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/projects")
+                    .header(header::COOKIE, &cookie)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(json_body(list).await.as_array().map(Vec::len), Some(1));
+
+        let delete = app
+            .oneshot(
+                Request::builder()
+                    .method("DELETE")
+                    .uri(format!("/api/v1/projects/{project_id}"))
+                    .header(header::COOKIE, cookie)
+                    .header("x-csrf-token", session.csrf_token)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(delete.status(), StatusCode::NO_CONTENT);
     }
 }

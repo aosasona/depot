@@ -4,7 +4,7 @@ use std::{str::FromStr, time::Duration};
 
 use sqlx::{
     Row, Sqlite, SqlitePool, Transaction,
-    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
+    sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteRow},
 };
 use thiserror::Error;
 use uuid::Uuid;
@@ -96,6 +96,30 @@ pub struct NewUser<'a> {
     pub now_unix: i64,
 }
 
+/// Non-secret project fields shared by API and worker boundaries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectSummary {
+    pub id: String,
+    pub slug: String,
+    pub name: String,
+    pub owner_user_id: String,
+    pub repository_url: String,
+    pub branch: String,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Validated data required to create a project.
+#[derive(Debug)]
+pub struct NewProject<'a> {
+    pub slug: &'a str,
+    pub name: &'a str,
+    pub owner_user_id: &'a str,
+    pub repository_url: &'a str,
+    pub branch: &'a str,
+    pub now_unix: i64,
+}
+
 /// Durable access to Depot's SQLite database.
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -123,6 +147,10 @@ pub enum StoreError {
     LastActiveAdmin,
     #[error("the requested user does not exist")]
     UserNotFound,
+    #[error("a project with that slug already exists")]
+    ProjectSlugAlreadyExists,
+    #[error("the requested project does not exist")]
+    ProjectNotFound,
 }
 
 impl Store {
@@ -386,6 +414,146 @@ impl Store {
         })
     }
 
+    /// Lists all projects in the shared v0.1 workspace by recent creation.
+    pub async fn list_projects(&self) -> Result<Vec<ProjectSummary>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, slug, name, owner_user_id, repository_url, branch,
+                    created_at, updated_at
+             FROM projects ORDER BY created_at DESC, name",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(project_from_row).collect()
+    }
+
+    /// Loads one project by opaque identifier.
+    pub async fn project_by_id(&self, project_id: &str) -> Result<ProjectSummary, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, slug, name, owner_user_id, repository_url, branch,
+                    created_at, updated_at
+             FROM projects WHERE id = ?",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::ProjectNotFound)?;
+        project_from_row(row)
+    }
+
+    /// Creates a project and an audit event in one transaction.
+    pub async fn create_project(
+        &self,
+        input: NewProject<'_>,
+    ) -> Result<ProjectSummary, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE slug = ?")
+            .bind(input.slug)
+            .fetch_one(&mut *transaction)
+            .await?;
+        if exists > 0 {
+            return Err(StoreError::ProjectSlugAlreadyExists);
+        }
+        let id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO projects
+             (id, slug, name, owner_user_id, repository_url, branch, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(input.slug)
+        .bind(input.name)
+        .bind(input.owner_user_id)
+        .bind(input.repository_url)
+        .bind(input.branch)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        insert_project_audit(
+            &mut transaction,
+            input.owner_user_id,
+            "project.create",
+            &id,
+            input.now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(ProjectSummary {
+            id,
+            slug: input.slug.to_owned(),
+            name: input.name.to_owned(),
+            owner_user_id: input.owner_user_id.to_owned(),
+            repository_url: input.repository_url.to_owned(),
+            branch: input.branch.to_owned(),
+            created_at: input.now_unix,
+            updated_at: input.now_unix,
+        })
+    }
+
+    /// Updates mutable project metadata while retaining stable ownership and identity.
+    pub async fn update_project(
+        &self,
+        project_id: &str,
+        name: &str,
+        repository_url: &str,
+        branch: &str,
+        actor_user_id: &str,
+        now_unix: i64,
+    ) -> Result<ProjectSummary, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE projects SET name = ?, repository_url = ?, branch = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(name)
+        .bind(repository_url)
+        .bind(branch)
+        .bind(now_unix)
+        .bind(project_id)
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::ProjectNotFound);
+        }
+        insert_project_audit(
+            &mut transaction,
+            actor_user_id,
+            "project.update",
+            project_id,
+            now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        self.project_by_id(project_id).await
+    }
+
+    /// Deletes a project which has no retained deployment children and records the action.
+    pub async fn delete_project(
+        &self,
+        project_id: &str,
+        actor_user_id: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query("DELETE FROM projects WHERE id = ?")
+            .bind(project_id)
+            .execute(&mut *transaction)
+            .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::ProjectNotFound);
+        }
+        insert_project_audit(
+            &mut transaction,
+            actor_user_id,
+            "project.delete",
+            project_id,
+            now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Replaces any unused token with one newly issued by an explicit setup command.
     pub async fn replace_bootstrap_token(
         &self,
@@ -487,6 +655,41 @@ async fn insert_user_audit(
     .bind(actor_user_id)
     .bind(action)
     .bind(target_user_id)
+    .bind(now_unix)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
+/// Converts a selected SQLite project row into its domain representation.
+fn project_from_row(row: SqliteRow) -> Result<ProjectSummary, StoreError> {
+    Ok(ProjectSummary {
+        id: row.try_get("id")?,
+        slug: row.try_get("slug")?,
+        name: row.try_get("name")?,
+        owner_user_id: row.try_get("owner_user_id")?,
+        repository_url: row.try_get("repository_url")?,
+        branch: row.try_get("branch")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
+/// Appends a project lifecycle audit event inside the caller's transaction.
+async fn insert_project_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    actor_user_id: &str,
+    action: &str,
+    project_id: &str,
+    now_unix: i64,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO audit_log (actor_user_id, action, target_type, target_id, created_at)
+         VALUES (?, ?, 'project', ?, ?)",
+    )
+    .bind(actor_user_id)
+    .bind(action)
+    .bind(project_id)
     .bind(now_unix)
     .execute(&mut **transaction)
     .await?;

@@ -53,6 +53,68 @@ pub enum ConfigError {
     InvalidPublicOrigin,
 }
 
+/// Validation failures for project identity and Git source configuration.
+#[derive(Debug, Error, Eq, PartialEq)]
+pub enum ProjectValidationError {
+    #[error("project slug must contain 2-63 lowercase letters, numbers, or hyphens")]
+    InvalidSlug,
+    #[error("repository URL must use https or ssh and include a public host")]
+    InvalidRepositoryUrl,
+    #[error("repository URL cannot target localhost or a private IP address")]
+    PrivateRepositoryHost,
+}
+
+/// Validates a stable project slug suitable for database and filesystem identity.
+pub fn validate_project_slug(slug: &str) -> Result<(), ProjectValidationError> {
+    let valid_length = (2..=63).contains(&slug.len());
+    let valid_edges = !slug.starts_with('-') && !slug.ends_with('-');
+    let valid_chars = slug
+        .bytes()
+        .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-');
+    if valid_length && valid_edges && valid_chars {
+        Ok(())
+    } else {
+        Err(ProjectValidationError::InvalidSlug)
+    }
+}
+
+/// Rejects unsafe Git URLs before any worker attempts an outbound connection.
+pub fn validate_repository_url(value: &str) -> Result<(), ProjectValidationError> {
+    let url = Url::parse(value).map_err(|_| ProjectValidationError::InvalidRepositoryUrl)?;
+    let valid_username = url.username().is_empty()
+        || (url.scheme() == "ssh" && url.username().eq_ignore_ascii_case("git"));
+    if !matches!(url.scheme(), "https" | "ssh")
+        || url.host_str().is_none()
+        || !valid_username
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(ProjectValidationError::InvalidRepositoryUrl);
+    }
+    let host = url.host_str().expect("host presence checked");
+    if host.eq_ignore_ascii_case("localhost") || host.ends_with(".localhost") {
+        return Err(ProjectValidationError::PrivateRepositoryHost);
+    }
+    if let Ok(address) = host.parse::<std::net::IpAddr>() {
+        let is_private = match address {
+            std::net::IpAddr::V4(address) => {
+                address.is_private()
+                    || address.is_loopback()
+                    || address.is_link_local()
+                    || address.is_unspecified()
+            }
+            std::net::IpAddr::V6(address) => {
+                address.is_loopback() || address.is_unspecified() || address.is_unique_local()
+            }
+        };
+        if is_private {
+            return Err(ProjectValidationError::PrivateRepositoryHost);
+        }
+    }
+    Ok(())
+}
+
 impl Config {
     /// Loads strict TOML and validates security-sensitive values before startup.
     pub fn load(path: &Path) -> Result<Self, ConfigError> {
@@ -103,7 +165,9 @@ impl Config {
 
 #[cfg(test)]
 mod tests {
-    use super::{Config, ConfigError};
+    use super::{
+        Config, ConfigError, ProjectValidationError, validate_project_slug, validate_repository_url,
+    };
 
     /// Ensures the built-in development configuration satisfies all validation.
     #[test]
@@ -133,5 +197,34 @@ mod tests {
             config.validate(),
             Err(ConfigError::InvalidDatabaseUrl)
         ));
+    }
+
+    /// Ensures project slugs remain safe across URLs, SQLite, and release paths.
+    #[test]
+    fn project_slug_rejects_path_like_values() {
+        validate_project_slug("my-service").expect("ordinary slug is valid");
+        assert_eq!(
+            validate_project_slug("../escape"),
+            Err(ProjectValidationError::InvalidSlug)
+        );
+        assert_eq!(
+            validate_project_slug("Uppercase"),
+            Err(ProjectValidationError::InvalidSlug)
+        );
+    }
+
+    /// Ensures repository validation blocks local network literals and credentials.
+    #[test]
+    fn repository_url_rejects_private_targets() {
+        validate_repository_url("https://github.com/example/project.git")
+            .expect("public HTTPS repository is valid");
+        assert_eq!(
+            validate_repository_url("https://127.0.0.1/repository.git"),
+            Err(ProjectValidationError::PrivateRepositoryHost)
+        );
+        assert_eq!(
+            validate_repository_url("https://user:secret@example.com/repository.git"),
+            Err(ProjectValidationError::InvalidRepositoryUrl)
+        );
     }
 }
