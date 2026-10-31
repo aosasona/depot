@@ -25,8 +25,22 @@ jobs:
       - run: pnpm --dir web install --frozen-lockfile
       - run: pnpm --dir web build
       - run: cargo build --locked --release -p depot
-      - run: cp target/release/depot depot-linux-x86_64
+      - name: Package guided installer
+        run: |
+          install -m 0755 target/release/depot depot-linux-x86_64
+          mkdir -p release-package/scripts release-package/deploy/systemd
+          install -m 0755 depot-linux-x86_64 release-package/depot-linux-x86_64
+          install -m 0755 scripts/install.sh scripts/setup.sh release-package/scripts/
+          install -m 0644 deploy/config.example.toml deploy/caddy-agent.example.toml release-package/deploy/
+          install -m 0644 deploy/systemd/*.service release-package/deploy/systemd/
+          tar -C release-package -czf depot-linux-x86_64.tar.gz .
+          cp scripts/setup.sh depot-setup.sh
+          sha256sum depot-linux-x86_64 depot-linux-x86_64.tar.gz depot-setup.sh > SHA256SUMS
       - uses: softprops/action-gh-release@v2
         with:
-          files: depot-linux-x86_64
+          files: |
+            depot-linux-x86_64
+            depot-linux-x86_64.tar.gz
+            depot-setup.sh
+            SHA256SUMS
           generate_release_notes: true

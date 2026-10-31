@@ -6,6 +6,39 @@ Proxmox host, not inside the Depot VM.
 
 ## 1. Prepare the VM
 
+### Guided installation (recommended)
+
+On a fresh server, use the interactive setup:
+
+```sh
+curl -fsSL https://github.com/aosasona/depot/releases/latest/download/depot-setup.sh | sudo sh
+```
+
+Choose **Depot VM**. The setup verifies Linux x86-64, systemd, download and
+checksum tools, SQLite, Git, and the Docker CLI/daemon. When a supported
+`apt`, `dnf`, or `yum` package manager is available, it lists missing
+dependencies and asks before installing them. It never changes firewall or DNS
+configuration. It then downloads the release package and `SHA256SUMS` from the
+same GitHub release, verifies the archive, installs the binary and units,
+creates the encryption key, gathers the minimum configuration, migrates and
+checks SQLite, and starts both services.
+
+The installed administration command provides the normal lifecycle:
+
+```sh
+sudo depot-setup check
+sudo depot-setup status
+sudo depot-setup restart
+sudo depot-setup update
+```
+
+An update preserves configuration, stops the API and worker, creates a dated
+pre-update backup under `/var/backups/depot`, verifies the new package, applies
+migrations, runs `doctor`, and starts only after those checks succeed. On a
+failed check it leaves the services stopped and prints the recovery location.
+
+### Manual installation
+
 Install Docker Engine and Git using the operating system or Docker's official
 packages. Verify the daemon before granting Depot access:
 
@@ -60,7 +93,20 @@ from the Caddy host. Do not expose the listener directly to the public internet.
 
 ## 2. Install the host Caddy agent
 
-On the Proxmox/Caddy host, run:
+The same guided command can configure the Caddy host. Choose **Caddy agent**:
+
+```sh
+curl -fsSL https://github.com/aosasona/depot/releases/latest/download/depot-setup.sh | sudo sh
+```
+
+It verifies Caddy and systemd, offers supported package installation when
+needed, prompts for the private listener, fixed Depot gateway, allowed domain
+suffixes, and shared token, and asks before appending the isolated
+`import depot/*.caddy` line. It backs up the operator-owned Caddyfile first and
+runs a complete Caddy validation without changing the current Depot route set.
+Manual Caddy records outside `/etc/caddy/depot/routes.caddy` remain untouched.
+
+For a manual agent installation on the Proxmox/Caddy host, run:
 
 ```sh
 chmod +x depot-linux-x86_64
@@ -116,6 +162,14 @@ route; it requires working public DNS/ACME reachability or an already issued
 certificate.
 
 ## 4. Update and rollback the Depot binary
+
+The recommended update is:
+
+```sh
+sudo depot-setup update
+```
+
+The manual equivalent follows.
 
 Keep the previous binary until the new version passes `doctor`. Stop the worker
 before replacing the executable so it cannot begin new deployment work midway

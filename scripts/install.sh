@@ -31,6 +31,8 @@ fi
 
 install -d -m 0755 "$stage/usr/local/bin" "$stage/etc/depot" "$stage/etc/systemd/system"
 install -m 0755 "$binary" "$stage/usr/local/bin/depot"
+install -d -m 0755 "$stage/usr/local/sbin"
+install -m 0755 "$repository_root/scripts/setup.sh" "$stage/usr/local/sbin/depot-setup"
 
 if [ "$mode" = "vm" ]; then
     install -d -m 0770 "$stage/var/lib/depot" "$stage/var/lib/depot/workspaces"

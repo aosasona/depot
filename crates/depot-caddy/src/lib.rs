@@ -142,6 +142,16 @@ pub async fn serve(config: CaddyAgentConfig) -> Result<(), CaddyError> {
     axum::serve(listener, app).await.map_err(CaddyError::Serve)
 }
 
+/// Validates agent policy and the complete operator-owned Caddy configuration.
+pub async fn check(config: &CaddyAgentConfig) -> Result<(), CaddyError> {
+    config.validate()?;
+    if run_caddy(config, "validate").await? {
+        Ok(())
+    } else {
+        Err(CaddyError::ValidationFailed)
+    }
+}
+
 /// Sends a complete desired-domain snapshot to one fixed private agent address.
 pub async fn send_snapshot(
     address: SocketAddr,
@@ -337,7 +347,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{CaddyAgentConfig, CaddyError, generate_routes, reconcile};
+    use super::{CaddyAgentConfig, CaddyError, check, generate_routes, reconcile};
 
     /// Builds a safe isolated configuration for pure generation tests.
     fn config() -> CaddyAgentConfig {
@@ -393,6 +403,34 @@ mod tests {
             &headers,
             "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
         ));
+    }
+
+    /// Proves a setup check validates Caddy without rewriting managed routes.
+    #[tokio::test]
+    async fn configuration_check_does_not_reconcile_routes() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("clock follows epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("depot-caddy-check-{nonce}"));
+        let managed_directory = root.join("managed");
+        fs::create_dir_all(&managed_directory).expect("managed directory is created");
+        let routes = managed_directory.join("routes.caddy");
+        fs::write(&routes, "manual test sentinel").expect("managed routes write");
+        let fake_caddy = root.join("fake-caddy");
+        fs::write(&fake_caddy, "#!/bin/sh\nexit 0\n").expect("fake Caddy writes");
+        fs::set_permissions(&fake_caddy, fs::Permissions::from_mode(0o700))
+            .expect("fake Caddy is executable");
+        let mut config = config();
+        config.managed_directory = managed_directory;
+        config.caddyfile = root.join("Caddyfile");
+        config.caddy_binary = fake_caddy.to_string_lossy().into_owned();
+        check(&config).await.expect("configuration checks");
+        assert_eq!(
+            fs::read_to_string(routes).expect("managed routes read"),
+            "manual test sentinel"
+        );
+        fs::remove_dir_all(root).expect("test root is removed");
     }
 
     /// Proves a failed reload restores the exact previously managed route file.

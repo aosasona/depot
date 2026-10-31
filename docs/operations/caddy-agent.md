@@ -6,6 +6,18 @@ Caddy configuration, reloads Caddy, and restores the previous generated file
 when validation or reload fails. It never accepts an upstream address from a
 project or reconciliation request.
 
+For the simplest install, run the guided setup and choose **Caddy agent**:
+
+```sh
+curl -fsSL https://github.com/aosasona/depot/releases/latest/download/depot-setup.sh | sudo sh
+```
+
+It checks or offers to install dependencies, verifies the downloaded release,
+collects the configuration, safely adds the isolated import with a backup, and
+starts the agent. Later use `sudo depot-setup check` or
+`sudo depot-setup update`. The manual procedure below remains available for
+custom packaging and automation.
+
 ## Trust model
 
 - Bind the agent only to a host-only VPN or private management address.

@@ -102,6 +102,9 @@ enum Command {
         /// JSON file containing the complete desired hostname array.
         #[arg(long)]
         domains_file: Option<PathBuf>,
+        /// Validates agent configuration and the full Caddyfile, then exits.
+        #[arg(long, conflicts_with = "domains_file")]
+        check: bool,
     },
 }
 
@@ -182,7 +185,8 @@ async fn main() -> Result<(), AppError> {
         Command::CaddyAgent {
             config,
             domains_file,
-        } => caddy_agent(&config, domains_file.as_deref()).await,
+            check,
+        } => caddy_agent(&config, domains_file.as_deref(), check).await,
     }
 }
 
@@ -225,8 +229,17 @@ async fn create_deploy_token(
 }
 
 /// Applies one complete desired-domain snapshot through the restricted host reconciler.
-async fn caddy_agent(config_path: &Path, domains_file: Option<&Path>) -> Result<(), AppError> {
+async fn caddy_agent(
+    config_path: &Path,
+    domains_file: Option<&Path>,
+    check: bool,
+) -> Result<(), AppError> {
     let config = depot_caddy::CaddyAgentConfig::load(config_path)?;
+    if check {
+        depot_caddy::check(&config).await?;
+        println!("Depot Caddy agent configuration is valid.");
+        return Ok(());
+    }
     if let Some(domains_file) = domains_file {
         let source = std::fs::read_to_string(domains_file).map_err(AppError::DomainsRead)?;
         let domains: Vec<String> = serde_json::from_str(&source).map_err(AppError::DomainsParse)?;

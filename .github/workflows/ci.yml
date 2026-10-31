@@ -34,10 +34,13 @@ jobs:
       - name: Verify installation package
         run: |
           sh -n scripts/install.sh
+          sh -n scripts/setup.sh
+          scripts/setup.sh --help >/dev/null
           install_root="${RUNNER_TEMP}/depot-install"
           DESTDIR="${install_root}" ./scripts/install.sh vm target/release/depot
           DESTDIR="${install_root}" ./scripts/install.sh caddy-agent target/release/depot
           test -x "${install_root}/usr/local/bin/depot"
+          test -x "${install_root}/usr/local/sbin/depot-setup"
           test -f "${install_root}/etc/systemd/system/depot.service"
           test -f "${install_root}/etc/systemd/system/depot-worker.service"
           test -f "${install_root}/etc/systemd/system/depot-caddy-agent.service"

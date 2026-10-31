@@ -13,6 +13,28 @@ can also trigger exact-commit deployments with a project-scoped bearer token.
 
 ## Quick start: main Depot binary
 
+For a guided production install on a fresh Debian/Ubuntu or Fedora-family
+server, run:
+
+```sh
+curl -fsSL https://github.com/aosasona/depot/releases/latest/download/depot-setup.sh | sudo sh
+```
+
+The setup checks systemd and role-specific dependencies, offers to install
+missing packages, downloads the latest release archive, verifies its SHA-256
+checksum, writes a new configuration interactively, runs migrations and
+diagnostics, and enables the services. It installs `depot-setup` for subsequent
+checks and updates:
+
+```sh
+sudo depot-setup check
+sudo depot-setup update
+sudo depot-setup status
+```
+
+Choose the Depot VM role here. Run the same command on the Caddy host and choose
+the Caddy-agent role. Existing configuration is preserved during updates.
+
 ### 1. Install build and runtime prerequisites
 
 The build machine needs Rust 1.91 or newer, Node.js, pnpm, and `just`. The Depot
