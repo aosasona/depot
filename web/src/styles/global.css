@@ -244,6 +244,103 @@ h1 {
   border: 1px solid var(--border);
   background: var(--bg);
 }
+.projects-panel {
+  width: min(1100px, 90vw);
+  margin: 2rem auto;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.project-form {
+  display: grid;
+  grid-template-columns: 1fr 0.8fr 2fr 0.6fr auto;
+  gap: 1px;
+  padding: 1px;
+  border-bottom: 1px solid var(--border);
+  background: var(--border);
+}
+.project-form input {
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 0.8rem;
+  border: 0;
+  background: var(--surface);
+  color: var(--text);
+}
+.project-form .primary-action {
+  min-height: 48px;
+  margin: 0;
+  padding: 0 1rem;
+}
+.project-form .notice {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.panel-message {
+  margin: 0;
+  padding: 2rem;
+  color: var(--muted);
+}
+.empty-state {
+  display: grid;
+  gap: 0.6rem;
+  padding: 3rem 2rem;
+  color: var(--muted);
+}
+.empty-state strong {
+  color: var(--text);
+  font-size: 1.5rem;
+}
+.project-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+.project-card {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1.2rem;
+  padding: 1.5rem;
+  border-right: 1px solid var(--border);
+  border-bottom: 1px solid var(--border);
+}
+.project-index {
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  background: var(--accent);
+  color: var(--accent-foreground);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-weight: 900;
+}
+.project-card h3 {
+  margin: 0;
+  font-size: 1.2rem;
+}
+.project-card p {
+  overflow: hidden;
+  margin: 0.45rem 0 0;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-card dl {
+  display: flex;
+  grid-column: 2;
+  gap: 2rem;
+  margin: 0.8rem 0 0;
+}
+.project-card dt {
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.62rem;
+  text-transform: uppercase;
+}
+.project-card dd {
+  margin: 0.25rem 0 0;
+  font-size: 0.78rem;
+}
 .section-heading {
   display: flex;
   align-items: flex-end;
@@ -360,6 +457,13 @@ td {
   }
   .create-user-grid {
     grid-template-columns: 1fr;
+  }
+  .project-form,
+  .project-grid {
+    grid-template-columns: 1fr;
+  }
+  .project-card {
+    border-right: 0;
   }
 }
 @media (prefers-reduced-motion: reduce) {

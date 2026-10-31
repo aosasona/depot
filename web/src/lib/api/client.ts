@@ -13,9 +13,20 @@ const adminUserSchema = userSchema.extend({
   active: z.boolean(),
   created_at: z.number(),
 });
+const projectSchema = z.object({
+  id: z.string(),
+  slug: z.string(),
+  name: z.string(),
+  owner_user_id: z.string(),
+  repository_url: z.string(),
+  branch: z.string(),
+  created_at: z.number(),
+  updated_at: z.number(),
+});
 
 export type User = z.infer<typeof userSchema>;
 export type AdminUser = z.infer<typeof adminUserSchema>;
+export type Project = z.infer<typeof projectSchema>;
 
 /** Represents a safe API failure suitable for inline UI feedback. */
 export class ApiError extends Error {
@@ -140,5 +151,24 @@ export function updateUser(input: {
     method: "PATCH",
     headers: csrfHeaders(),
     body: JSON.stringify({ role: input.role, active: input.active }),
+  });
+}
+
+/** Lists projects visible in the shared v0.1 workspace. */
+export function listProjects() {
+  return request("/api/v1/projects", z.array(projectSchema));
+}
+
+/** Creates a project from validated Git repository metadata. */
+export function createProject(input: {
+  slug: string;
+  name: string;
+  repository_url: string;
+  branch: string;
+}) {
+  return request("/api/v1/projects", projectSchema, {
+    method: "POST",
+    headers: csrfHeaders(),
+    body: JSON.stringify(input),
   });
 }
