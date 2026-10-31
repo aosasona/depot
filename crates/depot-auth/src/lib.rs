@@ -4,7 +4,9 @@ use argon2::{
     Algorithm, Argon2, Params, Version,
     password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
 };
-use depot_store::{BootstrapAdmin, NewSession, SessionUser, Store, StoreError};
+use depot_store::{
+    BootstrapAdmin, NewSession, NewUser, SessionUser, Store, StoreError, UserRole, UserSummary,
+};
 use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -90,6 +92,33 @@ pub async fn create_first_admin(
             email: &email,
             password_hash: &password_hash,
             token_hash: &token_hash,
+            now_unix: OffsetDateTime::now_utc().unix_timestamp(),
+        })
+        .await
+        .map_err(AuthError::from)
+}
+
+/// Validates and hashes credentials before an administrator creates a local account.
+pub async fn create_managed_user(
+    store: &Store,
+    actor_user_id: &str,
+    email: &str,
+    password: String,
+    role: UserRole,
+) -> Result<UserSummary, AuthError> {
+    let email = normalize_email(email)?;
+    if password.chars().count() < MINIMUM_PASSWORD_LENGTH {
+        return Err(AuthError::WeakPassword);
+    }
+    let password_hash = tokio::task::spawn_blocking(move || hash_password(&password))
+        .await
+        .map_err(|_| AuthError::PasswordHash)??;
+    store
+        .create_user(NewUser {
+            email: &email,
+            password_hash: &password_hash,
+            role,
+            actor_user_id,
             now_unix: OffsetDateTime::now_utc().unix_timestamp(),
         })
         .await

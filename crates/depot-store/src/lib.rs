@@ -20,7 +20,7 @@ pub enum UserRole {
 
 impl UserRole {
     /// Parses the database representation while rejecting unknown privilege values.
-    fn from_database(value: &str) -> Result<Self, StoreError> {
+    pub fn parse(value: &str) -> Result<Self, StoreError> {
         match value {
             "admin" => Ok(Self::Admin),
             "member" => Ok(Self::Member),
@@ -76,6 +76,26 @@ pub struct NewSession<'a> {
     pub now_unix: i64,
 }
 
+/// Non-secret user fields returned by administration queries.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserSummary {
+    pub id: String,
+    pub email: String,
+    pub role: UserRole,
+    pub active: bool,
+    pub created_at: i64,
+}
+
+/// Validated local user data ready for durable insertion.
+#[derive(Debug)]
+pub struct NewUser<'a> {
+    pub email: &'a str,
+    pub password_hash: &'a str,
+    pub role: UserRole,
+    pub actor_user_id: &'a str,
+    pub now_unix: i64,
+}
+
 /// Durable access to Depot's SQLite database.
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -97,6 +117,12 @@ pub enum StoreError {
     InvalidBootstrapToken,
     #[error("database contains an unsupported user role: {0}")]
     InvalidRole(String),
+    #[error("a user with that email already exists")]
+    EmailAlreadyExists,
+    #[error("the last active administrator cannot be demoted or disabled")]
+    LastActiveAdmin,
+    #[error("the requested user does not exist")]
+    UserNotFound,
 }
 
 impl Store {
@@ -153,7 +179,7 @@ impl Store {
                 id: row.try_get("id")?,
                 email: row.try_get("email")?,
                 password_hash: row.try_get("password_hash")?,
-                role: UserRole::from_database(&role)?,
+                role: UserRole::parse(&role)?,
             })
         })
         .transpose()
@@ -208,7 +234,7 @@ impl Store {
                 SessionUser {
                     id: row.try_get("id")?,
                     email: row.try_get("email")?,
-                    role: UserRole::from_database(&role)?,
+                    role: UserRole::parse(&role)?,
                 },
                 row.try_get("csrf_hash")?,
             ))
@@ -227,6 +253,129 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Lists users in stable creation order without exposing credential fields.
+    pub async fn list_users(&self) -> Result<Vec<UserSummary>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT id, email, role, active, created_at FROM users ORDER BY created_at, email",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let role: String = row.try_get("role")?;
+                Ok(UserSummary {
+                    id: row.try_get("id")?,
+                    email: row.try_get("email")?,
+                    role: UserRole::parse(&role)?,
+                    active: row.try_get::<i64, _>("active")? != 0,
+                    created_at: row.try_get("created_at")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Creates a local account and its audit event in one transaction.
+    pub async fn create_user(&self, input: NewUser<'_>) -> Result<UserSummary, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE email = ?")
+            .bind(input.email)
+            .fetch_one(&mut *transaction)
+            .await?;
+        if exists > 0 {
+            return Err(StoreError::EmailAlreadyExists);
+        }
+        let id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, role, active, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 1, ?, ?)",
+        )
+        .bind(&id)
+        .bind(input.email)
+        .bind(input.password_hash)
+        .bind(input.role.as_str())
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        insert_user_audit(
+            &mut transaction,
+            input.actor_user_id,
+            "user.create",
+            &id,
+            input.now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(UserSummary {
+            id,
+            email: input.email.to_owned(),
+            role: input.role,
+            active: true,
+            created_at: input.now_unix,
+        })
+    }
+
+    /// Updates role and activation while preserving at least one active administrator.
+    pub async fn update_user(
+        &self,
+        user_id: &str,
+        role: UserRole,
+        active: bool,
+        actor_user_id: &str,
+        now_unix: i64,
+    ) -> Result<UserSummary, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let row = sqlx::query("SELECT email, role, active, created_at FROM users WHERE id = ?")
+            .bind(user_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StoreError::UserNotFound)?;
+        let old_role = UserRole::parse(&row.try_get::<String, _>("role")?)?;
+        let old_active = row.try_get::<i64, _>("active")? != 0;
+        if old_role == UserRole::Admin && old_active && (role != UserRole::Admin || !active) {
+            let admin_count = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1",
+            )
+            .fetch_one(&mut *transaction)
+            .await?;
+            if admin_count <= 1 {
+                return Err(StoreError::LastActiveAdmin);
+            }
+        }
+        sqlx::query("UPDATE users SET role = ?, active = ?, updated_at = ? WHERE id = ?")
+            .bind(role.as_str())
+            .bind(active)
+            .bind(now_unix)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await?;
+        if !active {
+            sqlx::query(
+                "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+            )
+            .bind(now_unix)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        insert_user_audit(
+            &mut transaction,
+            actor_user_id,
+            "user.update",
+            user_id,
+            now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(UserSummary {
+            id: user_id.to_owned(),
+            email: row.try_get("email")?,
+            role,
+            active,
+            created_at: row.try_get("created_at")?,
+        })
     }
 
     /// Replaces any unused token with one newly issued by an explicit setup command.
@@ -315,9 +464,30 @@ async fn ensure_uninitialized(transaction: &mut Transaction<'_, Sqlite>) -> Resu
     Ok(())
 }
 
+/// Appends a user-management audit event inside the caller's transaction.
+async fn insert_user_audit(
+    transaction: &mut Transaction<'_, Sqlite>,
+    actor_user_id: &str,
+    action: &str,
+    target_user_id: &str,
+    now_unix: i64,
+) -> Result<(), StoreError> {
+    sqlx::query(
+        "INSERT INTO audit_log (actor_user_id, action, target_type, target_id, created_at)
+         VALUES (?, ?, 'user', ?, ?)",
+    )
+    .bind(actor_user_id)
+    .bind(action)
+    .bind(target_user_id)
+    .bind(now_unix)
+    .execute(&mut **transaction)
+    .await?;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{BootstrapAdmin, Store, StoreError};
+    use super::{BootstrapAdmin, NewUser, Store, StoreError, UserRole};
 
     /// Proves a setup token can initialize an instance exactly once.
     #[tokio::test]
@@ -365,5 +535,46 @@ mod tests {
             .await
             .expect_err("expired token is rejected");
         assert!(matches!(error, StoreError::InvalidBootstrapToken));
+    }
+
+    /// Proves an instance can never lose its final active administrator.
+    #[tokio::test]
+    async fn last_active_admin_cannot_be_disabled_or_demoted() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let token_hash = [1_u8; 32];
+        store
+            .replace_bootstrap_token(&token_hash, 200, 100)
+            .await
+            .expect("token is created");
+        let admin_id = store
+            .create_first_admin(BootstrapAdmin {
+                email: "admin@example.com",
+                password_hash: "password hash",
+                token_hash: &token_hash,
+                now_unix: 150,
+            })
+            .await
+            .expect("admin is created");
+        let error = store
+            .update_user(&admin_id, UserRole::Member, true, &admin_id, 160)
+            .await
+            .expect_err("last admin is protected");
+        assert!(matches!(error, StoreError::LastActiveAdmin));
+
+        store
+            .create_user(NewUser {
+                email: "second@example.com",
+                password_hash: "password hash",
+                role: UserRole::Admin,
+                actor_user_id: &admin_id,
+                now_unix: 170,
+            })
+            .await
+            .expect("second admin is created");
+        let updated = store
+            .update_user(&admin_id, UserRole::Member, true, &admin_id, 180)
+            .await
+            .expect("admin can be demoted when another remains");
+        assert_eq!(updated.role, UserRole::Member);
     }
 }

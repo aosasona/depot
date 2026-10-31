@@ -12,10 +12,10 @@ use axum_extra::extract::{
     cookie::{Cookie, SameSite},
 };
 use depot_auth::{
-    AuthError, authenticate_session, create_first_admin, login as authenticate_login,
-    logout as revoke_login,
+    AuthError, authenticate_session, create_first_admin, create_managed_user,
+    login as authenticate_login, logout as revoke_login, validate_csrf,
 };
-use depot_store::{SessionUser, Store, StoreError};
+use depot_store::{SessionUser, Store, StoreError, UserRole, UserSummary};
 use serde::{Deserialize, Serialize};
 use tracing::error;
 
@@ -65,6 +65,31 @@ struct UserResponse {
     role: &'static str,
 }
 
+/// User administration representation without password or session fields.
+#[derive(Debug, Serialize)]
+struct AdminUserResponse {
+    id: String,
+    email: String,
+    role: &'static str,
+    active: bool,
+    created_at: i64,
+}
+
+/// Admin-only request for creating a local account with an initial password.
+#[derive(Debug, Deserialize)]
+struct CreateUserRequest {
+    email: String,
+    password: String,
+    role: String,
+}
+
+/// Admin-only mutable fields supported for an existing account.
+#[derive(Debug, Deserialize)]
+struct UpdateUserRequest {
+    role: String,
+    active: bool,
+}
+
 /// Stable JSON error shape shared by all API endpoints.
 #[derive(Debug, Serialize)]
 struct ErrorEnvelope {
@@ -83,6 +108,7 @@ struct ErrorBody {
 enum ApiError {
     Auth(AuthError),
     Store(StoreError),
+    Forbidden,
 }
 
 /// Builds the versioned authentication routes backed by the supplied store.
@@ -95,6 +121,8 @@ pub fn router(store: Store) -> Router {
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/me", get(current_user))
+        .route("/api/v1/users", get(list_users).post(create_user))
+        .route("/api/v1/users/{user_id}", axum::routing::patch(update_user))
         .with_state(ApiState { store })
 }
 
@@ -193,6 +221,97 @@ fn user_response(user: SessionUser) -> UserResponse {
     }
 }
 
+/// Lists local accounts for active administrators only.
+async fn list_users(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+) -> Result<Json<Vec<AdminUserResponse>>, ApiError> {
+    require_admin(&state.store, &jar).await?;
+    let users = state.store.list_users().await?;
+    Ok(Json(users.into_iter().map(admin_user_response).collect()))
+}
+
+/// Creates a local account after both session-role and CSRF verification.
+async fn create_user(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Json(request): Json<CreateUserRequest>,
+) -> Result<(StatusCode, Json<AdminUserResponse>), ApiError> {
+    let actor = require_admin_mutation(&state.store, &jar, &headers).await?;
+    let role = UserRole::parse(&request.role)?;
+    let user = create_managed_user(
+        &state.store,
+        &actor.id,
+        &request.email,
+        request.password,
+        role,
+    )
+    .await?;
+    Ok((StatusCode::CREATED, Json(admin_user_response(user))))
+}
+
+/// Changes role or activation while retaining the last active administrator.
+async fn update_user(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(user_id): axum::extract::Path<String>,
+    Json(request): Json<UpdateUserRequest>,
+) -> Result<Json<AdminUserResponse>, ApiError> {
+    let actor = require_admin_mutation(&state.store, &jar, &headers).await?;
+    let role = UserRole::parse(&request.role)?;
+    let user = state
+        .store
+        .update_user(
+            &user_id,
+            role,
+            request.active,
+            &actor.id,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(Json(admin_user_response(user)))
+}
+
+/// Requires an active authenticated administrator for a read operation.
+async fn require_admin(store: &Store, jar: &CookieJar) -> Result<SessionUser, ApiError> {
+    let user = authenticate_session(store, session_token(jar)?).await?;
+    if user.role != UserRole::Admin {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(user)
+}
+
+/// Requires administrator role and session-bound CSRF for a state change.
+async fn require_admin_mutation(
+    store: &Store,
+    jar: &CookieJar,
+    headers: &HeaderMap,
+) -> Result<SessionUser, ApiError> {
+    let token = session_token(jar)?;
+    let csrf_token = headers
+        .get(CSRF_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(AuthError::InvalidCsrf)?;
+    let user = validate_csrf(store, token, csrf_token).await?;
+    if user.role != UserRole::Admin {
+        return Err(ApiError::Forbidden);
+    }
+    Ok(user)
+}
+
+/// Maps a store user summary into the public administration contract.
+fn admin_user_response(user: UserSummary) -> AdminUserResponse {
+    AdminUserResponse {
+        id: user.id,
+        email: user.email,
+        role: user.role.as_str(),
+        active: user.active,
+        created_at: user.created_at,
+    }
+}
+
 /// Reports only whether setup remains available, without exposing token state.
 async fn bootstrap_status(
     State(state): State<ApiState>,
@@ -260,6 +379,35 @@ impl IntoResponse for ApiError {
                 "invalid_csrf",
                 "The request could not be verified.",
             ),
+            Self::Forbidden => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "You do not have permission to perform this action.",
+            ),
+            Self::Store(StoreError::EmailAlreadyExists)
+            | Self::Auth(AuthError::Store(StoreError::EmailAlreadyExists)) => (
+                StatusCode::CONFLICT,
+                "email_already_exists",
+                "A user with that email already exists.",
+            ),
+            Self::Store(StoreError::LastActiveAdmin)
+            | Self::Auth(AuthError::Store(StoreError::LastActiveAdmin)) => (
+                StatusCode::CONFLICT,
+                "last_active_admin",
+                "The last active administrator cannot be changed.",
+            ),
+            Self::Store(StoreError::UserNotFound)
+            | Self::Auth(AuthError::Store(StoreError::UserNotFound)) => (
+                StatusCode::NOT_FOUND,
+                "user_not_found",
+                "The requested user does not exist.",
+            ),
+            Self::Store(StoreError::InvalidRole(_))
+            | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_role",
+                "Choose a supported user role.",
+            ),
             Self::Auth(AuthError::Store(StoreError::AlreadyInitialized))
             | Self::Store(StoreError::AlreadyInitialized) => (
                 StatusCode::CONFLICT,
@@ -297,8 +445,8 @@ mod tests {
         body::Body,
         http::{Request, StatusCode, header},
     };
-    use depot_auth::{create_first_admin, issue_bootstrap_token};
-    use depot_store::Store;
+    use depot_auth::{create_first_admin, create_managed_user, issue_bootstrap_token, login};
+    use depot_store::{Store, UserRole};
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
     use time::Duration;
@@ -315,6 +463,17 @@ mod tests {
             .expect("response body reads")
             .to_bytes();
         serde_json::from_slice(&bytes).expect("response is JSON")
+    }
+
+    /// Converts response Set-Cookie fields into one request Cookie header.
+    fn request_cookie_header(response: &axum::response::Response) -> String {
+        response
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok()?.split(';').next())
+            .collect::<Vec<_>>()
+            .join("; ")
     }
 
     /// Proves setup status flips only after valid first-admin creation.
@@ -446,11 +605,7 @@ mod tests {
                 && value.contains("HttpOnly")
                 && value.contains("Secure")
         }));
-        let cookie_header = set_cookies
-            .iter()
-            .filter_map(|value| value.split(';').next())
-            .collect::<Vec<_>>()
-            .join("; ");
+        let cookie_header = request_cookie_header(&login);
         let csrf_token = set_cookies
             .iter()
             .find_map(|value| value.strip_prefix("depot_csrf="))
@@ -513,5 +668,54 @@ mod tests {
             .await
             .expect("request completes");
         assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Proves a valid member session cannot access administrator user APIs.
+    #[tokio::test]
+    async fn member_cannot_list_users() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let issued = issue_bootstrap_token(&store, Duration::minutes(5))
+            .await
+            .expect("token issues");
+        let admin_id = create_first_admin(
+            &store,
+            &issued.token,
+            "admin@example.com",
+            "correct horse battery staple".to_owned(),
+        )
+        .await
+        .expect("admin is created");
+        create_managed_user(
+            &store,
+            &admin_id,
+            "member@example.com",
+            "another correct battery staple".to_owned(),
+            UserRole::Member,
+        )
+        .await
+        .expect("member is created");
+        let member_session = login(
+            &store,
+            "member@example.com",
+            "another correct battery staple".to_owned(),
+            Duration::hours(1),
+        )
+        .await
+        .expect("member logs in");
+        let app = router(store);
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/users")
+                    .header(
+                        header::COOKIE,
+                        format!("depot_session={}", member_session.token),
+                    )
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
     }
 }
