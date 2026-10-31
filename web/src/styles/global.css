@@ -25,11 +25,13 @@ body {
   background: var(--bg);
 }
 button,
-input {
+input,
+select {
   font: inherit;
 }
 button:focus-visible,
 input:focus-visible,
+select:focus-visible,
 a:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 3px;
@@ -382,6 +384,62 @@ h1 {
   color: #f36c6c;
   font-size: 0.72rem;
 }
+.service-config {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 0.8rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+}
+.config-toggle {
+  justify-self: start;
+  min-height: 34px;
+  padding: 0 0.7rem;
+}
+.config-message {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.config-form {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 0.8rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.config-form label {
+  display: grid;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.config-form input,
+.config-form select {
+  min-width: 0;
+  min-height: 42px;
+  padding: 0 0.7rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+  color: var(--text);
+  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-size: 0.82rem;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.config-form .primary-action,
+.config-form .notice {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.notice.success {
+  border-color: #8edb91;
+  color: #8edb91;
+}
 .section-heading {
   display: flex;
   align-items: flex-end;
@@ -500,7 +558,8 @@ td {
     grid-template-columns: 1fr;
   }
   .project-form,
-  .project-grid {
+  .project-grid,
+  .config-form {
     grid-template-columns: 1fr;
   }
   .project-card {

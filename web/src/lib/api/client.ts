@@ -24,6 +24,17 @@ const projectSchema = z.object({
   updated_at: z.number(),
   latest_inspection_job_id: z.string().nullable(),
 });
+const serviceConfigSchema = z.object({
+  project_id: z.string(),
+  project_kind: z.enum(["auto", "service", "static"]),
+  builder: z.enum(["auto", "dockerfile", "railpack"]),
+  context_path: z.string(),
+  dockerfile_path: z.string(),
+  static_output_dir: z.string().nullable(),
+  exposed_port: z.number().int().nullable(),
+  healthcheck_path: z.string().nullable(),
+  updated_at: z.number(),
+});
 const inspectionResultSchema = z.object({
   commit_sha: z.string(),
   builder: z.enum(["dockerfile", "railpack", "static", "unknown"]),
@@ -55,6 +66,11 @@ export type User = z.infer<typeof userSchema>;
 export type AdminUser = z.infer<typeof adminUserSchema>;
 export type Project = z.infer<typeof projectSchema>;
 export type JobStatus = z.infer<typeof jobStatusSchema>;
+export type ServiceConfig = z.infer<typeof serviceConfigSchema>;
+export type ServiceConfigInput = Omit<
+  ServiceConfig,
+  "project_id" | "updated_at"
+>;
 
 /** Represents a safe API failure suitable for inline UI feedback. */
 export class ApiError extends Error {
@@ -213,4 +229,21 @@ export function inspectProject(projectId: string) {
 /** Returns durable state, structured inspection result, and ordered events. */
 export function getJobStatus(jobId: string) {
   return request(`/api/v1/jobs/${jobId}`, jobStatusSchema);
+}
+
+/** Loads one project's persisted build and runtime settings. */
+export function getServiceConfig(projectId: string) {
+  return request(`/api/v1/projects/${projectId}/config`, serviceConfigSchema);
+}
+
+/** Replaces one project's build and runtime settings after CSRF validation. */
+export function updateServiceConfig(
+  projectId: string,
+  input: ServiceConfigInput,
+) {
+  return request(`/api/v1/projects/${projectId}/config`, serviceConfigSchema, {
+    method: "PUT",
+    headers: csrfHeaders(),
+    body: JSON.stringify(input),
+  });
 }

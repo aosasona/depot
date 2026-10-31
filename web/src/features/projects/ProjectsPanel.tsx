@@ -10,6 +10,7 @@ import {
   listProjects,
   type Project,
 } from "../../lib/api/client";
+import { ServiceConfigForm } from "./ServiceConfigForm";
 
 const projectSchema = z.object({
   slug: z
@@ -220,6 +221,7 @@ function ProjectCard({ project }: { project: Project }) {
           <p className="inspection-error">{errorMessage(inspection.error)}</p>
         )}
       </div>
+      <ServiceConfigForm projectId={project.id} />
     </article>
   );
 }
