@@ -147,7 +147,9 @@ function NewProjectForm() {
 
 /** Displays repository metadata for one real project record. */
 function ProjectCard({ project }: { project: Project }) {
-  const [jobId, setJobId] = useState<string>();
+  const [jobId, setJobId] = useState<string | undefined>(
+    project.latest_inspection_job_id ?? undefined,
+  );
   const inspection = useMutation({
     mutationFn: () => inspectProject(project.id),
     onSuccess: (result) => setJobId(result.job_id),

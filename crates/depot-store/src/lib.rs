@@ -107,6 +107,7 @@ pub struct ProjectSummary {
     pub branch: String,
     pub created_at: i64,
     pub updated_at: i64,
+    pub latest_inspection_job_id: Option<String>,
 }
 
 /// Validated data required to create a project.
@@ -467,9 +468,12 @@ impl Store {
     /// Lists all projects in the shared v0.1 workspace by recent creation.
     pub async fn list_projects(&self) -> Result<Vec<ProjectSummary>, StoreError> {
         let rows = sqlx::query(
-            "SELECT id, slug, name, owner_user_id, repository_url, branch,
-                    created_at, updated_at
-             FROM projects ORDER BY created_at DESC, name",
+            "SELECT projects.id, slug, name, owner_user_id, repository_url, branch,
+                    projects.created_at, projects.updated_at,
+                    (SELECT jobs.id FROM jobs WHERE jobs.project_id = projects.id
+                     AND jobs.kind = 'inspect_repository'
+                     ORDER BY jobs.created_at DESC LIMIT 1) AS latest_inspection_job_id
+             FROM projects ORDER BY projects.created_at DESC, name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -479,9 +483,12 @@ impl Store {
     /// Loads one project by opaque identifier.
     pub async fn project_by_id(&self, project_id: &str) -> Result<ProjectSummary, StoreError> {
         let row = sqlx::query(
-            "SELECT id, slug, name, owner_user_id, repository_url, branch,
-                    created_at, updated_at
-             FROM projects WHERE id = ?",
+            "SELECT projects.id, slug, name, owner_user_id, repository_url, branch,
+                    projects.created_at, projects.updated_at,
+                    (SELECT jobs.id FROM jobs WHERE jobs.project_id = projects.id
+                     AND jobs.kind = 'inspect_repository'
+                     ORDER BY jobs.created_at DESC LIMIT 1) AS latest_inspection_job_id
+             FROM projects WHERE projects.id = ?",
         )
         .bind(project_id)
         .fetch_optional(&self.pool)
@@ -537,6 +544,7 @@ impl Store {
             branch: input.branch.to_owned(),
             created_at: input.now_unix,
             updated_at: input.now_unix,
+            latest_inspection_job_id: None,
         })
     }
 
@@ -914,6 +922,7 @@ fn project_from_row(row: SqliteRow) -> Result<ProjectSummary, StoreError> {
         branch: row.try_get("branch")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
+        latest_inspection_job_id: row.try_get("latest_inspection_job_id")?,
     })
 }
 

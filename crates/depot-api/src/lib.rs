@@ -112,6 +112,7 @@ struct ProjectResponse {
     branch: String,
     created_at: i64,
     updated_at: i64,
+    latest_inspection_job_id: Option<String>,
 }
 
 /// Authenticated request to create a project from a Git source.
@@ -517,6 +518,7 @@ fn project_response(project: ProjectSummary) -> ProjectResponse {
         branch: project.branch,
         created_at: project.created_at,
         updated_at: project.updated_at,
+        latest_inspection_job_id: project.latest_inspection_job_id,
     }
 }
 

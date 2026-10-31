@@ -1,6 +1,6 @@
 import { useForm } from "@tanstack/react-form";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useState, type ReactNode } from "react";
+import { type ReactNode, useState } from "react";
 import { z } from "zod";
 import {
   ApiError,
@@ -9,8 +9,8 @@ import {
   logout,
   type User,
 } from "../../lib/api/client";
-import { UsersPanel } from "../users/UsersPanel";
 import { ProjectsPanel } from "../projects/ProjectsPanel";
+import { UsersPanel } from "../users/UsersPanel";
 import { bootstrapStatusQuery, currentUserQuery } from "./queries";
 
 const setupSchema = z.object({

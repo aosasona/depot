@@ -1,8 +1,8 @@
 import {
-  Outlet,
   createRootRoute,
   createRoute,
   createRouter,
+  Outlet,
 } from "@tanstack/react-router";
 import { AuthEntryPage } from "../features/auth/AuthEntryPage";
 

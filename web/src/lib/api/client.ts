@@ -22,6 +22,7 @@ const projectSchema = z.object({
   branch: z.string(),
   created_at: z.number(),
   updated_at: z.number(),
+  latest_inspection_job_id: z.string().nullable(),
 });
 const inspectionResultSchema = z.object({
   commit_sha: z.string(),
