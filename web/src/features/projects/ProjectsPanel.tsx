@@ -5,6 +5,8 @@ import { z } from "zod";
 import {
   ApiError,
   createProject,
+  getJobStatus,
+  inspectProject,
   listProjects,
   type Project,
 } from "../../lib/api/client";
@@ -145,6 +147,20 @@ function NewProjectForm() {
 
 /** Displays repository metadata for one real project record. */
 function ProjectCard({ project }: { project: Project }) {
+  const [jobId, setJobId] = useState<string>();
+  const inspection = useMutation({
+    mutationFn: () => inspectProject(project.id),
+    onSuccess: (result) => setJobId(result.job_id),
+  });
+  const job = useQuery({
+    queryKey: ["jobs", jobId],
+    queryFn: () => getJobStatus(jobId ?? ""),
+    enabled: Boolean(jobId),
+    refetchInterval: (query) => {
+      const state = query.state.data?.state;
+      return state === "queued" || state === "running" ? 1_500 : false;
+    },
+  });
   return (
     <article className="project-card">
       <div className="project-index">
@@ -164,6 +180,44 @@ function ProjectCard({ project }: { project: Project }) {
           <dd>Not deployed</dd>
         </div>
       </dl>
+      <div className="inspection-panel">
+        <button
+          className="table-action inspection-action"
+          type="button"
+          disabled={
+            inspection.isPending ||
+            job.data?.state === "queued" ||
+            job.data?.state === "running"
+          }
+          onClick={() => inspection.mutate()}
+        >
+          {job.data?.state === "queued"
+            ? "Inspection queued"
+            : job.data?.state === "running"
+              ? "Inspecting…"
+              : "Inspect build"}
+        </button>
+        {job.data?.result && (
+          <div className="inspection-result">
+            <strong>{job.data.result.builder}</strong>
+            <code>{job.data.result.commit_sha.slice(0, 12)}</code>
+            <span>{job.data.result.reason}</span>
+            {job.data.result.has_mise_config && (
+              <span>
+                mise config detected; builder support will be verified.
+              </span>
+            )}
+          </div>
+        )}
+        {job.data?.state === "failed" && (
+          <p className="inspection-error">
+            {job.data.last_error ?? "Inspection failed."}
+          </p>
+        )}
+        {inspection.error && (
+          <p className="inspection-error">{errorMessage(inspection.error)}</p>
+        )}
+      </div>
     </article>
   );
 }

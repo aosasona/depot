@@ -23,10 +23,37 @@ const projectSchema = z.object({
   created_at: z.number(),
   updated_at: z.number(),
 });
+const inspectionResultSchema = z.object({
+  commit_sha: z.string(),
+  builder: z.enum(["dockerfile", "railpack", "static", "unknown"]),
+  reason: z.string(),
+  has_mise_config: z.boolean(),
+});
+const jobStatusSchema = z.object({
+  id: z.string(),
+  kind: z.string(),
+  project_id: z.string().nullable(),
+  state: z.enum(["queued", "running", "succeeded", "failed"]),
+  attempts: z.number(),
+  max_attempts: z.number(),
+  result: inspectionResultSchema.nullable(),
+  last_error: z.string().nullable(),
+  created_at: z.number(),
+  updated_at: z.number(),
+  events: z.array(
+    z.object({
+      sequence: z.number(),
+      level: z.enum(["info", "warning", "error"]),
+      message: z.string(),
+      created_at: z.number(),
+    }),
+  ),
+});
 
 export type User = z.infer<typeof userSchema>;
 export type AdminUser = z.infer<typeof adminUserSchema>;
 export type Project = z.infer<typeof projectSchema>;
+export type JobStatus = z.infer<typeof jobStatusSchema>;
 
 /** Represents a safe API failure suitable for inline UI feedback. */
 export class ApiError extends Error {
@@ -171,4 +198,18 @@ export function createProject(input: {
     headers: csrfHeaders(),
     body: JSON.stringify(input),
   });
+}
+
+/** Enqueues deduplicated repository inspection for the current project revision. */
+export function inspectProject(projectId: string) {
+  return request(
+    `/api/v1/projects/${projectId}/inspect`,
+    z.object({ job_id: z.string() }),
+    { method: "POST", headers: csrfHeaders() },
+  );
+}
+
+/** Returns durable state, structured inspection result, and ordered events. */
+export function getJobStatus(jobId: string) {
+  return request(`/api/v1/jobs/${jobId}`, jobStatusSchema);
 }
