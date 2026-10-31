@@ -41,6 +41,11 @@ const inspectionResultSchema = z.object({
   reason: z.string(),
   has_mise_config: z.boolean(),
 });
+const dockerBuildResultSchema = z.object({
+  image_id: z.string(),
+  image_tag: z.string(),
+  logs: z.string(),
+});
 const jobStatusSchema = z.object({
   id: z.string(),
   kind: z.string(),
@@ -48,7 +53,7 @@ const jobStatusSchema = z.object({
   state: z.enum(["queued", "running", "succeeded", "failed"]),
   attempts: z.number(),
   max_attempts: z.number(),
-  result: inspectionResultSchema.nullable(),
+  result: z.union([inspectionResultSchema, dockerBuildResultSchema]).nullable(),
   last_error: z.string().nullable(),
   created_at: z.number(),
   updated_at: z.number(),
@@ -61,6 +66,18 @@ const jobStatusSchema = z.object({
     }),
   ),
 });
+const deploymentSchema = z.object({
+  id: z.string(),
+  project_id: z.string(),
+  job_id: z.string(),
+  commit_sha: z.string(),
+  trigger_kind: z.enum(["manual", "webhook"]),
+  status: z.enum(["queued", "building", "succeeded", "failed"]),
+  failure_reason: z.string().nullable(),
+  created_at: z.number(),
+  updated_at: z.number(),
+  finished_at: z.number().nullable(),
+});
 
 export type User = z.infer<typeof userSchema>;
 export type AdminUser = z.infer<typeof adminUserSchema>;
@@ -71,6 +88,7 @@ export type ServiceConfigInput = Omit<
   ServiceConfig,
   "project_id" | "updated_at"
 >;
+export type Deployment = z.infer<typeof deploymentSchema>;
 
 /** Represents a safe API failure suitable for inline UI feedback. */
 export class ApiError extends Error {
@@ -246,4 +264,24 @@ export function updateServiceConfig(
     headers: csrfHeaders(),
     body: JSON.stringify(input),
   });
+}
+
+/** Lists durable deployment attempts for one project from newest to oldest. */
+export function listDeployments(projectId: string) {
+  return request(
+    `/api/v1/projects/${projectId}/deployments`,
+    z.array(deploymentSchema),
+  );
+}
+
+/** Enqueues a manual deployment of the latest successfully inspected commit. */
+export function createDeployment(projectId: string) {
+  return request(
+    `/api/v1/projects/${projectId}/deployments`,
+    deploymentSchema,
+    {
+      method: "POST",
+      headers: csrfHeaders(),
+    },
+  );
 }

@@ -440,6 +440,72 @@ h1 {
   border-color: #8edb91;
   color: #8edb91;
 }
+.deployment-panel {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 0.8rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+}
+.deployment-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+.deploy-action {
+  width: auto;
+  min-height: 34px;
+  margin: 0;
+  padding: 0 0.8rem;
+  font-size: 0.68rem;
+}
+.deployment-list {
+  display: grid;
+  gap: 1px;
+  background: var(--border);
+}
+.deployment-row {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: 0.8rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.75rem;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+.deployment-row code {
+  overflow: hidden;
+  color: var(--text);
+  font-size: 0.65rem;
+  text-overflow: ellipsis;
+}
+.deployment-row .inspection-error {
+  grid-column: 1 / -1;
+}
+.deployment-status {
+  padding: 0.25rem 0.4rem;
+  border: 1px solid var(--border);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  text-transform: uppercase;
+}
+.deployment-status.succeeded {
+  border-color: #8edb91;
+  color: #8edb91;
+}
+.deployment-status.failed {
+  border-color: #f36c6c;
+  color: #f36c6c;
+}
+.deployment-status.queued,
+.deployment-status.building {
+  border-color: #f0bd65;
+  color: #f0bd65;
+}
 .section-heading {
   display: flex;
   align-items: flex-end;
@@ -564,6 +630,9 @@ td {
   }
   .project-card {
     border-right: 0;
+  }
+  .deployment-row {
+    grid-template-columns: auto 1fr;
   }
 }
 @media (prefers-reduced-motion: reduce) {

@@ -10,6 +10,7 @@ import {
   listProjects,
   type Project,
 } from "../../lib/api/client";
+import { DeploymentPanel } from "./DeploymentPanel";
 import { ServiceConfigForm } from "./ServiceConfigForm";
 
 const projectSchema = z.object({
@@ -164,6 +165,10 @@ function ProjectCard({ project }: { project: Project }) {
       return state === "queued" || state === "running" ? 1_500 : false;
     },
   });
+  const inspectionResult =
+    job.data?.result && "builder" in job.data.result
+      ? job.data.result
+      : undefined;
   return (
     <article className="project-card">
       <div className="project-index">
@@ -200,12 +205,12 @@ function ProjectCard({ project }: { project: Project }) {
               ? "Inspecting…"
               : "Inspect build"}
         </button>
-        {job.data?.result && (
+        {inspectionResult && (
           <div className="inspection-result">
-            <strong>{job.data.result.builder}</strong>
-            <code>{job.data.result.commit_sha.slice(0, 12)}</code>
-            <span>{job.data.result.reason}</span>
-            {job.data.result.has_mise_config && (
+            <strong>{inspectionResult.builder}</strong>
+            <code>{inspectionResult.commit_sha.slice(0, 12)}</code>
+            <span>{inspectionResult.reason}</span>
+            {inspectionResult.has_mise_config && (
               <span>
                 mise config detected; builder support will be verified.
               </span>
@@ -222,6 +227,7 @@ function ProjectCard({ project }: { project: Project }) {
         )}
       </div>
       <ServiceConfigForm projectId={project.id} />
+      <DeploymentPanel projectId={project.id} />
     </article>
   );
 }
