@@ -891,6 +891,50 @@ impl Store {
         .transpose()
     }
 
+    /// Enqueues an independent full-domain reconciliation snapshot.
+    pub async fn enqueue_domain_reconciliation(&self, now_unix: i64) -> Result<Job, StoreError> {
+        let deduplication_key = format!("reconcile:domains:{}", Uuid::now_v7());
+        self.enqueue_job(NewJob {
+            kind: "reconcile_domains",
+            project_id: None,
+            payload_json: "{}",
+            deduplication_key: &deduplication_key,
+            max_attempts: 5,
+            now_unix,
+        })
+        .await
+    }
+
+    /// Lists the complete canonical desired hostname snapshot for the Caddy agent.
+    pub async fn all_domain_hostnames(&self) -> Result<Vec<String>, StoreError> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT hostname FROM domains ORDER BY hostname COLLATE NOCASE",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Acknowledges that the agent accepted the current complete desired snapshot.
+    pub async fn mark_domains_active(&self, now_unix: i64) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE domains SET routing_status = 'active', last_error = NULL, updated_at = ?",
+        )
+        .bind(now_unix)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Records a bounded reconciliation failure without exposing credentials.
+    pub async fn mark_domains_error(&self, message: &str, now_unix: i64) -> Result<(), StoreError> {
+        sqlx::query("UPDATE domains SET routing_status = 'error', last_error = ?, updated_at = ?")
+            .bind(message)
+            .bind(now_unix)
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Enqueues work once per active deduplication key and returns the durable job.
     pub async fn enqueue_job(&self, input: NewJob<'_>) -> Result<Job, StoreError> {
         let mut transaction = self.pool.begin().await?;
@@ -1642,6 +1686,33 @@ mod tests {
         assert_eq!(
             store.list_domains(&project.id).await.expect("domains list"),
             vec![domain.clone()]
+        );
+        let reconciliation = store
+            .enqueue_domain_reconciliation(210)
+            .await
+            .expect("reconciliation enqueues");
+        let claimed = store
+            .claim_job("routing-worker", 210, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("reconciliation is available");
+        assert_eq!(claimed.id, reconciliation.id);
+        assert_eq!(claimed.kind, "reconcile_domains");
+        store
+            .mark_domains_error("agent unavailable", 211)
+            .await
+            .expect("failure records");
+        assert_eq!(
+            store.list_domains(&project.id).await.expect("domains list")[0].routing_status,
+            "error"
+        );
+        store
+            .mark_domains_active(212)
+            .await
+            .expect("acknowledgment records");
+        assert_eq!(
+            store.list_domains(&project.id).await.expect("domains list")[0].routing_status,
+            "active"
         );
         let duplicate = store
             .create_domain(&project.id, "app.example.com", &admin_id, 211)

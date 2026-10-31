@@ -461,6 +461,10 @@ async fn create_domain(
             time::OffsetDateTime::now_utc().unix_timestamp(),
         )
         .await?;
+    state
+        .store
+        .enqueue_domain_reconciliation(time::OffsetDateTime::now_utc().unix_timestamp())
+        .await?;
     Ok((StatusCode::CREATED, Json(domain_response(domain))))
 }
 
@@ -479,6 +483,10 @@ async fn delete_domain(
             &actor.id,
             time::OffsetDateTime::now_utc().unix_timestamp(),
         )
+        .await?;
+    state
+        .store
+        .enqueue_domain_reconciliation(time::OffsetDateTime::now_utc().unix_timestamp())
         .await?;
     Ok(StatusCode::NO_CONTENT)
 }

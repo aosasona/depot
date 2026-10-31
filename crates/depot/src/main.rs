@@ -270,7 +270,49 @@ async fn execute_job(
     match job.kind.as_str() {
         "inspect_repository" => execute_inspection(store, worker_config, job).await,
         "deploy_project" => execute_deployment(store, worker_config, job).await,
+        "reconcile_domains" => execute_domain_reconciliation(store, worker_config).await,
         _ => Err(format!("Unsupported job kind: {}", job.kind)),
+    }
+}
+
+/// Sends the complete desired hostname snapshot and persists the agent acknowledgment.
+async fn execute_domain_reconciliation(
+    store: &Store,
+    worker_config: &depot_core::WorkerConfig,
+) -> Result<String, String> {
+    let agent = worker_config
+        .caddy_agent
+        .as_ref()
+        .ok_or_else(|| "Caddy agent client is not configured.".to_owned())?;
+    let domains = store
+        .all_domain_hostnames()
+        .await
+        .map_err(|_| "Desired domains could not be loaded.".to_owned())?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    match depot_caddy::send_snapshot(
+        agent.address,
+        &agent.auth_token,
+        &domains,
+        std::time::Duration::from_secs(agent.timeout_seconds),
+    )
+    .await
+    {
+        Ok(()) => {
+            store
+                .mark_domains_active(now)
+                .await
+                .map_err(|_| "Caddy acknowledgment could not be persisted.".to_owned())?;
+            serde_json::to_string(&serde_json::json!({ "accepted": domains.len() }))
+                .map_err(|_| "Caddy reconciliation result could not be encoded.".to_owned())
+        }
+        Err(error) => {
+            let message = error.to_string();
+            store
+                .mark_domains_error(&message, now)
+                .await
+                .map_err(|_| "Caddy reconciliation failure could not be persisted.".to_owned())?;
+            Err(message)
+        }
     }
 }
 

@@ -6,8 +6,8 @@ gateway, durable worker, and restricted host-side Caddy agent.
 
 Depot is under active development. Public Git inspection, Dockerfile builds,
 container readiness, project domains, and Host-based gateway routing are
-implemented. Railpack, static artifact releases, automatic Caddy delivery,
-webhooks, private Git credentials, secrets, and rollback are not complete yet.
+implemented. Railpack, static artifact releases, webhooks, private Git
+credentials, secrets, and rollback are not complete yet.
 
 ## Quick start: main Depot binary
 
@@ -42,6 +42,8 @@ Set these values for the installation:
 - `security.public_origin`: the HTTPS dashboard origin.
 - `worker.workspace_root`: scratch storage with enough space for Git checkouts.
 - `worker.docker_binary`: the Docker CLI executable available to the worker.
+- `worker.caddy_agent`: the private agent address and shared reconciliation
+  token; omit this table only when domains will not be reconciled.
 
 The user running `depot worker` needs narrowly scoped Docker access. Membership
 in the Docker group is effectively root-equivalent on the VM and should be
@@ -101,4 +103,3 @@ just release
 Docker and Caddy are unavailable in the current development sandbox. Their CLI
 boundaries, validation, cleanup, and rollback behavior are covered with fake
 executables; live engine checks must be completed on the target hosts.
-

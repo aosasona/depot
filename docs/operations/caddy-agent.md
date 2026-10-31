@@ -85,8 +85,10 @@ The agent exposes only `POST /v1/reconcile`. Reconciliation requests contain
 the complete desired hostname set; retries are safe and duplicate domains are
 deduplicated.
 
-Until automatic control-plane delivery is implemented, test or reconcile from
-the trusted private network with:
+Depot domain mutations enqueue durable full-snapshot reconciliation jobs. The
+worker sends them using `[worker.caddy_agent]` in the main VM configuration and
+marks domains active only after acknowledgment. To test or troubleshoot the
+agent directly from the trusted private network, use:
 
 ```sh
 curl --fail-with-body \
@@ -122,4 +124,3 @@ sensitive. Domain values are validated and suffix-allowlisted in both modes.
 - Permit the Caddy host to reach Depot's private gateway address.
 - Permit only the Depot VM to reach the private agent listener.
 - Do not expose container loopback ports outside the Depot VM.
-

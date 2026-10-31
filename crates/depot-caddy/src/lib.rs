@@ -19,6 +19,10 @@ use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::process::Command;
+use tokio::{
+    io::{AsyncReadExt, AsyncWriteExt},
+    net::TcpStream,
+};
 
 /// Host-side agent configuration with one fixed gateway and managed directory.
 #[derive(Clone, Debug, Deserialize)]
@@ -57,6 +61,12 @@ pub enum CaddyError {
     ValidationFailed,
     #[error("Caddy reload failed; the previous generated configuration was restored")]
     ReloadFailed,
+    #[error("could not contact the private Caddy agent: {0}")]
+    ClientIo(#[source] std::io::Error),
+    #[error("private Caddy agent request exceeded its timeout")]
+    ClientTimeout,
+    #[error("private Caddy agent rejected the desired domain snapshot")]
+    ClientRejected,
     #[error("could not bind Caddy agent listener: {0}")]
     Bind(#[source] std::io::Error),
     #[error("Caddy agent listener stopped unexpectedly: {0}")]
@@ -80,6 +90,9 @@ impl CaddyAgentConfig {
         if unsafe_directory
             || self.allowed_domain_suffixes.is_empty()
             || self.auth_token.len() < 32
+            || !self.auth_token.bytes().all(|byte| {
+                byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+            })
             || self.caddy_binary.trim().is_empty()
             || self.command_timeout_seconds == 0
             || self.command_timeout_seconds > 300
@@ -127,6 +140,54 @@ pub async fn serve(config: CaddyAgentConfig) -> Result<(), CaddyError> {
         .await
         .map_err(CaddyError::Bind)?;
     axum::serve(listener, app).await.map_err(CaddyError::Serve)
+}
+
+/// Sends a complete desired-domain snapshot to one fixed private agent address.
+pub async fn send_snapshot(
+    address: SocketAddr,
+    auth_token: &str,
+    domains: &[String],
+    timeout: Duration,
+) -> Result<(), CaddyError> {
+    if auth_token.len() < 32
+        || !auth_token
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~'))
+    {
+        return Err(CaddyError::ClientRejected);
+    }
+    let operation = async {
+        let body = serde_json::to_vec(&serde_json::json!({ "domains": domains }))
+            .expect("string-array JSON serialization is infallible");
+        let mut stream = TcpStream::connect(address)
+            .await
+            .map_err(CaddyError::ClientIo)?;
+        let request = format!(
+            "POST /v1/reconcile HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {auth_token}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            body.len()
+        );
+        stream
+            .write_all(request.as_bytes())
+            .await
+            .map_err(CaddyError::ClientIo)?;
+        stream
+            .write_all(&body)
+            .await
+            .map_err(CaddyError::ClientIo)?;
+        let mut response = Vec::new();
+        stream
+            .read_to_end(&mut response)
+            .await
+            .map_err(CaddyError::ClientIo)?;
+        if response.starts_with(b"HTTP/1.1 200") {
+            Ok(())
+        } else {
+            Err(CaddyError::ClientRejected)
+        }
+    };
+    tokio::time::timeout(timeout, operation)
+        .await
+        .map_err(|_| CaddyError::ClientTimeout)?
 }
 
 /// Authenticates and applies one complete desired-domain snapshot serially.

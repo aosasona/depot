@@ -9,6 +9,7 @@ rust-version.workspace = true
 axum.workspace = true
 depot-core = { path = "../depot-core" }
 serde.workspace = true
+serde_json = "1.0.154"
 subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

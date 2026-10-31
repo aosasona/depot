@@ -47,6 +47,17 @@ pub struct WorkerConfig {
     pub docker_binary: String,
     #[serde(default = "default_docker_timeout_seconds")]
     pub docker_timeout_seconds: u64,
+    pub caddy_agent: Option<CaddyAgentClientConfig>,
+}
+
+/// Private authenticated channel used by the worker for Caddy reconciliation.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CaddyAgentClientConfig {
+    pub address: SocketAddr,
+    pub auth_token: String,
+    #[serde(default = "default_caddy_agent_timeout_seconds")]
+    pub timeout_seconds: u64,
 }
 
 /// Returns the conventional Docker CLI name for operator PATH resolution.
@@ -57,6 +68,11 @@ fn default_docker_binary() -> String {
 /// Returns a conservative default wall-clock limit for application image builds.
 const fn default_docker_timeout_seconds() -> u64 {
     1_800
+}
+
+/// Returns a short bounded timeout for private Caddy-agent requests.
+const fn default_caddy_agent_timeout_seconds() -> u64 {
+    30
 }
 
 /// Configuration load and validation failures with actionable field context.
@@ -198,6 +214,7 @@ impl Config {
                 git_timeout_seconds: 120,
                 docker_binary: default_docker_binary(),
                 docker_timeout_seconds: default_docker_timeout_seconds(),
+                caddy_agent: None,
             },
         }
     }
@@ -224,6 +241,16 @@ impl Config {
             || self.worker.docker_timeout_seconds == 0
             || self.worker.docker_timeout_seconds > 7_200
         {
+            return Err(ConfigError::InvalidWorkerConfig);
+        }
+        if self.worker.caddy_agent.as_ref().is_some_and(|agent| {
+            agent.auth_token.len() < 32
+                || !agent.auth_token.bytes().all(|byte| {
+                    byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
+                })
+                || agent.timeout_seconds == 0
+                || agent.timeout_seconds > 300
+        }) {
             return Err(ConfigError::InvalidWorkerConfig);
         }
         Ok(())

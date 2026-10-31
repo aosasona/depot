@@ -12,3 +12,8 @@ workspace_root = "/var/lib/depot/workspaces"
 git_timeout_seconds = 120
 docker_binary = "docker"
 docker_timeout_seconds = 1800
+
+[worker.caddy_agent]
+address = "10.0.0.10:9080"
+auth_token = "replace-with-the-same-agent-token"
+timeout_seconds = 30
