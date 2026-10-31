@@ -12,9 +12,9 @@ use axum::{
     Json, Router,
     extract::State,
     http::{HeaderMap, StatusCode, header},
-    routing::post,
+    routing::{get, post},
 };
-use depot_core::validate_domain_hostname;
+use depot_core::{validate_domain_hostname, validate_host_port};
 use serde::{Deserialize, Serialize};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
@@ -30,7 +30,7 @@ use tokio::{
 pub struct CaddyAgentConfig {
     pub bind: SocketAddr,
     pub auth_token: String,
-    pub gateway_upstream: SocketAddr,
+    pub gateway_upstream: String,
     pub allowed_domain_suffixes: Vec<String>,
     pub managed_directory: PathBuf,
     pub caddyfile: PathBuf,
@@ -89,6 +89,7 @@ impl CaddyAgentConfig {
             || self.managed_directory == Path::new(".");
         if unsafe_directory
             || self.allowed_domain_suffixes.is_empty()
+            || !validate_host_port(&self.gateway_upstream)
             || self.auth_token.len() < 32
             || !self.auth_token.bytes().all(|byte| {
                 byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
@@ -118,6 +119,11 @@ struct ReconcileResponse {
     accepted: usize,
 }
 
+#[derive(Debug, Serialize)]
+struct AgentHealthResponse {
+    status: &'static str,
+}
+
 /// Shared agent state serializes filesystem and Caddy side effects.
 #[derive(Clone, Debug)]
 struct AgentState {
@@ -134,6 +140,7 @@ pub async fn serve(config: CaddyAgentConfig) -> Result<(), CaddyError> {
         lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
     };
     let app = Router::new()
+        .route("/v1/health", get(health_handler))
         .route("/v1/reconcile", post(reconcile_handler))
         .with_state(state);
     let listener = tokio::net::TcpListener::bind(bind)
@@ -154,7 +161,7 @@ pub async fn check(config: &CaddyAgentConfig) -> Result<(), CaddyError> {
 
 /// Sends a complete desired-domain snapshot to one fixed private agent address.
 pub async fn send_snapshot(
-    address: SocketAddr,
+    address: &str,
     auth_token: &str,
     domains: &[String],
     timeout: Duration,
@@ -198,6 +205,16 @@ pub async fn send_snapshot(
     tokio::time::timeout(timeout, operation)
         .await
         .map_err(|_| CaddyError::ClientTimeout)?
+}
+
+async fn health_handler(
+    State(state): State<AgentState>,
+    headers: HeaderMap,
+) -> Result<Json<AgentHealthResponse>, StatusCode> {
+    if !valid_bearer_token(&headers, &state.config.auth_token) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    Ok(Json(AgentHealthResponse { status: "ok" }))
 }
 
 /// Authenticates and applies one complete desired-domain snapshot serially.
@@ -288,7 +305,7 @@ pub fn generate_routes(
         .collect::<Result<Vec<_>, _>>()?;
     domains.sort();
     domains.dedup();
-    let upstream = config.gateway_upstream;
+    let upstream = &config.gateway_upstream;
     Ok(domains
         .into_iter()
         .map(|domain| format!("{domain} {{\n\treverse_proxy {upstream}\n}}\n"))
@@ -354,7 +371,7 @@ mod tests {
         CaddyAgentConfig {
             bind: "127.0.0.1:9080".parse().expect("bind parses"),
             auth_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
-            gateway_upstream: "10.0.0.20:8080".parse().expect("upstream parses"),
+            gateway_upstream: "gateway.internal:8080".to_owned(),
             allowed_domain_suffixes: vec!["example.com".to_owned()],
             managed_directory: PathBuf::from("/etc/caddy/depot"),
             caddyfile: PathBuf::from("/etc/caddy/Caddyfile"),
@@ -377,7 +394,7 @@ mod tests {
         .expect("routes generate");
         assert_eq!(output.matches("reverse_proxy").count(), 2);
         assert!(output.starts_with("a.example.com"));
-        assert!(output.contains("reverse_proxy 10.0.0.20:8080"));
+        assert!(output.contains("reverse_proxy gateway.internal:8080"));
     }
 
     /// Proves unrelated and injection-shaped hostnames cannot enter generated configuration.

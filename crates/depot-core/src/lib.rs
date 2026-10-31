@@ -55,7 +55,7 @@ pub struct WorkerConfig {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaddyAgentClientConfig {
-    pub address: SocketAddr,
+    pub address: String,
     pub auth_token: String,
     #[serde(default = "default_caddy_agent_timeout_seconds")]
     pub timeout_seconds: u64,
@@ -95,6 +95,20 @@ pub enum ConfigError {
     InvalidMasterKeyFile,
     #[error("worker workspace and timeout configuration is invalid")]
     InvalidWorkerConfig,
+}
+
+/// Accepts an IP address or DNS name with an explicit TCP port and no URL syntax.
+pub fn validate_host_port(value: &str) -> bool {
+    let Ok(url) = Url::parse(&format!("http://{value}")) else {
+        return false;
+    };
+    url.host_str().is_some()
+        && url.port().is_some()
+        && url.username().is_empty()
+        && url.password().is_none()
+        && url.path() == "/"
+        && url.query().is_none()
+        && url.fragment().is_none()
 }
 
 /// Validation failures for project identity and Git source configuration.
@@ -251,7 +265,8 @@ impl Config {
             return Err(ConfigError::InvalidWorkerConfig);
         }
         if self.worker.caddy_agent.as_ref().is_some_and(|agent| {
-            agent.auth_token.len() < 32
+            !validate_host_port(&agent.address)
+                || agent.auth_token.len() < 32
                 || !agent.auth_token.bytes().all(|byte| {
                     byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~')
                 })
@@ -267,7 +282,7 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, ConfigError, ProjectValidationError, validate_domain_hostname,
+        Config, ConfigError, ProjectValidationError, validate_domain_hostname, validate_host_port,
         validate_project_slug, validate_repository_url,
     };
 
@@ -277,6 +292,16 @@ mod tests {
         Config::local_default()
             .validate()
             .expect("defaults are valid");
+    }
+
+    #[test]
+    fn host_port_accepts_dns_and_ip_but_rejects_url_syntax() {
+        assert!(validate_host_port("caddy.internal:9080"));
+        assert!(validate_host_port("10.0.0.5:9080"));
+        assert!(validate_host_port("[fd00::5]:9080"));
+        assert!(!validate_host_port("caddy.internal"));
+        assert!(!validate_host_port("https://caddy.internal:9080"));
+        assert!(!validate_host_port("user@caddy.internal:9080"));
     }
 
     /// Ensures public origins cannot smuggle paths into origin validation.

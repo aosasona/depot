@@ -82,6 +82,14 @@ confirm() {
     case "$answer" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
 }
 
+refuse_wildcard_bind() {
+    case "$1" in
+        0.0.0.0:*|\[::\]:*)
+            die "$2 must use a specific private IP or loopback address, not a wildcard. This prevents accidental public exposure."
+            ;;
+    esac
+}
+
 require_root() {
     [ "$(id -u)" -eq 0 ] || die "Run this command as root (for example: curl ... | sudo sh)."
 }
@@ -248,6 +256,8 @@ configure_vm() {
     public_origin=$REPLY
     validate_safe_value "$bind" "Listen address"
     validate_safe_value "$public_origin" "Public origin"
+    refuse_wildcard_bind "$bind" "Depot listen address"
+    case "$public_origin" in https://*) ;; *) die "Public dashboard origin must use HTTPS in guided production setup." ;; esac
     prompt "Caddy agent address (leave blank to configure later)" ""
     agent_address=$REPLY
     agent_section=
@@ -263,6 +273,13 @@ address = \"$agent_address\"
 auth_token = \"$agent_token\"
 timeout_seconds = 30"
     fi
+    say "Configuration plan:"
+    say "  role: Depot VM"
+    say "  listen: $bind"
+    say "  public origin: $public_origin"
+    say "  Caddy agent: ${agent_address:-not configured}"
+    confirm "Write and validate this configuration?" || die "Configuration was not changed."
+    config_temp=$(mktemp /etc/depot/config.toml.new.XXXXXX)
     umask 0027
     {
         printf '[server]\nbind = "%s"\n\n' "$bind"
@@ -270,9 +287,14 @@ timeout_seconds = 30"
         printf '[security]\npublic_origin = "%s"\nmaster_key_file = "/etc/depot/master.key"\n\n' "$public_origin"
         printf '[worker]\nworkspace_root = "/var/lib/depot/workspaces"\ngit_timeout_seconds = 120\ndocker_binary = "docker"\ndocker_timeout_seconds = 1800\n'
         printf '%s\n' "$agent_section"
-    } > /etc/depot/config.toml
-    chown depot:depot /etc/depot/config.toml
-    chmod 0640 /etc/depot/config.toml
+    } > "$config_temp"
+    chown depot:depot "$config_temp"
+    chmod 0640 "$config_temp"
+    if ! runuser -u depot -- /usr/local/bin/depot validate-config --config "$config_temp"; then
+        rm -f "$config_temp"
+        die "Configuration validation failed; the active configuration was not changed."
+    fi
+    mv "$config_temp" /etc/depot/config.toml
 }
 
 format_suffixes() {
@@ -305,8 +327,16 @@ configure_caddy_agent() {
     validate_safe_value "$bind" "Agent listen address"
     validate_safe_value "$gateway" "Gateway upstream"
     validate_safe_value "$token" "Agent token"
+    refuse_wildcard_bind "$bind" "Caddy agent listen address"
     [ "${#token}" -ge 32 ] || die "The agent token must contain at least 32 characters."
     format_suffixes "$suffixes"
+    say "Configuration plan:"
+    say "  role: Caddy agent"
+    say "  listen: $bind"
+    say "  Depot gateway: $gateway"
+    say "  allowed suffixes: $suffixes"
+    confirm "Write and validate this configuration?" || die "Configuration was not changed."
+    config_temp=$(mktemp /etc/depot/caddy-agent.toml.new.XXXXXX)
     umask 0027
     {
         printf 'bind = "%s"\n' "$bind"
@@ -316,9 +346,14 @@ configure_caddy_agent() {
         printf 'managed_directory = "/etc/caddy/depot"\n'
         printf 'caddyfile = "/etc/caddy/Caddyfile"\n'
         printf 'caddy_binary = "caddy"\ncommand_timeout_seconds = 30\n'
-    } > /etc/depot/caddy-agent.toml
-    chown depot-caddy:caddy /etc/depot/caddy-agent.toml
-    chmod 0640 /etc/depot/caddy-agent.toml
+    } > "$config_temp"
+    chown depot-caddy:caddy "$config_temp"
+    chmod 0640 "$config_temp"
+    if ! runuser -u depot-caddy -- /usr/local/bin/depot caddy-agent --config "$config_temp" --check; then
+        rm -f "$config_temp"
+        die "Agent or Caddy validation failed; the active configuration was not changed."
+    fi
+    mv "$config_temp" /etc/depot/caddy-agent.toml
     say "Shared token for the Depot VM configuration: $token"
 }
 
@@ -350,6 +385,46 @@ run_agent_checks() {
     runuser -u depot-caddy -- /usr/local/bin/depot caddy-agent --config /etc/depot/caddy-agent.toml --check
 }
 
+toml_value() {
+    file=$1
+    section=$2
+    key=$3
+    awk -v wanted_section="$section" -v wanted_key="$key" '
+        /^\[/ { current = $0; gsub(/^\[|\]$/, "", current); next }
+        current == wanted_section && $1 == wanted_key {
+            value = $3; gsub(/^"|"$/, "", value); print value; exit
+        }
+    ' "$file"
+}
+
+verify_caddy_agent_peer() {
+    address=$(toml_value /etc/depot/config.toml worker.caddy_agent address)
+    [ -n "$address" ] || { warn "Caddy agent is not configured; automatic domain routing is unavailable."; return 1; }
+    token=$(toml_value /etc/depot/config.toml worker.caddy_agent auth_token)
+    curl --fail --silent --show-error --connect-timeout 5 --max-time 10 \
+        -H "Authorization: Bearer $token" "http://$address/v1/health" >/dev/null || {
+        warn "The authenticated Caddy agent is not reachable at $address. Check DNS/IP, firewall, port, and shared token."
+        return 1
+    }
+    say "[ok] Authenticated Caddy agent is reachable at $address."
+}
+
+verify_gateway_peer() {
+    address=$(toml_value /etc/depot/caddy-agent.toml "" gateway_upstream)
+    curl --fail --silent --show-error --connect-timeout 5 --max-time 10 \
+        "http://$address/api/v1/system/health" >/dev/null || {
+        warn "The Depot gateway is not reachable at $address. Check DNS/IP, firewall, port, and Depot service."
+        return 1
+    }
+    say "[ok] Depot gateway is reachable at $address."
+}
+
+verify_peer_or_confirm() {
+    if [ "$ROLE" = vm ]; then verify_caddy_agent_peer && return 0; else verify_gateway_peer && return 0; fi
+    confirm "The other host may not be installed yet. Continue this first installation anyway?" || \
+        die "Installation stopped without claiming end-to-end readiness. Fix peer connectivity and run depot-setup check."
+}
+
 fresh_install() {
     require_root
     infer_role
@@ -370,6 +445,7 @@ fresh_install() {
         systemctl is-active --quiet depot.service || die "depot.service did not start. Check its journal."
         systemctl is-active --quiet depot-worker.service || die "depot-worker.service did not start. Check its journal."
         say "[ok] Depot services started."
+        verify_peer_or_confirm
         runuser -u depot -- /usr/local/bin/depot setup --config /etc/depot/config.toml --expires-in-minutes 30
     else
         ensure_caddy_import
@@ -378,6 +454,7 @@ fresh_install() {
         systemctl is-active --quiet caddy.service || die "caddy.service did not start. Check its journal."
         systemctl is-active --quiet depot-caddy-agent.service || die "depot-caddy-agent.service did not start. Check its journal."
         say "[ok] Caddy and the Depot agent started."
+        verify_peer_or_confirm
     fi
     system_status
 }
@@ -417,6 +494,7 @@ update_installation() {
         systemctl start depot.service depot-worker.service
         systemctl is-active --quiet depot.service || die "Updated depot.service did not start. Check its journal."
         systemctl is-active --quiet depot-worker.service || die "Updated depot-worker.service did not start. Check its journal."
+        verify_caddy_agent_peer || die "Update installed, but end-to-end Caddy agent verification failed. Services are running; fix connectivity before deployment."
     else
         if ! run_agent_checks; then
             warn "Update checks failed. The agent remains stopped and /usr/local/bin/depot.previous is available."
@@ -424,6 +502,7 @@ update_installation() {
         fi
         systemctl start depot-caddy-agent.service
         systemctl is-active --quiet depot-caddy-agent.service || die "Updated agent did not start. Check its journal."
+        verify_gateway_peer || die "Update installed, but Depot gateway verification failed. The agent is running; fix connectivity before deployment."
     fi
     say "[ok] Depot update completed."
     system_status
@@ -453,11 +532,13 @@ check_installation() {
         curl --fail --silent --show-error "http://$health_bind/api/v1/system/readiness" >/dev/null ||
             die "Depot's readiness endpoint reports a failure at $health_bind."
         docker version >/dev/null
+        verify_caddy_agent_peer || die "Depot is locally healthy, but the configured Caddy agent failed authenticated verification."
     else
         [ -r /etc/depot/caddy-agent.toml ] || die "Caddy agent configuration is missing."
         systemctl is-active --quiet caddy.service || die "caddy.service is not active."
         systemctl is-active --quiet depot-caddy-agent.service || die "depot-caddy-agent.service is not active."
         runuser -u depot-caddy -- /usr/local/bin/depot caddy-agent --config /etc/depot/caddy-agent.toml --check
+        verify_gateway_peer || die "The Caddy agent is locally healthy, but the configured Depot gateway is unreachable."
     fi
     say "[ok] Depot $ROLE checks passed."
 }

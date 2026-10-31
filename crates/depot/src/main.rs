@@ -85,6 +85,11 @@ enum Command {
         #[arg(long, env = "DEPOT_CONFIG")]
         config: Option<PathBuf>,
     },
+    /// Validates a configuration file without opening the database or binding a port.
+    ValidateConfig {
+        #[arg(long, env = "DEPOT_CONFIG")]
+        config: PathBuf,
+    },
     /// Claims and executes durable background jobs from the shared SQLite queue.
     Worker {
         /// TOML configuration path; local development defaults apply when omitted.
@@ -181,6 +186,11 @@ async fn main() -> Result<(), AppError> {
         Command::Serve { config } => serve(load_config(config.as_deref())?).await,
         Command::Migrate { config } => migrate(load_config(config.as_deref())?).await,
         Command::Doctor { config } => doctor(load_config(config.as_deref())?).await,
+        Command::ValidateConfig { config } => {
+            Config::load(&config)?;
+            println!("Configuration is valid.");
+            Ok(())
+        }
         Command::Worker { config, once } => worker(load_config(config.as_deref())?, once).await,
         Command::CaddyAgent {
             config,
@@ -463,7 +473,7 @@ async fn execute_domain_reconciliation(
         .map_err(|_| "Desired domains could not be loaded.".to_owned())?;
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     match depot_caddy::send_snapshot(
-        agent.address,
+        &agent.address,
         &agent.auth_token,
         &domains,
         std::time::Duration::from_secs(agent.timeout_seconds),

@@ -14,7 +14,10 @@ curl -fsSL https://github.com/aosasona/depot/releases/latest/download/depot-setu
 
 It checks or offers to install dependencies, verifies the downloaded release,
 collects the configuration, safely adds the isolated import with a backup, and
-starts the agent. Later use `sudo depot-setup check` or
+starts the agent. It accepts an IP address or DNS name for the Depot gateway and
+calls its health endpoint before claiming end-to-end readiness. It also refuses
+a wildcard agent listener and validates temporary configuration before
+activation. Later use `sudo depot-setup check` or
 `sudo depot-setup update`. The manual procedure below remains available for
 custom packaging and automation.
 

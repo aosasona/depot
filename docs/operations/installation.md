@@ -21,7 +21,11 @@ dependencies and asks before installing them. It never changes firewall or DNS
 configuration. It then downloads the release package and `SHA256SUMS` from the
 same GitHub release, verifies the archive, installs the binary and units,
 creates the encryption key, gathers the minimum configuration, migrates and
-checks SQLite, and starts both services.
+checks SQLite, and starts both services. It refuses wildcard listeners, shows a
+final plan, and validates a temporary configuration before replacing anything.
+After startup it makes an authenticated request to the configured Caddy-agent
+IP address or DNS name. A first-host installation may explicitly defer that
+peer check; `check` and `update` do not report success until it passes.
 
 The installed administration command provides the normal lifecycle:
 
@@ -36,6 +40,7 @@ An update preserves configuration, stops the API and worker, creates a dated
 pre-update backup under `/var/backups/depot`, verifies the new package, applies
 migrations, runs `doctor`, and starts only after those checks succeed. On a
 failed check it leaves the services stopped and prints the recovery location.
+The update also requires successful end-to-end peer reachability.
 
 ### Manual installation
 

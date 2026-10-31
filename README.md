@@ -33,7 +33,10 @@ sudo depot-setup status
 ```
 
 Choose the Depot VM role here. Run the same command on the Caddy host and choose
-the Caddy-agent role. Existing configuration is preserved during updates.
+the Caddy-agent role. The wizard refuses wildcard listeners, previews its plan,
+validates temporary configuration before activating it, and verifies the two
+hosts can actually reach one another at the configured IP address or DNS name.
+Existing configuration is preserved during updates.
 
 ### 1. Install build and runtime prerequisites
 

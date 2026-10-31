@@ -458,7 +458,7 @@ dependencies = [
 
 [[package]]
 name = "depot"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "clap",
@@ -487,7 +487,7 @@ dependencies = [
 
 [[package]]
 name = "depot-api"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "axum-extra",
@@ -509,7 +509,7 @@ dependencies = [
 
 [[package]]
 name = "depot-auth"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "argon2",
  "depot-store",
@@ -524,7 +524,7 @@ dependencies = [
 
 [[package]]
 name = "depot-build"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "depot-caddy"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "axum",
  "depot-core",
@@ -548,7 +548,7 @@ dependencies = [
 
 [[package]]
 name = "depot-core"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -558,7 +558,7 @@ dependencies = [
 
 [[package]]
 name = "depot-git"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "depot-core",
  "serde",
@@ -570,7 +570,7 @@ dependencies = [
 
 [[package]]
 name = "depot-runtime"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "serde",
  "thiserror",
@@ -580,7 +580,7 @@ dependencies = [
 
 [[package]]
 name = "depot-secrets"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chacha20poly1305",
  "rand 0.10.3",
@@ -589,7 +589,7 @@ dependencies = [
 
 [[package]]
 name = "depot-store"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "sqlx",
  "thiserror",
