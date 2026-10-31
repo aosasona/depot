@@ -1,0 +1,15 @@
+[package]
+name = "depot-auth"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+argon2.workspace = true
+depot-store = { path = "../depot-store" }
+rand.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+time.workspace = true
+tokio.workspace = true

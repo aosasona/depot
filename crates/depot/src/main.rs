@@ -10,9 +10,12 @@ use axum::{
     routing::get,
 };
 use clap::{Parser, Subcommand};
+use depot_auth::issue_bootstrap_token;
+use depot_store::Store;
 use rust_embed::Embed;
 use serde::Serialize;
 use thiserror::Error;
+use time::Duration;
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
@@ -28,6 +31,15 @@ struct Cli {
 /// Selects the independently runnable mode of the Depot executable.
 #[derive(Debug, Subcommand)]
 enum Command {
+    /// Creates or rotates the short-lived token used for first-admin setup.
+    Setup {
+        /// SQLite URL for the Depot control-plane database.
+        #[arg(long, env = "DEPOT_DATABASE_URL", default_value = "sqlite://depot.db")]
+        database_url: String,
+        /// Number of minutes before the displayed setup token expires.
+        #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(i64).range(1..=120))]
+        expires_in_minutes: i64,
+    },
     /// Serves the API, private gateway, and embedded web application.
     Serve {
         /// Address used by the initial combined HTTP listener.
@@ -57,6 +69,10 @@ enum AppError {
     Bind(#[source] std::io::Error),
     #[error("HTTP server stopped unexpectedly: {0}")]
     Serve(#[source] std::io::Error),
+    #[error("database initialization failed: {0}")]
+    Store(#[from] depot_store::StoreError),
+    #[error("setup token creation failed: {0}")]
+    Auth(#[from] depot_auth::AuthError),
 }
 
 /// Parses the command line and runs the selected Depot process mode.
@@ -65,6 +81,10 @@ async fn main() -> Result<(), AppError> {
     init_tracing();
 
     match Cli::parse().command {
+        Command::Setup {
+            database_url,
+            expires_in_minutes,
+        } => setup(&database_url, expires_in_minutes).await,
         Command::Serve { bind } => serve(bind).await,
         Command::Doctor => {
             println!(
@@ -74,6 +94,19 @@ async fn main() -> Result<(), AppError> {
             Ok(())
         }
     }
+}
+
+/// Initializes storage and prints a short-lived bootstrap token exactly once.
+async fn setup(database_url: &str, expires_in_minutes: i64) -> Result<(), AppError> {
+    let store = Store::connect(database_url).await?;
+    let issued = issue_bootstrap_token(&store, Duration::minutes(expires_in_minutes)).await?;
+    println!("Depot first-admin setup token (shown once):");
+    println!("{}", issued.token);
+    println!(
+        "Expires at Unix timestamp: {}",
+        issued.expires_at.unix_timestamp()
+    );
+    Ok(())
 }
 
 /// Installs structured logging with a safe, operator-configurable filter.
