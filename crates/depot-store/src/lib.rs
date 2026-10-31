@@ -3,7 +3,7 @@
 use std::{str::FromStr, time::Duration};
 
 use sqlx::{
-    Sqlite, SqlitePool, Transaction,
+    Row, Sqlite, SqlitePool, Transaction,
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions},
 };
 use thiserror::Error;
@@ -16,6 +16,17 @@ static MIGRATOR: sqlx::migrate::Migrator = sqlx::migrate!("../../migrations");
 pub enum UserRole {
     Admin,
     Member,
+}
+
+impl UserRole {
+    /// Parses the database representation while rejecting unknown privilege values.
+    fn from_database(value: &str) -> Result<Self, StoreError> {
+        match value {
+            "admin" => Ok(Self::Admin),
+            "member" => Ok(Self::Member),
+            _ => Err(StoreError::InvalidRole(value.to_owned())),
+        }
+    }
 }
 
 impl UserRole {
@@ -34,6 +45,34 @@ pub struct BootstrapAdmin<'a> {
     pub email: &'a str,
     pub password_hash: &'a str,
     pub token_hash: &'a [u8],
+    pub now_unix: i64,
+}
+
+/// Authentication data loaded only by the trusted auth service.
+#[derive(Debug)]
+pub struct AuthUser {
+    pub id: String,
+    pub email: String,
+    pub password_hash: String,
+    pub role: UserRole,
+}
+
+/// Non-secret user identity attached to a valid server-side session.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SessionUser {
+    pub id: String,
+    pub email: String,
+    pub role: UserRole,
+}
+
+/// Digests and timestamps needed to persist a newly issued session.
+#[derive(Debug)]
+pub struct NewSession<'a> {
+    pub id: &'a str,
+    pub user_id: &'a str,
+    pub token_hash: &'a [u8],
+    pub csrf_hash: &'a [u8],
+    pub expires_at_unix: i64,
     pub now_unix: i64,
 }
 
@@ -56,6 +95,8 @@ pub enum StoreError {
     AlreadyInitialized,
     #[error("the bootstrap token is invalid or expired")]
     InvalidBootstrapToken,
+    #[error("database contains an unsupported user role: {0}")]
+    InvalidRole(String),
 }
 
 impl Store {
@@ -96,6 +137,96 @@ impl Store {
         .fetch_one(&self.pool)
         .await?;
         Ok(count > 0)
+    }
+
+    /// Loads an active user by normalized email for password verification.
+    pub async fn auth_user_by_email(&self, email: &str) -> Result<Option<AuthUser>, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, email, password_hash, role FROM users WHERE email = ? AND active = 1",
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let role: String = row.try_get("role")?;
+            Ok(AuthUser {
+                id: row.try_get("id")?,
+                email: row.try_get("email")?,
+                password_hash: row.try_get("password_hash")?,
+                role: UserRole::from_database(&role)?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Persists a new opaque session after invalidating expired rows for its user.
+    pub async fn create_session(&self, input: NewSession<'_>) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        sqlx::query("DELETE FROM sessions WHERE user_id = ? AND expires_at < ?")
+            .bind(input.user_id)
+            .bind(input.now_unix)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query(
+            "INSERT INTO sessions
+             (id, token_hash, user_id, csrf_hash, expires_at, created_at, last_seen_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(input.id)
+        .bind(input.token_hash)
+        .bind(input.user_id)
+        .bind(input.csrf_hash)
+        .bind(input.expires_at_unix)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Resolves a live session and returns its user plus the expected CSRF digest.
+    pub async fn session_user(
+        &self,
+        token_hash: &[u8],
+        now_unix: i64,
+    ) -> Result<Option<(SessionUser, Vec<u8>)>, StoreError> {
+        let row = sqlx::query(
+            "SELECT users.id, users.email, users.role, sessions.csrf_hash
+             FROM sessions
+             JOIN users ON users.id = sessions.user_id
+             WHERE sessions.token_hash = ? AND sessions.revoked_at IS NULL
+               AND sessions.expires_at >= ? AND users.active = 1",
+        )
+        .bind(token_hash)
+        .bind(now_unix)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let role: String = row.try_get("role")?;
+            Ok((
+                SessionUser {
+                    id: row.try_get("id")?,
+                    email: row.try_get("email")?,
+                    role: UserRole::from_database(&role)?,
+                },
+                row.try_get("csrf_hash")?,
+            ))
+        })
+        .transpose()
+    }
+
+    /// Revokes one session by bearer-token digest and records its termination time.
+    pub async fn revoke_session(&self, token_hash: &[u8], now_unix: i64) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE sessions SET revoked_at = ?
+             WHERE token_hash = ? AND revoked_at IS NULL",
+        )
+        .bind(now_unix)
+        .bind(token_hash)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Replaces any unused token with one newly issued by an explicit setup command.

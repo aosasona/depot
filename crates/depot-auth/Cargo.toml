@@ -10,6 +10,8 @@ argon2.workspace = true
 depot-store = { path = "../depot-store" }
 rand.workspace = true
 sha2.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 time.workspace = true
 tokio.workspace = true
+uuid.workspace = true

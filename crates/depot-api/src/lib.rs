@@ -3,14 +3,26 @@
 use axum::{
     Json, Router,
     extract::State,
-    http::StatusCode,
+    http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
-    routing::get,
+    routing::{get, post},
 };
-use depot_auth::{AuthError, create_first_admin};
-use depot_store::{Store, StoreError};
+use axum_extra::extract::{
+    CookieJar,
+    cookie::{Cookie, SameSite},
+};
+use depot_auth::{
+    AuthError, authenticate_session, create_first_admin, login as authenticate_login,
+    logout as revoke_login,
+};
+use depot_store::{SessionUser, Store, StoreError};
 use serde::{Deserialize, Serialize};
 use tracing::error;
+
+const SESSION_COOKIE: &str = "depot_session";
+const CSRF_COOKIE: &str = "depot_csrf";
+const CSRF_HEADER: &str = "x-csrf-token";
+const SESSION_HOURS: i64 = 12;
 
 /// Shared dependencies available to API request handlers.
 #[derive(Clone, Debug)]
@@ -36,6 +48,21 @@ struct BootstrapStatus {
 #[derive(Debug, Serialize)]
 struct BootstrapResponse {
     user_id: String,
+}
+
+/// Credentials accepted by the local account login endpoint.
+#[derive(Debug, Deserialize)]
+struct LoginRequest {
+    email: String,
+    password: String,
+}
+
+/// Safe user identity returned to the authenticated browser.
+#[derive(Debug, Serialize)]
+struct UserResponse {
+    id: String,
+    email: String,
+    role: &'static str,
 }
 
 /// Stable JSON error shape shared by all API endpoints.
@@ -65,7 +92,105 @@ pub fn router(store: Store) -> Router {
             "/api/v1/auth/bootstrap",
             get(bootstrap_status).post(bootstrap_admin),
         )
+        .route("/api/v1/auth/login", post(login))
+        .route("/api/v1/auth/logout", post(logout))
+        .route("/api/v1/auth/me", get(current_user))
         .with_state(ApiState { store })
+}
+
+/// Verifies credentials and returns secure cookies bound to a server-side session.
+async fn login(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    Json(request): Json<LoginRequest>,
+) -> Result<(CookieJar, Json<UserResponse>), ApiError> {
+    let issued = authenticate_login(
+        &state.store,
+        &request.email,
+        request.password,
+        time::Duration::hours(SESSION_HOURS),
+    )
+    .await?;
+    let jar = jar
+        .add(session_cookie(issued.token))
+        .add(csrf_cookie(issued.csrf_token));
+    Ok((jar, Json(user_response(issued.user))))
+}
+
+/// Returns the identity attached to the active opaque session cookie.
+async fn current_user(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+) -> Result<Json<UserResponse>, ApiError> {
+    let token = session_token(&jar)?;
+    let user = authenticate_session(&state.store, token).await?;
+    Ok(Json(user_response(user)))
+}
+
+/// Validates the session-bound CSRF header, revokes the session, and expires cookies.
+async fn logout(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+) -> Result<(CookieJar, StatusCode), ApiError> {
+    let token = session_token(&jar)?;
+    let csrf_token = headers
+        .get(CSRF_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(AuthError::InvalidCsrf)?;
+    revoke_login(&state.store, token, csrf_token).await?;
+    Ok((
+        jar.remove(removal_cookie(SESSION_COOKIE))
+            .remove(removal_cookie(CSRF_COOKIE)),
+        StatusCode::NO_CONTENT,
+    ))
+}
+
+/// Extracts the opaque bearer cookie without logging or copying it unnecessarily.
+fn session_token(jar: &CookieJar) -> Result<&str, ApiError> {
+    jar.get(SESSION_COOKIE)
+        .map(Cookie::value)
+        .ok_or_else(|| AuthError::InvalidSession.into())
+}
+
+/// Creates the HttpOnly bearer cookie using strict cross-site and transport policy.
+fn session_cookie(token: String) -> Cookie<'static> {
+    Cookie::build((SESSION_COOKIE, token))
+        .path("/")
+        .http_only(true)
+        .secure(true)
+        .same_site(SameSite::Strict)
+        .max_age(time::Duration::hours(SESSION_HOURS))
+        .build()
+}
+
+/// Creates the readable CSRF cookie whose value must be echoed in a request header.
+fn csrf_cookie(token: String) -> Cookie<'static> {
+    Cookie::build((CSRF_COOKIE, token))
+        .path("/")
+        .http_only(false)
+        .secure(true)
+        .same_site(SameSite::Strict)
+        .max_age(time::Duration::hours(SESSION_HOURS))
+        .build()
+}
+
+/// Creates an immediate-expiry cookie scoped identically to authentication cookies.
+fn removal_cookie(name: &'static str) -> Cookie<'static> {
+    Cookie::build(name)
+        .path("/")
+        .secure(true)
+        .same_site(SameSite::Strict)
+        .build()
+}
+
+/// Maps the store identity to an API value with a stable role representation.
+fn user_response(user: SessionUser) -> UserResponse {
+    UserResponse {
+        id: user.id,
+        email: user.email,
+        role: user.role.as_str(),
+    }
 }
 
 /// Reports only whether setup remains available, without exposing token state.
@@ -120,6 +245,21 @@ impl IntoResponse for ApiError {
                 "invalid_email",
                 "Enter a valid email address.",
             ),
+            Self::Auth(AuthError::InvalidCredentials) => (
+                StatusCode::UNAUTHORIZED,
+                "invalid_credentials",
+                "Email or password is incorrect.",
+            ),
+            Self::Auth(AuthError::InvalidSession) => (
+                StatusCode::UNAUTHORIZED,
+                "invalid_session",
+                "Your session is invalid or expired.",
+            ),
+            Self::Auth(AuthError::InvalidCsrf) => (
+                StatusCode::FORBIDDEN,
+                "invalid_csrf",
+                "The request could not be verified.",
+            ),
             Self::Auth(AuthError::Store(StoreError::AlreadyInitialized))
             | Self::Store(StoreError::AlreadyInitialized) => (
                 StatusCode::CONFLICT,
@@ -157,7 +297,7 @@ mod tests {
         body::Body,
         http::{Request, StatusCode, header},
     };
-    use depot_auth::issue_bootstrap_token;
+    use depot_auth::{create_first_admin, issue_bootstrap_token};
     use depot_store::Store;
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
@@ -257,5 +397,121 @@ mod tests {
             json_body(response).await["error"]["code"],
             "invalid_bootstrap_token"
         );
+    }
+
+    /// Proves login cookies authorize identity lookup and CSRF protects revocation.
+    #[tokio::test]
+    async fn login_me_and_logout_enforce_session_and_csrf() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let issued = issue_bootstrap_token(&store, Duration::minutes(5))
+            .await
+            .expect("token issues");
+        create_first_admin(
+            &store,
+            &issued.token,
+            "admin@example.com",
+            "correct horse battery staple".to_owned(),
+        )
+        .await
+        .expect("admin is created");
+        let app = router(store);
+
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "email": "admin@example.com",
+                            "password": "correct horse battery staple"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(login.status(), StatusCode::OK);
+        let set_cookies: Vec<String> = login
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .map(|value| value.to_str().expect("cookie is ASCII").to_owned())
+            .collect();
+        assert!(set_cookies.iter().any(|value| {
+            value.starts_with("depot_session=")
+                && value.contains("HttpOnly")
+                && value.contains("Secure")
+        }));
+        let cookie_header = set_cookies
+            .iter()
+            .filter_map(|value| value.split(';').next())
+            .collect::<Vec<_>>()
+            .join("; ");
+        let csrf_token = set_cookies
+            .iter()
+            .find_map(|value| value.strip_prefix("depot_csrf="))
+            .and_then(|value| value.split(';').next())
+            .expect("CSRF cookie exists")
+            .to_owned();
+
+        let me = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/me")
+                    .header(header::COOKIE, &cookie_header)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(me.status(), StatusCode::OK);
+        assert_eq!(json_body(me).await["role"], "admin");
+
+        let forged_logout = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/logout")
+                    .header(header::COOKIE, &cookie_header)
+                    .header("x-csrf-token", "forged")
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(forged_logout.status(), StatusCode::FORBIDDEN);
+
+        let logout = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/logout")
+                    .header(header::COOKIE, &cookie_header)
+                    .header("x-csrf-token", csrf_token)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(logout.status(), StatusCode::NO_CONTENT);
+
+        let revoked = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/me")
+                    .header(header::COOKIE, cookie_header)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
     }
 }

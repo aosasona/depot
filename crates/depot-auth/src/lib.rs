@@ -1,20 +1,35 @@
 //! Authentication primitives and secure first-run initialization.
 
-use argon2::{Algorithm, Argon2, Params, Version, password_hash::PasswordHasher};
-use depot_store::{BootstrapAdmin, Store, StoreError};
+use argon2::{
+    Algorithm, Argon2, Params, Version,
+    password_hash::{PasswordHasher, PasswordVerifier, phc::PasswordHash},
+};
+use depot_store::{BootstrapAdmin, NewSession, SessionUser, Store, StoreError};
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
 
 const BOOTSTRAP_TOKEN_BYTES: usize = 32;
 const PASSWORD_SALT_BYTES: usize = 16;
 const MINIMUM_PASSWORD_LENGTH: usize = 12;
+const SESSION_TOKEN_BYTES: usize = 32;
+const CSRF_TOKEN_BYTES: usize = 32;
 
 /// A newly issued plaintext bootstrap token shown once to the operator.
 #[derive(Debug)]
 pub struct IssuedBootstrapToken {
     pub token: String,
     pub expires_at: OffsetDateTime,
+}
+
+/// Plaintext credentials returned once for delivery to the authenticated browser.
+#[derive(Debug)]
+pub struct IssuedSession {
+    pub token: String,
+    pub csrf_token: String,
+    pub expires_at: OffsetDateTime,
+    pub user: SessionUser,
 }
 
 /// Authentication failures safe for callers to classify without leaking secrets.
@@ -26,6 +41,12 @@ pub enum AuthError {
     InvalidEmail,
     #[error("password hashing failed")]
     PasswordHash,
+    #[error("email or password is incorrect")]
+    InvalidCredentials,
+    #[error("the session is invalid or expired")]
+    InvalidSession,
+    #[error("the CSRF token is invalid")]
+    InvalidCsrf,
     #[error(transparent)]
     Store(#[from] StoreError),
 }
@@ -75,6 +96,102 @@ pub async fn create_first_admin(
         .map_err(AuthError::from)
 }
 
+/// Verifies local credentials and creates an opaque, revocable server-side session.
+pub async fn login(
+    store: &Store,
+    email: &str,
+    password: String,
+    lifetime: Duration,
+) -> Result<IssuedSession, AuthError> {
+    let email = normalize_email(email)?;
+    let candidate = store.auth_user_by_email(&email).await?;
+    let verification_hash = candidate.as_ref().map(|user| user.password_hash.clone());
+    let password_matches = tokio::task::spawn_blocking(move || match verification_hash {
+        Some(encoded) => verify_password(&password, &encoded),
+        None => {
+            let _ = hash_password(&password);
+            false
+        }
+    })
+    .await
+    .map_err(|_| AuthError::PasswordHash)?;
+    let user = candidate
+        .filter(|_| password_matches)
+        .ok_or(AuthError::InvalidCredentials)?;
+
+    let now = OffsetDateTime::now_utc();
+    let expires_at = now + lifetime;
+    let token = encode_hex(&rand::random::<[u8; SESSION_TOKEN_BYTES]>());
+    let csrf_token = encode_hex(&rand::random::<[u8; CSRF_TOKEN_BYTES]>());
+    let session_id = uuid::Uuid::now_v7().to_string();
+    store
+        .create_session(NewSession {
+            id: &session_id,
+            user_id: &user.id,
+            token_hash: &hash_token(&token),
+            csrf_hash: &hash_token(&csrf_token),
+            expires_at_unix: expires_at.unix_timestamp(),
+            now_unix: now.unix_timestamp(),
+        })
+        .await?;
+    Ok(IssuedSession {
+        token,
+        csrf_token,
+        expires_at,
+        user: SessionUser {
+            id: user.id,
+            email: user.email,
+            role: user.role,
+        },
+    })
+}
+
+/// Resolves an opaque bearer token into a non-secret active user identity.
+pub async fn authenticate_session(store: &Store, token: &str) -> Result<SessionUser, AuthError> {
+    store
+        .session_user(
+            &hash_token(token),
+            OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?
+        .map(|(user, _)| user)
+        .ok_or(AuthError::InvalidSession)
+}
+
+/// Validates CSRF possession against the digest bound to the active session.
+pub async fn validate_csrf(
+    store: &Store,
+    token: &str,
+    csrf_token: &str,
+) -> Result<SessionUser, AuthError> {
+    let (user, expected_hash) = store
+        .session_user(
+            &hash_token(token),
+            OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?
+        .ok_or(AuthError::InvalidSession)?;
+    let presented_hash = hash_token(csrf_token);
+    if expected_hash.len() != presented_hash.len()
+        || !bool::from(expected_hash.ct_eq(presented_hash.as_slice()))
+    {
+        return Err(AuthError::InvalidCsrf);
+    }
+    Ok(user)
+}
+
+/// Revokes the active session after its bound CSRF credential has been verified.
+pub async fn logout(store: &Store, token: &str, csrf_token: &str) -> Result<(), AuthError> {
+    validate_csrf(store, token, csrf_token).await?;
+    store
+        .revoke_session(
+            &hash_token(token),
+            OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(())
+}
+
 /// Applies a deliberately conservative email normalization for local identities.
 fn normalize_email(email: &str) -> Result<String, AuthError> {
     let normalized = email.trim().to_lowercase();
@@ -96,6 +213,15 @@ fn hash_password(password: &str) -> Result<String, AuthError> {
         .map_err(|_| AuthError::PasswordHash)
 }
 
+/// Verifies a candidate against a PHC string and treats malformed hashes as failure.
+fn verify_password(password: &str, encoded: &str) -> bool {
+    PasswordHash::new(encoded).ok().is_some_and(|hash| {
+        Argon2::default()
+            .verify_password(password.as_bytes(), &hash)
+            .is_ok()
+    })
+}
+
 /// Produces the fixed-size digest stored instead of a bearer setup token.
 fn hash_token(token: &str) -> [u8; 32] {
     Sha256::digest(token.as_bytes()).into()
@@ -114,9 +240,9 @@ fn encode_hex(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use argon2::{Argon2, PasswordHash, PasswordVerifier};
+    use argon2::{Argon2, PasswordVerifier, password_hash::phc::PasswordHash};
 
-    use super::{AuthError, encode_hex, hash_password, normalize_email};
+    use super::{AuthError, encode_hex, hash_password, normalize_email, verify_password};
 
     /// Ensures passwords are stored as verifiable Argon2id PHC strings.
     #[test]
@@ -127,6 +253,17 @@ mod tests {
         Argon2::default()
             .verify_password(b"a sufficiently long password", &parsed)
             .expect("password verifies");
+    }
+
+    /// Ensures incorrect passwords and malformed stored hashes fail closed.
+    #[test]
+    fn password_verification_fails_closed() {
+        let encoded = hash_password("a sufficiently long password").expect("password hashes");
+        assert!(!verify_password("wrong password", &encoded));
+        assert!(!verify_password(
+            "a sufficiently long password",
+            "not-a-phc-string"
+        ));
     }
 
     /// Ensures identity normalization is predictable and rejects malformed values.
