@@ -105,6 +105,7 @@ const githubWebhookCredentialSchema = z.object({
   endpoint_path: z.string(),
   secret: z.string(),
 });
+const sshCredentialResponseSchema = z.object({ configured: z.literal(true) });
 
 export type User = z.infer<typeof userSchema>;
 export type AdminUser = z.infer<typeof adminUserSchema>;
@@ -327,6 +328,22 @@ export function createGithubWebhook(
       method: "PUT",
       headers: csrfHeaders(),
       body: JSON.stringify({ repository_full_name: repositoryFullName }),
+    },
+  );
+}
+
+/** Encrypts or rotates a write-only SSH deploy key and explicit host trust. */
+export function upsertSshCredential(
+  projectId: string,
+  input: { private_key: string; known_hosts: string },
+) {
+  return request(
+    `/api/v1/projects/${projectId}/ssh-credential`,
+    sshCredentialResponseSchema,
+    {
+      method: "PUT",
+      headers: csrfHeaders(),
+      body: JSON.stringify(input),
     },
   );
 }

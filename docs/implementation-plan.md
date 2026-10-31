@@ -30,7 +30,7 @@ vertical slice kept working as each capability is added.
 
 ## Milestone D — automatic deployment and reliability
 
-1. Add protected SSH deploy credentials. Signed, idempotent GitHub webhooks are
+1. Protected SSH deploy credentials and signed, idempotent GitHub webhooks are
    complete.
 2. Add encrypted variables/secrets, rollback, runtime logs, reconciliation, and
    release retention.

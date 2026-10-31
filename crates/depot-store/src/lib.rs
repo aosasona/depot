@@ -306,6 +306,25 @@ pub struct UpsertGithubWebhook<'a> {
     pub now_unix: i64,
 }
 
+/// Encrypted SSH key and trusted-host data loaded only by the worker.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectSshCredential {
+    pub private_key_ciphertext: Vec<u8>,
+    pub private_key_nonce: Vec<u8>,
+    pub known_hosts: String,
+}
+
+/// Values needed to create or rotate one project's SSH deploy credential.
+#[derive(Debug)]
+pub struct UpsertProjectSshCredential<'a> {
+    pub project_id: &'a str,
+    pub private_key_ciphertext: &'a [u8],
+    pub private_key_nonce: &'a [u8],
+    pub known_hosts: &'a str,
+    pub actor_user_id: &'a str,
+    pub now_unix: i64,
+}
+
 /// One project hostname and its routing reconciliation state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Domain {
@@ -378,6 +397,58 @@ pub enum StoreError {
 }
 
 impl Store {
+    /// Creates or rotates an encrypted SSH deploy key and its trusted hosts.
+    pub async fn upsert_project_ssh_credential(
+        &self,
+        input: UpsertProjectSshCredential<'_>,
+    ) -> Result<(), StoreError> {
+        self.project_by_id(input.project_id).await?;
+        sqlx::query(
+            "INSERT INTO project_ssh_credentials
+             (project_id, private_key_ciphertext, private_key_nonce, known_hosts,
+              created_by_user_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(project_id) DO UPDATE SET
+               private_key_ciphertext = excluded.private_key_ciphertext,
+               private_key_nonce = excluded.private_key_nonce,
+               known_hosts = excluded.known_hosts,
+               created_by_user_id = excluded.created_by_user_id,
+               updated_at = excluded.updated_at",
+        )
+        .bind(input.project_id)
+        .bind(input.private_key_ciphertext)
+        .bind(input.private_key_nonce)
+        .bind(input.known_hosts)
+        .bind(input.actor_user_id)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Loads one encrypted SSH credential without exposing it through the API.
+    pub async fn project_ssh_credential(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<ProjectSshCredential>, StoreError> {
+        let row = sqlx::query(
+            "SELECT private_key_ciphertext, private_key_nonce, known_hosts
+             FROM project_ssh_credentials WHERE project_id = ?",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(ProjectSshCredential {
+                private_key_ciphertext: row.try_get("private_key_ciphertext")?,
+                private_key_nonce: row.try_get("private_key_nonce")?,
+                known_hosts: row.try_get("known_hosts")?,
+            })
+        })
+        .transpose()
+    }
+
     /// Creates or rotates one encrypted project webhook and invalidates its old URL.
     pub async fn upsert_github_webhook(
         &self,

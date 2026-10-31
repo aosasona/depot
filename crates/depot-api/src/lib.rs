@@ -25,7 +25,7 @@ use depot_secrets::SecretCipher;
 use depot_store::{
     Deployment, Domain, JobEvent, JobStatus, NewDeployment, NewJob, NewProject, ProjectSummary,
     ProjectVariable, ServiceConfig, SessionUser, Store, StoreError, UpdateServiceConfig,
-    UpsertGithubWebhook, UpsertProjectVariable, UserRole, UserSummary,
+    UpsertGithubWebhook, UpsertProjectSshCredential, UpsertProjectVariable, UserRole, UserSummary,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -225,6 +225,7 @@ enum ApiError {
     InvalidVariable,
     SecretsUnavailable,
     InvalidWebhook,
+    InvalidSshCredential,
 }
 
 /// Durable deployment history returned to authenticated workspace members.
@@ -342,6 +343,19 @@ struct GithubWebhookResponse {
     deployment_id: Option<String>,
 }
 
+/// Write-only SSH private key and trusted host keys for one project.
+#[derive(Deserialize)]
+struct UpsertProjectSshCredentialRequest {
+    private_key: String,
+    known_hosts: String,
+}
+
+/// Safe acknowledgment which never returns stored credential material.
+#[derive(Debug, Serialize)]
+struct ProjectSshCredentialResponse {
+    configured: bool,
+}
+
 /// Builds the versioned authentication routes backed by the supplied store.
 pub fn router(store: Store) -> Router {
     router_with_secrets(store, None)
@@ -400,6 +414,10 @@ pub fn router_with_secrets(store: Store, secrets: Option<SecretCipher>) -> Route
             axum::routing::put(create_github_webhook),
         )
         .route(
+            "/api/v1/projects/{project_id}/ssh-credential",
+            axum::routing::put(upsert_project_ssh_credential),
+        )
+        .route(
             "/api/v1/webhooks/github/{endpoint_token}",
             post(receive_github_webhook),
         )
@@ -420,6 +438,79 @@ pub fn router_with_secrets(store: Store, secrets: Option<SecretCipher>) -> Route
         .route("/api/v1/jobs/{job_id}", get(get_job_status))
         .layer(DefaultBodyLimit::max(1024 * 1024))
         .with_state(ApiState { store, secrets })
+}
+
+/// Encrypts and stores a write-only SSH deploy key with explicit host trust.
+async fn upsert_project_ssh_credential(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(request): Json<UpsertProjectSshCredentialRequest>,
+) -> Result<Json<ProjectSshCredentialResponse>, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let project = state.store.project_by_id(&project_id).await?;
+    let repository =
+        url::Url::parse(&project.repository_url).map_err(|_| ApiError::InvalidSshCredential)?;
+    if repository.scheme() != "ssh"
+        || !validate_private_key(&request.private_key)
+        || !validate_known_hosts(&request.known_hosts)
+    {
+        return Err(ApiError::InvalidSshCredential);
+    }
+    let cipher = state.secrets.as_ref().ok_or(ApiError::SecretsUnavailable)?;
+    let context = format!("depot:ssh:v1:{project_id}");
+    let encrypted = cipher
+        .encrypt(&request.private_key, context.as_bytes())
+        .map_err(|_| ApiError::SecretsUnavailable)?;
+    state
+        .store
+        .upsert_project_ssh_credential(UpsertProjectSshCredential {
+            project_id: &project_id,
+            private_key_ciphertext: &encrypted.ciphertext,
+            private_key_nonce: &encrypted.nonce,
+            known_hosts: &request.known_hosts,
+            actor_user_id: &actor.id,
+            now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
+        })
+        .await?;
+    Ok(Json(ProjectSshCredentialResponse { configured: true }))
+}
+
+/// Accepts common unencrypted PEM/OpenSSH private-key containers within bounds.
+fn validate_private_key(value: &str) -> bool {
+    let key_types = ["OPENSSH", "", "RSA", "EC"];
+    let valid_container = key_types.iter().any(|key_type| {
+        let separator = if key_type.is_empty() { "" } else { " " };
+        let begin = format!("-----BEGIN {key_type}{separator}PRIVATE KEY-----");
+        let end = format!("-----END {key_type}{separator}PRIVATE KEY-----");
+        value.starts_with(&begin) && value.trim_end_matches(['\r', '\n']).ends_with(&end)
+    });
+    let recognized_header = [
+        "-----BEGIN OPENSSH PRIVATE KEY-----",
+        "-----BEGIN PRIVATE KEY-----",
+        "-----BEGIN RSA PRIVATE KEY-----",
+        "-----BEGIN EC PRIVATE KEY-----",
+    ]
+    .iter()
+    .any(|header| value.starts_with(header));
+    recognized_header && valid_container && value.len() <= 128 * 1024 && !value.contains('\0')
+}
+
+/// Requires at least one syntactically shaped OpenSSH known-hosts entry.
+fn validate_known_hosts(value: &str) -> bool {
+    value.len() <= 128 * 1024
+        && !value.is_empty()
+        && value
+            .chars()
+            .all(|character| !character.is_control() || matches!(character, '\n' | '\t' | '\r'))
+        && value
+            .lines()
+            .filter(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
+            .all(|line| line.split_whitespace().count() >= 3)
+        && value
+            .lines()
+            .any(|line| !line.trim().is_empty() && !line.trim_start().starts_with('#'))
 }
 
 /// Creates or rotates a project webhook and returns its credentials once.
@@ -1669,6 +1760,11 @@ impl IntoResponse for ApiError {
                 "invalid_webhook",
                 "The webhook delivery could not be verified or accepted.",
             ),
+            Self::InvalidSshCredential => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_ssh_credential",
+                "Use an SSH repository with a private key and trusted known_hosts entries.",
+            ),
             Self::Store(StoreError::InvalidRole(_))
             | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1725,9 +1821,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        UpdateServiceConfigRequest, router, router_with_secrets, validate_repository_full_name,
-        validate_service_config, validate_variable_name, validate_variable_value,
-        verify_github_signature,
+        UpdateServiceConfigRequest, router, router_with_secrets, validate_known_hosts,
+        validate_private_key, validate_repository_full_name, validate_service_config,
+        validate_variable_name, validate_variable_value, verify_github_signature,
     };
 
     /// Parses a JSON response body for focused API assertions.
@@ -1880,6 +1976,18 @@ mod tests {
             "aosasona/depot"
         );
         assert!(validate_repository_full_name("https://github.com/aosasona/depot").is_err());
+    }
+
+    /// Rejects malformed private keys and host trust while accepting bounded OpenSSH input.
+    #[test]
+    fn ssh_credential_input_requires_key_and_known_hosts_shapes() {
+        assert!(validate_private_key(
+            "-----BEGIN OPENSSH PRIVATE KEY-----\nAAAA\n-----END OPENSSH PRIVATE KEY-----\n"
+        ));
+        assert!(!validate_private_key("not a private key"));
+        assert!(validate_known_hosts("github.com ssh-ed25519 AAAAC3Nza\n"));
+        assert!(!validate_known_hosts("github.com\n"));
+        assert!(!validate_known_hosts("# comments only\n"));
     }
 
     /// Proves variable writes encrypt values and all API reads remain masked.

@@ -26,12 +26,14 @@ body {
 }
 button,
 input,
-select {
+select,
+textarea {
   font: inherit;
 }
 button:focus-visible,
 input:focus-visible,
 select:focus-visible,
+textarea:focus-visible,
 a:focus-visible {
   outline: 3px solid var(--accent);
   outline-offset: 3px;
@@ -588,6 +590,32 @@ h1 {
   color: var(--text);
   text-transform: none;
   user-select: all;
+}
+.credential-form {
+  display: grid;
+  gap: 0.7rem;
+}
+.credential-form label {
+  display: grid;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.62rem;
+  letter-spacing: 0.06em;
+}
+.credential-form textarea {
+  width: 100%;
+  padding: 0.7rem;
+  resize: vertical;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.68rem;
+  line-height: 1.45;
+}
+.credential-submit {
+  min-height: 38px;
 }
 .domain-row {
   display: grid;

@@ -7,8 +7,8 @@ gateway, durable worker, and restricted host-side Caddy agent.
 Depot is under active development. Public Git inspection, Dockerfile builds,
 container readiness, project domains, Host-based gateway routing, encrypted
 runtime variables, safe rollback, and signed GitHub push webhooks are
-implemented. Railpack, static artifact releases, private Git credentials, and
-runtime log streaming are not complete yet. GitHub Actions and other CI systems
+implemented. Railpack, static artifact releases, and runtime log streaming are
+not complete yet. GitHub Actions and other CI systems
 can also trigger exact-commit deployments with a project-scoped bearer token.
 
 ## Quick start: main Depot binary
@@ -87,6 +87,11 @@ Configure projects in the dashboard, inspect their repositories, select the
 Dockerfile builder, set the container port and readiness path, then deploy.
 Successful services are published on ephemeral loopback ports and selected by
 the internal gateway through exact project-domain matches.
+
+Private repositories use encrypted, project-scoped SSH deploy keys with strict
+host verification. Follow the
+[private repository setup guide](docs/operations/private-repositories.md); Depot
+does not support embedded URL credentials or accept host keys on first use.
 
 Project environment values are encrypted at rest and injected only into the
 runtime container. Values are write-only after saving; replacing a value uses

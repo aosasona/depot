@@ -428,7 +428,7 @@ async fn execute_job(
     job: &depot_store::Job,
 ) -> Result<String, String> {
     match job.kind.as_str() {
-        "inspect_repository" => execute_inspection(store, worker_config, job).await,
+        "inspect_repository" => execute_inspection(store, worker_config, secrets, job).await,
         "deploy_project" => execute_deployment(store, worker_config, secrets, job).await,
         "reconcile_domains" => execute_domain_reconciliation(store, worker_config).await,
         _ => Err(format!("Unsupported job kind: {}", job.kind)),
@@ -480,6 +480,7 @@ async fn execute_domain_reconciliation(
 async fn execute_inspection(
     store: &Store,
     worker_config: &depot_core::WorkerConfig,
+    secrets: &depot_secrets::SecretCipher,
     job: &depot_store::Job,
 ) -> Result<String, String> {
     let project_id = job
@@ -490,19 +491,31 @@ async fn execute_inspection(
         .project_by_id(project_id)
         .await
         .map_err(|_| "Inspection project no longer exists.".to_owned())?;
+    let mut ssh =
+        load_project_ssh_credentials(store, secrets, project_id, &project.repository_url).await?;
+    let git_credentials =
+        ssh.as_ref()
+            .map(|(private_key, known_hosts)| depot_git::GitSshCredentials {
+                private_key,
+                known_hosts,
+            });
     let inspection = depot_git::inspect_repository(
         &project.repository_url,
         &project.branch,
         std::path::Path::new(&worker_config.workspace_root),
         std::time::Duration::from_secs(worker_config.git_timeout_seconds),
+        git_credentials,
     )
-    .await
-    .map_err(|error| error.to_string())?;
+    .await;
+    if let Some((private_key, _)) = &mut ssh {
+        private_key.zeroize();
+    }
+    let inspection = inspection.map_err(|error| error.to_string())?;
     serde_json::to_string(&inspection)
         .map_err(|_| "Repository inspection result could not be encoded.".to_owned())
 }
 
-/// Checks out the recorded SHA and builds a Dockerfile image without shell invocation.
+/// Checks out the recorded SHA and builds a Dockerfile image from fixed arguments.
 async fn execute_deployment(
     store: &Store,
     worker_config: &depot_core::WorkerConfig,
@@ -534,15 +547,27 @@ async fn execute_deployment(
     if config.builder == "railpack" {
         return Err("Railpack builds are not implemented yet.".to_owned());
     }
+    let mut ssh =
+        load_project_ssh_credentials(store, secrets, project_id, &project.repository_url).await?;
+    let git_credentials =
+        ssh.as_ref()
+            .map(|(private_key, known_hosts)| depot_git::GitSshCredentials {
+                private_key,
+                known_hosts,
+            });
     let checkout = depot_git::checkout_repository(
         &project.repository_url,
         &project.branch,
         &deployment.commit_sha,
         std::path::Path::new(&worker_config.workspace_root),
         std::time::Duration::from_secs(worker_config.git_timeout_seconds),
+        git_credentials,
     )
-    .await
-    .map_err(|error| error.to_string())?;
+    .await;
+    if let Some((private_key, _)) = &mut ssh {
+        private_key.zeroize();
+    }
+    let checkout = checkout.map_err(|error| error.to_string())?;
     let image_tag = format!("depot/{}:{}", project.slug, &checkout.commit_sha()[..12]);
     let build = depot_build::build_dockerfile(depot_build::DockerBuildRequest {
         docker_binary: &worker_config.docker_binary,
@@ -633,6 +658,32 @@ async fn execute_deployment(
         "logs": build.logs,
     }))
     .map_err(|_| "Deployment result could not be encoded.".to_owned())
+}
+
+/// Decrypts SSH material only for SSH repositories and fails closed when absent.
+async fn load_project_ssh_credentials(
+    store: &Store,
+    secrets: &depot_secrets::SecretCipher,
+    project_id: &str,
+    repository_url: &str,
+) -> Result<Option<(String, String)>, String> {
+    if !repository_url.starts_with("ssh://") {
+        return Ok(None);
+    }
+    let credential = store
+        .project_ssh_credential(project_id)
+        .await
+        .map_err(|_| "SSH deploy credentials could not be loaded.".to_owned())?
+        .ok_or_else(|| "This SSH repository has no deploy credentials configured.".to_owned())?;
+    let context = format!("depot:ssh:v1:{project_id}");
+    let private_key = secrets
+        .decrypt(
+            &credential.private_key_ciphertext,
+            &credential.private_key_nonce,
+            context.as_bytes(),
+        )
+        .map_err(|_| "SSH deploy credentials could not be decrypted.".to_owned())?;
+    Ok(Some((private_key, credential.known_hosts)))
 }
 
 /// Installs structured logging with a safe, operator-configurable filter.

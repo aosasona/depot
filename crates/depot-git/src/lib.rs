@@ -1,6 +1,8 @@
 //! Safe Git checkout and inspectable build-plan detection for worker jobs.
 
 use std::{
+    fs::Permissions,
+    os::unix::fs::PermissionsExt,
     path::{Path, PathBuf},
     process::Stdio,
     time::Duration,
@@ -28,6 +30,13 @@ pub struct RepositoryInspection {
     pub builder: DetectedBuilder,
     pub reason: String,
     pub has_mise_config: bool,
+}
+
+/// Decrypted SSH material borrowed only for the duration of one Git operation.
+#[derive(Clone, Copy)]
+pub struct GitSshCredentials<'a> {
+    pub private_key: &'a str,
+    pub known_hosts: &'a str,
 }
 
 /// A verified immutable checkout whose workspace is removed when dropped.
@@ -62,6 +71,8 @@ pub enum GitError {
     Timeout,
     #[error("Git checkout failed without exposing remote credentials")]
     CheckoutFailed,
+    #[error("SSH repository has no project deploy credential")]
+    MissingSshCredentials,
     #[error("checked out repository did not resolve to a valid commit SHA")]
     InvalidCommit,
 }
@@ -72,12 +83,18 @@ pub async fn inspect_repository(
     branch: &str,
     workspace_root: &Path,
     timeout: Duration,
+    ssh_credentials: Option<GitSshCredentials<'_>>,
 ) -> Result<RepositoryInspection, GitError> {
     validate_repository_url(repository_url)?;
+    require_ssh_credentials(repository_url, ssh_credentials)?;
     std::fs::create_dir_all(workspace_root).map_err(GitError::Workspace)?;
     let checkout_path = workspace_root.join(format!("inspect-{}", uuid::Uuid::now_v7()));
     let workspace = WorkspaceGuard::new(checkout_path);
     let mut clone = git_command();
+    let ssh = prepare_ssh_command(workspace_root, ssh_credentials)?;
+    if let Some(ssh) = &ssh {
+        ssh.configure(&mut clone);
+    }
     clone.args([
         "clone",
         "--depth",
@@ -91,6 +108,7 @@ pub async fn inspect_repository(
     ]);
     clone.arg(workspace.path());
     run_status(&mut clone, timeout).await?;
+    drop(ssh);
 
     let mut revision = git_command();
     revision
@@ -125,6 +143,7 @@ pub async fn checkout_repository(
     expected_commit_sha: &str,
     workspace_root: &Path,
     timeout: Duration,
+    ssh_credentials: Option<GitSshCredentials<'_>>,
 ) -> Result<RepositoryCheckout, GitError> {
     if expected_commit_sha.len() != 40
         || !expected_commit_sha
@@ -134,9 +153,14 @@ pub async fn checkout_repository(
         return Err(GitError::InvalidCommit);
     }
     validate_repository_url(repository_url)?;
+    require_ssh_credentials(repository_url, ssh_credentials)?;
     std::fs::create_dir_all(workspace_root).map_err(GitError::Workspace)?;
     let checkout_path = workspace_root.join(format!("deploy-{}", uuid::Uuid::now_v7()));
     let mut clone = git_command();
+    let ssh = prepare_ssh_command(workspace_root, ssh_credentials)?;
+    if let Some(ssh) = &ssh {
+        ssh.configure(&mut clone);
+    }
     clone.args([
         "clone",
         "--depth",
@@ -153,6 +177,7 @@ pub async fn checkout_repository(
         let _ = std::fs::remove_dir_all(&checkout_path);
         return Err(error);
     }
+    drop(ssh);
     let mut revision = git_command();
     revision
         .arg("-C")
@@ -182,6 +207,53 @@ fn git_command() -> Command {
         .stdin(Stdio::null())
         .stderr(Stdio::null());
     command
+}
+
+/// Prevents SSH repositories from falling back to ambient agent or user keys.
+fn require_ssh_credentials(
+    repository_url: &str,
+    credentials: Option<GitSshCredentials<'_>>,
+) -> Result<(), GitError> {
+    if repository_url
+        .get(..6)
+        .is_some_and(|scheme| scheme.eq_ignore_ascii_case("ssh://"))
+        && credentials.is_none()
+    {
+        return Err(GitError::MissingSshCredentials);
+    }
+    Ok(())
+}
+
+/// Writes short-lived SSH files and a fixed wrapper enforcing trusted-host checks.
+fn prepare_ssh_command(
+    workspace_root: &Path,
+    credentials: Option<GitSshCredentials<'_>>,
+) -> Result<Option<SshCommandGuard>, GitError> {
+    let Some(credentials) = credentials else {
+        return Ok(None);
+    };
+    let path = workspace_root.join(format!("ssh-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&path).map_err(GitError::Workspace)?;
+    let guard = SshCommandGuard { path };
+    std::fs::set_permissions(&guard.path, Permissions::from_mode(0o700))
+        .map_err(GitError::Workspace)?;
+    let private_key = guard.path.join("identity");
+    let known_hosts = guard.path.join("known_hosts");
+    let wrapper = guard.path.join("ssh");
+    std::fs::write(&private_key, credentials.private_key).map_err(GitError::Workspace)?;
+    std::fs::write(&known_hosts, credentials.known_hosts).map_err(GitError::Workspace)?;
+    std::fs::write(
+        &wrapper,
+        "#!/bin/sh\nexec ssh -i \"$DEPOT_SSH_KEY_FILE\" -o IdentitiesOnly=yes -o UserKnownHostsFile=\"$DEPOT_SSH_KNOWN_HOSTS_FILE\" -o StrictHostKeyChecking=yes -o BatchMode=yes \"$@\"\n",
+    )
+    .map_err(GitError::Workspace)?;
+    std::fs::set_permissions(&private_key, Permissions::from_mode(0o600))
+        .map_err(GitError::Workspace)?;
+    std::fs::set_permissions(&known_hosts, Permissions::from_mode(0o600))
+        .map_err(GitError::Workspace)?;
+    std::fs::set_permissions(&wrapper, Permissions::from_mode(0o700))
+        .map_err(GitError::Workspace)?;
+    Ok(Some(guard))
 }
 
 /// Runs a Git command under the configured wall-clock timeout.
@@ -228,6 +300,33 @@ struct WorkspaceGuard {
     path: PathBuf,
 }
 
+/// Owns materialized SSH credentials and removes them after the clone exits.
+struct SshCommandGuard {
+    path: PathBuf,
+}
+
+impl SshCommandGuard {
+    /// Applies fixed wrapper and credential paths without exposing key bytes in argv.
+    fn configure(&self, command: &mut Command) {
+        command
+            .env("GIT_SSH", self.path.join("ssh"))
+            .env("GIT_SSH_VARIANT", "ssh")
+            .env("DEPOT_SSH_KEY_FILE", self.path.join("identity"))
+            .env("DEPOT_SSH_KNOWN_HOSTS_FILE", self.path.join("known_hosts"));
+    }
+}
+
+impl Drop for SshCommandGuard {
+    /// Best-effort cleanup removes every plaintext credential file.
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %self.path.display(), %error, "could not remove temporary SSH credentials");
+        }
+    }
+}
+
 impl WorkspaceGuard {
     /// Owns a unique path which is deleted when inspection leaves scope.
     fn new(path: PathBuf) -> Self {
@@ -264,9 +363,12 @@ impl Drop for RepositoryCheckout {
 
 #[cfg(test)]
 mod tests {
-    use std::fs;
+    use std::{fs, os::unix::fs::PermissionsExt};
 
-    use super::{DetectedBuilder, detect_builder};
+    use super::{
+        DetectedBuilder, GitError, GitSshCredentials, detect_builder, prepare_ssh_command,
+        require_ssh_credentials,
+    };
 
     /// Creates an isolated test directory without adding a runtime temp dependency.
     fn test_directory() -> std::path::PathBuf {
@@ -294,6 +396,48 @@ mod tests {
         fs::remove_dir_all(path).expect("test directory is removed");
     }
 
+    /// Ensures plaintext SSH files are private, strict, and deleted with their guard.
+    #[test]
+    fn ssh_credentials_are_private_strict_and_ephemeral() {
+        let root = test_directory();
+        let guard = prepare_ssh_command(
+            &root,
+            Some(GitSshCredentials {
+                private_key: "private-key",
+                known_hosts: "example.com ssh-ed25519 AAAA",
+            }),
+        )
+        .expect("SSH command prepares")
+        .expect("guard exists");
+        let credential_path = guard.path.clone();
+        assert_eq!(
+            fs::metadata(credential_path.join("identity"))
+                .expect("identity metadata")
+                .permissions()
+                .mode()
+                & 0o777,
+            0o600
+        );
+        let wrapper = fs::read_to_string(credential_path.join("ssh")).expect("wrapper reads");
+        assert!(wrapper.contains("StrictHostKeyChecking=yes"));
+        assert!(wrapper.contains("BatchMode=yes"));
+        assert!(!wrapper.contains("StrictHostKeyChecking=no"));
+        drop(guard);
+        assert!(!credential_path.exists());
+        fs::remove_dir_all(root).expect("test workspace root is removed");
+    }
+
+    /// Ensures an SSH URL can never silently use the worker account's ambient keys.
+    #[test]
+    fn ssh_repositories_require_project_credentials() {
+        assert!(matches!(
+            require_ssh_credentials("ssh://git@example.com/repository.git", None),
+            Err(GitError::MissingSshCredentials)
+        ));
+        require_ssh_credentials("https://example.com/repository.git", None)
+            .expect("HTTPS does not need SSH material");
+    }
+
     /// Exercises a real public remote only when an operator explicitly supplies its URL.
     #[tokio::test]
     #[ignore = "requires DEPOT_LIVE_GIT_URL and external network access"]
@@ -306,6 +450,7 @@ mod tests {
             "main",
             &workspace,
             std::time::Duration::from_secs(120),
+            None,
         )
         .await
         .expect("public repository inspection succeeds");
