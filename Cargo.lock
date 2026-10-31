@@ -426,6 +426,7 @@ dependencies = [
  "clap",
  "depot-api",
  "depot-auth",
+ "depot-build",
  "depot-core",
  "depot-git",
  "depot-store",
@@ -469,6 +470,16 @@ dependencies = [
  "subtle",
  "thiserror",
  "time",
+ "tokio",
+ "uuid",
+]
+
+[[package]]
+name = "depot-build"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
  "tokio",
  "uuid",
 ]

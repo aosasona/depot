@@ -14,7 +14,7 @@ use depot_auth::issue_bootstrap_token;
 use depot_core::Config;
 use depot_store::Store;
 use rust_embed::Embed;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::Duration;
 use tokio::net::TcpListener;
@@ -75,6 +75,12 @@ enum Command {
 struct HealthResponse {
     status: &'static str,
     version: &'static str,
+}
+
+/// Trusted queue payload linking a deployment build job to its durable record.
+#[derive(Debug, Deserialize)]
+struct DeploymentJobPayload {
+    deployment_id: String,
 }
 
 /// Embeds the production Vite output into the release executable.
@@ -226,9 +232,19 @@ async fn execute_job(
     worker_config: &depot_core::WorkerConfig,
     job: &depot_store::Job,
 ) -> Result<String, String> {
-    if job.kind != "inspect_repository" {
-        return Err(format!("Unsupported job kind: {}", job.kind));
+    match job.kind.as_str() {
+        "inspect_repository" => execute_inspection(store, worker_config, job).await,
+        "deploy_project" => execute_deployment(store, worker_config, job).await,
+        _ => Err(format!("Unsupported job kind: {}", job.kind)),
     }
+}
+
+/// Inspects one authoritative project source and returns its immutable build plan.
+async fn execute_inspection(
+    store: &Store,
+    worker_config: &depot_core::WorkerConfig,
+    job: &depot_store::Job,
+) -> Result<String, String> {
     let project_id = job
         .project_id
         .as_deref()
@@ -247,6 +263,61 @@ async fn execute_job(
     .map_err(|error| error.to_string())?;
     serde_json::to_string(&inspection)
         .map_err(|_| "Repository inspection result could not be encoded.".to_owned())
+}
+
+/// Checks out the recorded SHA and builds a Dockerfile image without shell invocation.
+async fn execute_deployment(
+    store: &Store,
+    worker_config: &depot_core::WorkerConfig,
+    job: &depot_store::Job,
+) -> Result<String, String> {
+    let payload: DeploymentJobPayload = serde_json::from_str(&job.payload_json)
+        .map_err(|_| "Deployment job payload is invalid.".to_owned())?;
+    let deployment = store
+        .deployment_by_id(&payload.deployment_id)
+        .await
+        .map_err(|_| "Deployment record no longer exists.".to_owned())?;
+    let project_id = job
+        .project_id
+        .as_deref()
+        .filter(|id| *id == deployment.project_id)
+        .ok_or_else(|| "Deployment job project does not match its record.".to_owned())?;
+    let project = store
+        .project_by_id(project_id)
+        .await
+        .map_err(|_| "Deployment project no longer exists.".to_owned())?;
+    let config = store
+        .service_config(project_id)
+        .await
+        .map_err(|_| "Deployment configuration is unavailable.".to_owned())?;
+    if config.project_kind == "static" {
+        return Err("Static artifact builds are not implemented yet.".to_owned());
+    }
+    if config.builder == "railpack" {
+        return Err("Railpack builds are not implemented yet.".to_owned());
+    }
+    let checkout = depot_git::checkout_repository(
+        &project.repository_url,
+        &project.branch,
+        &deployment.commit_sha,
+        std::path::Path::new(&worker_config.workspace_root),
+        std::time::Duration::from_secs(worker_config.git_timeout_seconds),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let image_tag = format!("depot/{}:{}", project.slug, &checkout.commit_sha()[..12]);
+    let result = depot_build::build_dockerfile(depot_build::DockerBuildRequest {
+        docker_binary: &worker_config.docker_binary,
+        checkout_path: checkout.path(),
+        context_path: &config.context_path,
+        dockerfile_path: &config.dockerfile_path,
+        image_tag: &image_tag,
+        timeout: std::time::Duration::from_secs(worker_config.docker_timeout_seconds),
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    serde_json::to_string(&result)
+        .map_err(|_| "Docker build result could not be encoded.".to_owned())
 }
 
 /// Installs structured logging with a safe, operator-configurable filter.

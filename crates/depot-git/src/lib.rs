@@ -30,6 +30,25 @@ pub struct RepositoryInspection {
     pub has_mise_config: bool,
 }
 
+/// A verified immutable checkout whose workspace is removed when dropped.
+#[derive(Debug)]
+pub struct RepositoryCheckout {
+    path: PathBuf,
+    commit_sha: String,
+}
+
+impl RepositoryCheckout {
+    /// Returns the repository root containing the verified immutable commit.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
+    /// Returns the exact commit resolved and verified after checkout.
+    pub fn commit_sha(&self) -> &str {
+        &self.commit_sha
+    }
+}
+
 /// Failures from validation, bounded Git execution, or repository inspection.
 #[derive(Debug, Error)]
 pub enum GitError {
@@ -96,6 +115,61 @@ pub async fn inspect_repository(
         reason,
         has_mise_config: workspace.path().join("mise.toml").is_file()
             || workspace.path().join(".mise.toml").is_file(),
+    })
+}
+
+/// Checks out a branch and verifies it resolves to the deployment's recorded commit SHA.
+pub async fn checkout_repository(
+    repository_url: &str,
+    branch: &str,
+    expected_commit_sha: &str,
+    workspace_root: &Path,
+    timeout: Duration,
+) -> Result<RepositoryCheckout, GitError> {
+    if expected_commit_sha.len() != 40
+        || !expected_commit_sha
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(GitError::InvalidCommit);
+    }
+    validate_repository_url(repository_url)?;
+    std::fs::create_dir_all(workspace_root).map_err(GitError::Workspace)?;
+    let checkout_path = workspace_root.join(format!("deploy-{}", uuid::Uuid::now_v7()));
+    let mut clone = git_command();
+    clone.args([
+        "clone",
+        "--depth",
+        "1",
+        "--single-branch",
+        "--no-tags",
+        "--branch",
+        branch,
+        "--",
+        repository_url,
+    ]);
+    clone.arg(&checkout_path);
+    if let Err(error) = run_status(&mut clone, timeout).await {
+        let _ = std::fs::remove_dir_all(&checkout_path);
+        return Err(error);
+    }
+    let mut revision = git_command();
+    revision
+        .arg("-C")
+        .arg(&checkout_path)
+        .args(["rev-parse", "HEAD"]);
+    let output = tokio::time::timeout(timeout, revision.output())
+        .await
+        .map_err(|_| GitError::Timeout)?
+        .map_err(GitError::Spawn)?;
+    let resolved = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+    if !output.status.success() || !resolved.eq_ignore_ascii_case(expected_commit_sha) {
+        let _ = std::fs::remove_dir_all(&checkout_path);
+        return Err(GitError::InvalidCommit);
+    }
+    Ok(RepositoryCheckout {
+        path: checkout_path,
+        commit_sha: resolved,
     })
 }
 
@@ -173,6 +247,17 @@ impl Drop for WorkspaceGuard {
             && error.kind() != std::io::ErrorKind::NotFound
         {
             tracing::warn!(path = %self.path.display(), %error, "could not remove Git workspace");
+        }
+    }
+}
+
+impl Drop for RepositoryCheckout {
+    /// Best-effort cleanup removes deployment source after its build attempt completes.
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %self.path.display(), %error, "could not remove deployment checkout");
         }
     }
 }

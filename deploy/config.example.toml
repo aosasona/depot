@@ -10,3 +10,5 @@ public_origin = "https://depot.example.com"
 [worker]
 workspace_root = "/var/lib/depot/workspaces"
 git_timeout_seconds = 120
+docker_binary = "docker"
+docker_timeout_seconds = 1800

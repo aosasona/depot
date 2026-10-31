@@ -10,6 +10,7 @@ axum.workspace = true
 clap.workspace = true
 depot-api = { path = "../depot-api" }
 depot-auth = { path = "../depot-auth" }
+depot-build = { path = "../depot-build" }
 depot-core = { path = "../depot-core" }
 depot-git = { path = "../depot-git" }
 depot-store = { path = "../depot-store" }

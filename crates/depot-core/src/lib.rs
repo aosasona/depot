@@ -43,6 +43,20 @@ pub struct SecurityConfig {
 pub struct WorkerConfig {
     pub workspace_root: String,
     pub git_timeout_seconds: u64,
+    #[serde(default = "default_docker_binary")]
+    pub docker_binary: String,
+    #[serde(default = "default_docker_timeout_seconds")]
+    pub docker_timeout_seconds: u64,
+}
+
+/// Returns the conventional Docker CLI name for operator PATH resolution.
+fn default_docker_binary() -> String {
+    "docker".to_owned()
+}
+
+/// Returns a conservative default wall-clock limit for application image builds.
+const fn default_docker_timeout_seconds() -> u64 {
+    1_800
 }
 
 /// Configuration load and validation failures with actionable field context.
@@ -155,6 +169,8 @@ impl Config {
             worker: WorkerConfig {
                 workspace_root: ".tmp/workspaces".to_owned(),
                 git_timeout_seconds: 120,
+                docker_binary: default_docker_binary(),
+                docker_timeout_seconds: default_docker_timeout_seconds(),
             },
         }
     }
@@ -177,6 +193,9 @@ impl Config {
         if self.worker.workspace_root.trim().is_empty()
             || self.worker.git_timeout_seconds == 0
             || self.worker.git_timeout_seconds > 1_800
+            || self.worker.docker_binary.trim().is_empty()
+            || self.worker.docker_timeout_seconds == 0
+            || self.worker.docker_timeout_seconds > 7_200
         {
             return Err(ConfigError::InvalidWorkerConfig);
         }
