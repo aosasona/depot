@@ -92,6 +92,13 @@ Project environment values are encrypted at rest and injected only into the
 runtime container. Values are write-only after saving; replacing a value uses
 the same environment name. Build jobs receive none of these runtime values.
 
+Ready service releases are promoted through an explicit single-active pointer.
+Late builds cannot replace a newer requested deployment, failed candidates
+leave the current release untouched, and switched-out containers are retired.
+Any prior successful commit can be rebuilt and promoted from the deployment
+history with the rollback action. Depot retains at most five successful service
+images per project while keeping deployment metadata for audit and diagnosis.
+
 ### 5. Deploy with curl or GitHub Actions
 
 Create a project-scoped token on the Depot VM. Project and user IDs are exposed

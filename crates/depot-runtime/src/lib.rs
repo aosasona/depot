@@ -166,6 +166,25 @@ pub async fn remove_container(
     }
 }
 
+/// Removes one unreferenced retained image after release retention selection.
+pub async fn remove_image(
+    docker_binary: &str,
+    image_id: &str,
+    timeout: Duration,
+) -> Result<(), RuntimeError> {
+    let mut command = Command::new(docker_binary);
+    command
+        .args(["image", "rm", image_id])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = command_output(&mut command, timeout).await?;
+    if output.status.success() {
+        Ok(())
+    } else {
+        Err(RuntimeError::StartFailed)
+    }
+}
+
 /// Executes one bounded Docker command without a shell.
 async fn command_output(
     command: &mut Command,
@@ -245,6 +264,7 @@ mod tests {
         )
         .expect("fake Docker writes");
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        std::thread::sleep(Duration::from_millis(10));
         let running = start_container(StartContainerRequest {
             docker_binary: fake.to_str().expect("path is UTF-8"),
             deployment_id: "deployment",
@@ -276,6 +296,7 @@ mod tests {
         )
         .expect("fake Docker writes");
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        std::thread::sleep(Duration::from_millis(10));
         let environment = vec![("DATABASE_URL".to_owned(), "secret-value".to_owned())];
         start_container(StartContainerRequest {
             docker_binary: fake.to_str().expect("path is UTF-8"),

@@ -5,6 +5,7 @@ import {
   type Deployment,
   getJobStatus,
   listDeployments,
+  rollbackDeployment,
 } from "../../lib/api/client";
 
 /** Provides manual deployment control and live durable history for one project. */
@@ -62,7 +63,11 @@ export function DeploymentPanel({ projectId }: { projectId: string }) {
       )}
       <div className="deployment-list">
         {deployments.data?.map((deployment) => (
-          <DeploymentRow key={deployment.id} deployment={deployment} />
+          <DeploymentRow
+            key={deployment.id}
+            deployment={deployment}
+            projectId={projectId}
+          />
         ))}
       </div>
     </div>
@@ -70,7 +75,21 @@ export function DeploymentPanel({ projectId }: { projectId: string }) {
 }
 
 /** Renders one deployment and loads its terminal Docker result when available. */
-function DeploymentRow({ deployment }: { deployment: Deployment }) {
+function DeploymentRow({
+  deployment,
+  projectId,
+}: {
+  deployment: Deployment;
+  projectId: string;
+}) {
+  const queryClient = useQueryClient();
+  const rollback = useMutation({
+    mutationFn: () => rollbackDeployment(deployment.id),
+    onSuccess: () =>
+      queryClient.invalidateQueries({
+        queryKey: ["projects", projectId, "deployments"],
+      }),
+  });
   const job = useQuery({
     queryKey: ["jobs", deployment.job_id],
     queryFn: () => getJobStatus(deployment.job_id),
@@ -81,12 +100,25 @@ function DeploymentRow({ deployment }: { deployment: Deployment }) {
   return (
     <div className="deployment-row">
       <span className={`deployment-status ${deployment.status}`}>
-        {deployment.status}
+        {deployment.active ? "active" : deployment.status}
       </span>
       <code>{deployment.commit_sha.slice(0, 12)}</code>
       <span>{deployment.trigger_kind}</span>
       {image && <code title={image.image_id}>{image.image_tag}</code>}
       {deployment.host_port && <code>127.0.0.1:{deployment.host_port}</code>}
+      {deployment.status === "succeeded" && !deployment.active && (
+        <button
+          className="text-action"
+          type="button"
+          disabled={rollback.isPending}
+          onClick={() => rollback.mutate()}
+        >
+          {rollback.isPending ? "Queueing…" : "Roll back"}
+        </button>
+      )}
+      {rollback.error && (
+        <p className="inspection-error">{deploymentError(rollback.error)}</p>
+      )}
       {deployment.failure_reason && (
         <p className="inspection-error">{deployment.failure_reason}</p>
       )}

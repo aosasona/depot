@@ -82,6 +82,7 @@ const deploymentSchema = z.object({
   created_at: z.number(),
   updated_at: z.number(),
   finished_at: z.number().nullable(),
+  active: z.boolean(),
 });
 const domainSchema = z.object({
   id: z.string(),
@@ -307,6 +308,15 @@ export function createDeployment(projectId: string) {
       method: "POST",
       headers: csrfHeaders(),
     },
+  );
+}
+
+/** Rebuilds a retained successful commit through the normal promotion path. */
+export function rollbackDeployment(deploymentId: string) {
+  return request(
+    `/api/v1/deployments/${deploymentId}/rollback`,
+    deploymentSchema,
+    { method: "POST", headers: csrfHeaders() },
   );
 }
 

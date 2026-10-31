@@ -239,6 +239,7 @@ struct DeploymentResponse {
     created_at: i64,
     updated_at: i64,
     finished_at: Option<i64>,
+    active: bool,
 }
 
 /// Desired project hostname and its current routing reconciliation state.
@@ -355,6 +356,10 @@ pub fn router_with_secrets(store: Store, secrets: Option<SecretCipher>) -> Route
         )
         .route("/api/v1/deploy", post(hook_deploy))
         .route("/api/v1/deployments/{deployment_id}", get(get_deployment))
+        .route(
+            "/api/v1/deployments/{deployment_id}/rollback",
+            post(rollback_deployment),
+        )
         .route(
             "/api/v1/projects/{project_id}/domains",
             get(list_domains).post(create_domain),
@@ -664,6 +669,31 @@ async fn get_deployment(
     Ok(Json(deployment_response(
         state.store.deployment_by_id(&deployment_id).await?,
     )))
+}
+
+/// Rebuilds and promotes a retained successful commit through the normal safe path.
+async fn rollback_deployment(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(deployment_id): axum::extract::Path<String>,
+) -> Result<(StatusCode, Json<DeploymentResponse>), ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let target = state.store.deployment_by_id(&deployment_id).await?;
+    if target.status != "succeeded" {
+        return Err(ApiError::InvalidDeployRequest);
+    }
+    let deployment = state
+        .store
+        .create_deployment(NewDeployment {
+            project_id: &target.project_id,
+            commit_sha: &target.commit_sha,
+            created_by_user_id: &actor.id,
+            trigger_kind: "manual",
+            now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
+        })
+        .await?;
+    Ok((StatusCode::ACCEPTED, Json(deployment_response(deployment))))
 }
 
 /// Lists desired hostnames for one authenticated project.
@@ -1095,6 +1125,7 @@ fn deployment_response(deployment: Deployment) -> DeploymentResponse {
         created_at: deployment.created_at,
         updated_at: deployment.updated_at,
         finished_at: deployment.finished_at,
+        active: deployment.active,
     }
 }
 

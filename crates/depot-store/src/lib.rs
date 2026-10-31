@@ -211,6 +211,7 @@ pub struct Deployment {
     pub created_at: i64,
     pub updated_at: i64,
     pub finished_at: Option<i64>,
+    pub active: bool,
 }
 
 /// Validated values used to atomically create a manual deployment and build job.
@@ -299,6 +300,13 @@ pub struct Domain {
 pub struct GatewayTarget {
     pub deployment_id: String,
     pub host_port: u16,
+}
+
+/// Runtime containers safe to retire after an atomic deployment transition.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct DeploymentCleanup {
+    pub container_ids: Vec<String>,
+    pub image_ids: Vec<String>,
 }
 
 /// Durable access to Depot's SQLite database.
@@ -1107,7 +1115,7 @@ impl Store {
         Ok(())
     }
 
-    /// Resolves a hostname only to the newest successful runtime owned by its project.
+    /// Resolves a hostname only to the explicitly active verified project runtime.
     pub async fn gateway_target(
         &self,
         hostname: &str,
@@ -1118,8 +1126,8 @@ impl Store {
              JOIN deployments ON deployments.project_id = domains.project_id
              WHERE domains.hostname = ? COLLATE NOCASE
                AND deployments.status = 'succeeded'
+               AND deployments.active = 1
                AND deployments.host_port IS NOT NULL
-             ORDER BY deployments.finished_at DESC, deployments.id DESC
              LIMIT 1",
         )
         .bind(hostname)
@@ -1275,7 +1283,7 @@ impl Store {
         let rows = sqlx::query(
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
                     failure_reason, image_id, container_id, host_port,
-                    created_at, updated_at, finished_at
+                    created_at, updated_at, finished_at, active
              FROM deployments WHERE project_id = ? ORDER BY created_at DESC, id DESC",
         )
         .bind(project_id)
@@ -1289,7 +1297,7 @@ impl Store {
         let row = sqlx::query(
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
                     failure_reason, image_id, container_id, host_port,
-                    created_at, updated_at, finished_at
+                    created_at, updated_at, finished_at, active
              FROM deployments WHERE id = ?",
         )
         .bind(deployment_id)
@@ -1378,7 +1386,7 @@ impl Store {
         worker_id: &str,
         result_json: Option<&str>,
         now_unix: i64,
-    ) -> Result<(), StoreError> {
+    ) -> Result<DeploymentCleanup, StoreError> {
         let mut transaction = self.pool.begin().await?;
         let missing_runtime = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM deployments
@@ -1404,16 +1412,151 @@ impl Store {
         if result.rows_affected() == 0 {
             return Err(StoreError::JobLeaseLost);
         }
+        let deployment = sqlx::query(
+            "SELECT id, project_id, created_at, container_id
+             FROM deployments WHERE job_id = ?",
+        )
+        .bind(job_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        let mut cleanup = DeploymentCleanup::default();
+        if let Some(deployment) = deployment {
+            let deployment_id: String = deployment.try_get("id")?;
+            let project_id: String = deployment.try_get("project_id")?;
+            let created_at: i64 = deployment.try_get("created_at")?;
+            let newer_exists = sqlx::query_scalar::<_, i64>(
+                "SELECT COUNT(*) FROM deployments
+                 WHERE project_id = ? AND (created_at > ? OR (created_at = ? AND id > ?))",
+            )
+            .bind(&project_id)
+            .bind(created_at)
+            .bind(created_at)
+            .bind(&deployment_id)
+            .fetch_one(&mut *transaction)
+            .await?
+                > 0;
+            if newer_exists {
+                if let Some(container_id) = deployment.try_get("container_id")? {
+                    cleanup.container_ids.push(container_id);
+                }
+            } else {
+                cleanup.container_ids = sqlx::query_scalar::<_, String>(
+                    "SELECT container_id FROM deployments
+                     WHERE project_id = ? AND active = 1 AND id != ?
+                       AND container_id IS NOT NULL",
+                )
+                .bind(&project_id)
+                .bind(&deployment_id)
+                .fetch_all(&mut *transaction)
+                .await?;
+                sqlx::query("UPDATE deployments SET active = 0 WHERE project_id = ?")
+                    .bind(&project_id)
+                    .execute(&mut *transaction)
+                    .await?;
+            }
+            sqlx::query(
+                "UPDATE deployments SET status = 'succeeded', failure_reason = NULL,
+                        active = ?, updated_at = ?, finished_at = ? WHERE id = ?",
+            )
+            .bind(!newer_exists)
+            .bind(now_unix)
+            .bind(now_unix)
+            .bind(&deployment_id)
+            .execute(&mut *transaction)
+            .await?;
+            cleanup.image_ids = sqlx::query_scalar::<_, String>(
+                "SELECT DISTINCT ranked.image_id FROM (
+                   SELECT image_id,
+                          ROW_NUMBER() OVER (
+                            ORDER BY active DESC, finished_at DESC, id DESC
+                          ) AS release_rank
+                   FROM deployments
+                   WHERE project_id = ? AND status = 'succeeded'
+                     AND image_id IS NOT NULL AND image_retired_at IS NULL
+                 ) AS ranked
+                 WHERE ranked.release_rank > 5
+                   AND NOT EXISTS (
+                     SELECT 1 FROM deployments active_deployment
+                     WHERE active_deployment.active = 1
+                       AND active_deployment.image_id = ranked.image_id
+                   )",
+            )
+            .bind(&project_id)
+            .fetch_all(&mut *transaction)
+            .await?;
+        }
+        transaction.commit().await?;
+        Ok(cleanup)
+    }
+
+    /// Lists inactive terminal containers left behind by interrupted cleanup.
+    pub async fn containers_pending_cleanup(&self) -> Result<Vec<String>, StoreError> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT container_id FROM deployments
+             WHERE active = 0 AND status IN ('succeeded', 'failed')
+               AND container_id IS NOT NULL AND retired_at IS NULL ORDER BY finished_at",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Records that a retired runtime container was removed from Docker.
+    pub async fn mark_container_retired(
+        &self,
+        container_id: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
         sqlx::query(
-            "UPDATE deployments SET status = 'succeeded', failure_reason = NULL,
-                    updated_at = ?, finished_at = ? WHERE job_id = ?",
+            "UPDATE deployments SET retired_at = ?, updated_at = ?
+             WHERE container_id = ? AND active = 0",
         )
         .bind(now_unix)
         .bind(now_unix)
-        .bind(job_id)
-        .execute(&mut *transaction)
+        .bind(container_id)
+        .execute(&self.pool)
         .await?;
-        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Lists old inactive images beyond the five-release runtime retention bound.
+    pub async fn images_pending_cleanup(&self) -> Result<Vec<String>, StoreError> {
+        Ok(sqlx::query_scalar::<_, String>(
+            "SELECT DISTINCT ranked.image_id FROM (
+               SELECT image_id,
+                      ROW_NUMBER() OVER (
+                        PARTITION BY project_id
+                        ORDER BY active DESC, finished_at DESC, id DESC
+                      ) AS release_rank
+               FROM deployments
+               WHERE status = 'succeeded' AND image_id IS NOT NULL
+                 AND image_retired_at IS NULL
+             ) AS ranked
+             WHERE ranked.release_rank > 5
+               AND NOT EXISTS (
+                 SELECT 1 FROM deployments active_deployment
+                 WHERE active_deployment.active = 1
+                   AND active_deployment.image_id = ranked.image_id
+               )",
+        )
+        .fetch_all(&self.pool)
+        .await?)
+    }
+
+    /// Records successful removal of an inactive retained Docker image.
+    pub async fn mark_image_retired(
+        &self,
+        image_id: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE deployments SET image_retired_at = ?, updated_at = ?
+             WHERE image_id = ? AND active = 0",
+        )
+        .bind(now_unix)
+        .bind(now_unix)
+        .bind(image_id)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -1728,6 +1871,7 @@ fn deployment_from_row(row: SqliteRow) -> Result<Deployment, StoreError> {
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         finished_at: row.try_get("finished_at")?,
+        active: row.try_get("active")?,
     })
 }
 
@@ -2024,6 +2168,7 @@ mod tests {
         assert_eq!(deployment.commit_sha, commit_sha);
         assert_eq!(deployment.status, "queued");
         assert_eq!(deployment.trigger_kind, "manual");
+        assert!(!deployment.active);
         assert_eq!(
             store
                 .list_deployments(&project.id)
@@ -2086,6 +2231,7 @@ mod tests {
         assert_eq!(completed.status, "succeeded");
         assert_eq!(completed.finished_at, Some(224));
         assert_eq!(completed.host_port, Some(43123));
+        assert!(completed.active);
         store
             .create_domain(&project.id, "app.example.com", &admin_id, 225)
             .await
@@ -2097,6 +2243,170 @@ mod tests {
             .expect("healthy target exists");
         assert_eq!(target.deployment_id, deployment.id);
         assert_eq!(target.host_port, 43123);
+    }
+
+    /// Proves promotion retires the previous runtime and rejects stale completion order.
+    #[tokio::test]
+    async fn deployment_promotion_is_single_active_and_stale_safe() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let project = store
+            .create_project(NewProject {
+                slug: "promotion-test",
+                name: "Promotion test",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/project.git",
+                branch: "main",
+                now_unix: 100,
+            })
+            .await
+            .expect("project is created");
+
+        let first = create_test_deployment(&store, &project.id, &admin_id, '1', 200).await;
+        let first_job = store
+            .claim_job("worker-a", 201, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("first job is claimed");
+        record_test_runtime(&store, &first.id, "container-first", 40_001, 202).await;
+        let cleanup = store
+            .complete_job(&first_job.id, "worker-a", Some("{}"), 203)
+            .await
+            .expect("first deployment promotes");
+        assert!(cleanup.container_ids.is_empty());
+
+        let second = create_test_deployment(&store, &project.id, &admin_id, '2', 210).await;
+        let second_job = store
+            .claim_job("worker-b", 211, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("second job is claimed");
+        record_test_runtime(&store, &second.id, "container-second", 40_002, 212).await;
+        let cleanup = store
+            .complete_job(&second_job.id, "worker-b", Some("{}"), 213)
+            .await
+            .expect("second deployment promotes");
+        assert_eq!(cleanup.container_ids, vec!["container-first"]);
+        assert!(
+            !store
+                .deployment_by_id(&first.id)
+                .await
+                .expect("loads")
+                .active
+        );
+        assert!(
+            store
+                .deployment_by_id(&second.id)
+                .await
+                .expect("loads")
+                .active
+        );
+
+        let stale = create_test_deployment(&store, &project.id, &admin_id, '3', 220).await;
+        let newest = create_test_deployment(&store, &project.id, &admin_id, '4', 221).await;
+        let stale_job = store
+            .claim_job("worker-c", 222, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("stale job is claimed");
+        let newest_job = store
+            .claim_job("worker-d", 222, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("newest job is claimed");
+        record_test_runtime(&store, &stale.id, "container-stale", 40_003, 223).await;
+        record_test_runtime(&store, &newest.id, "container-newest", 40_004, 223).await;
+        let cleanup = store
+            .complete_job(&newest_job.id, "worker-d", Some("{}"), 224)
+            .await
+            .expect("newest deployment promotes");
+        assert_eq!(cleanup.container_ids, vec!["container-second"]);
+        let cleanup = store
+            .complete_job(&stale_job.id, "worker-c", Some("{}"), 225)
+            .await
+            .expect("stale job completes without promotion");
+        assert_eq!(cleanup.container_ids, vec!["container-stale"]);
+        assert!(
+            !store
+                .deployment_by_id(&stale.id)
+                .await
+                .expect("loads")
+                .active
+        );
+        assert!(
+            store
+                .deployment_by_id(&newest.id)
+                .await
+                .expect("loads")
+                .active
+        );
+
+        let fifth = create_test_deployment(&store, &project.id, &admin_id, '5', 230).await;
+        let fifth_job = store
+            .claim_job("worker-e", 231, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("fifth job is claimed");
+        record_test_runtime(&store, &fifth.id, "container-fifth", 40_005, 232).await;
+        let cleanup = store
+            .complete_job(&fifth_job.id, "worker-e", Some("{}"), 233)
+            .await
+            .expect("fifth deployment promotes");
+        assert!(cleanup.image_ids.is_empty());
+
+        let sixth = create_test_deployment(&store, &project.id, &admin_id, '6', 240).await;
+        let sixth_job = store
+            .claim_job("worker-f", 241, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("sixth job is claimed");
+        record_test_runtime(&store, &sixth.id, "container-sixth", 40_006, 242).await;
+        let cleanup = store
+            .complete_job(&sixth_job.id, "worker-f", Some("{}"), 243)
+            .await
+            .expect("sixth deployment promotes");
+        assert_eq!(cleanup.image_ids, vec!["sha256:container-first"]);
+    }
+
+    /// Creates one test deployment with a distinct repeated hexadecimal SHA.
+    async fn create_test_deployment(
+        store: &Store,
+        project_id: &str,
+        admin_id: &str,
+        digit: char,
+        now_unix: i64,
+    ) -> super::Deployment {
+        let commit_sha: String = std::iter::repeat_n(digit, 40).collect();
+        store
+            .create_deployment(NewDeployment {
+                project_id,
+                commit_sha: &commit_sha,
+                created_by_user_id: admin_id,
+                trigger_kind: "manual",
+                now_unix,
+            })
+            .await
+            .expect("deployment is created")
+    }
+
+    /// Records deterministic candidate runtime values for promotion tests.
+    async fn record_test_runtime(
+        store: &Store,
+        deployment_id: &str,
+        container_id: &str,
+        host_port: u16,
+        now_unix: i64,
+    ) {
+        store
+            .record_deployment_runtime(
+                deployment_id,
+                &format!("sha256:{container_id}"),
+                container_id,
+                host_port,
+                now_unix,
+            )
+            .await
+            .expect("runtime records");
     }
 
     /// Proves runtime values remain encrypted while list queries return metadata only.

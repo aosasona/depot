@@ -281,6 +281,7 @@ async fn doctor(config: Config) -> Result<(), AppError> {
 async fn worker(config: Config, once: bool) -> Result<(), AppError> {
     let store = Store::connect(&config.database.url).await?;
     let secrets = load_secret_cipher(&config)?;
+    cleanup_retired_containers(&store, &config.worker).await;
     let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
     info!(%worker_id, "Depot worker started");
     loop {
@@ -328,9 +329,11 @@ async fn process_job(
             store
                 .append_job_event(&job.id, "info", completion_message, completed_at)
                 .await?;
-            store
+            let cleanup = store
                 .complete_job(&job.id, worker_id, Some(&result_json), completed_at)
                 .await?;
+            retire_containers(store, worker_config, cleanup.container_ids).await;
+            retire_images(store, worker_config, cleanup.image_ids).await;
         }
         Err(message) => {
             let failed_at = time::OffsetDateTime::now_utc().unix_timestamp();
@@ -344,6 +347,77 @@ async fn process_job(
         }
     }
     Ok(())
+}
+
+/// Reconciles terminal inactive containers left by an interrupted cleanup pass.
+async fn cleanup_retired_containers(store: &Store, worker_config: &depot_core::WorkerConfig) {
+    match store.containers_pending_cleanup().await {
+        Ok(container_ids) => retire_containers(store, worker_config, container_ids).await,
+        Err(error) => tracing::warn!(%error, "could not load containers pending cleanup"),
+    }
+    match store.images_pending_cleanup().await {
+        Ok(image_ids) => retire_images(store, worker_config, image_ids).await,
+        Err(error) => tracing::warn!(%error, "could not load images pending cleanup"),
+    }
+}
+
+/// Removes switched-out containers and records successful retirement idempotently.
+async fn retire_containers(
+    store: &Store,
+    worker_config: &depot_core::WorkerConfig,
+    container_ids: Vec<String>,
+) {
+    for container_id in container_ids {
+        match depot_runtime::remove_container(
+            &worker_config.docker_binary,
+            &container_id,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        {
+            Ok(()) => {
+                if let Err(error) = store
+                    .mark_container_retired(
+                        &container_id,
+                        time::OffsetDateTime::now_utc().unix_timestamp(),
+                    )
+                    .await
+                {
+                    tracing::warn!(%error, %container_id, "could not persist container retirement");
+                }
+            }
+            Err(error) => {
+                tracing::warn!(%error, %container_id, "could not retire inactive container");
+            }
+        }
+    }
+}
+
+/// Removes images beyond retention while preserving every active runtime image.
+async fn retire_images(
+    store: &Store,
+    worker_config: &depot_core::WorkerConfig,
+    image_ids: Vec<String>,
+) {
+    for image_id in image_ids {
+        match depot_runtime::remove_image(
+            &worker_config.docker_binary,
+            &image_id,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        {
+            Ok(()) => {
+                if let Err(error) = store
+                    .mark_image_retired(&image_id, time::OffsetDateTime::now_utc().unix_timestamp())
+                    .await
+                {
+                    tracing::warn!(%error, %image_id, "could not persist image retirement");
+                }
+            }
+            Err(error) => tracing::warn!(%error, %image_id, "could not retire old image"),
+        }
+    }
 }
 
 /// Executes a supported job kind and returns its bounded JSON result.
