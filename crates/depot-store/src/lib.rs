@@ -847,6 +847,7 @@ impl Store {
         now_unix: i64,
         lease_seconds: i64,
     ) -> Result<Option<Job>, StoreError> {
+        let mut transaction = self.pool.begin().await?;
         let row = sqlx::query(
             "UPDATE jobs
              SET state = 'running', lease_owner = ?, lease_expires_at = ?,
@@ -865,9 +866,24 @@ impl Store {
         .bind(now_unix)
         .bind(now_unix)
         .bind(now_unix)
-        .fetch_optional(&self.pool)
+        .fetch_optional(&mut *transaction)
         .await?;
-        row.map(job_from_row).transpose()
+        if let Some(row) = row {
+            let job = job_from_row(row)?;
+            sqlx::query(
+                "UPDATE deployments SET status = 'building', failure_reason = NULL, updated_at = ?
+                 WHERE job_id = ?",
+            )
+            .bind(now_unix)
+            .bind(&job.id)
+            .execute(&mut *transaction)
+            .await?;
+            transaction.commit().await?;
+            Ok(Some(job))
+        } else {
+            transaction.commit().await?;
+            Ok(None)
+        }
     }
 
     /// Marks a leased job successful only when the caller still owns its lease.
@@ -878,6 +894,7 @@ impl Store {
         result_json: Option<&str>,
         now_unix: i64,
     ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
             "UPDATE jobs SET state = 'succeeded', lease_owner = NULL,
                     lease_expires_at = NULL, result_json = ?, updated_at = ?
@@ -887,11 +904,21 @@ impl Store {
         .bind(now_unix)
         .bind(job_id)
         .bind(worker_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if result.rows_affected() == 0 {
             return Err(StoreError::JobLeaseLost);
         }
+        sqlx::query(
+            "UPDATE deployments SET status = 'succeeded', failure_reason = NULL,
+                    updated_at = ?, finished_at = ? WHERE job_id = ?",
+        )
+        .bind(now_unix)
+        .bind(now_unix)
+        .bind(job_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -950,6 +977,7 @@ impl Store {
         retry_delay_seconds: i64,
         now_unix: i64,
     ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
         let result = sqlx::query(
             "UPDATE jobs
              SET state = CASE WHEN attempts < max_attempts THEN 'queued' ELSE 'failed' END,
@@ -962,11 +990,38 @@ impl Store {
         .bind(now_unix)
         .bind(job_id)
         .bind(worker_id)
-        .execute(&self.pool)
+        .execute(&mut *transaction)
         .await?;
         if result.rows_affected() == 0 {
             return Err(StoreError::JobLeaseLost);
         }
+        sqlx::query(
+            "UPDATE deployments
+             SET status = CASE
+                    WHEN (SELECT state FROM jobs WHERE id = ?) = 'failed' THEN 'failed'
+                    ELSE 'queued'
+                 END,
+                 failure_reason = CASE
+                    WHEN (SELECT state FROM jobs WHERE id = ?) = 'failed' THEN ?
+                    ELSE NULL
+                 END,
+                 updated_at = ?,
+                 finished_at = CASE
+                    WHEN (SELECT state FROM jobs WHERE id = ?) = 'failed' THEN ?
+                    ELSE NULL
+                 END
+             WHERE job_id = ?",
+        )
+        .bind(job_id)
+        .bind(job_id)
+        .bind(error)
+        .bind(now_unix)
+        .bind(job_id)
+        .bind(now_unix)
+        .bind(job_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
         Ok(())
     }
 
@@ -1375,6 +1430,13 @@ mod tests {
         assert_eq!(deployment.commit_sha, commit_sha);
         assert_eq!(deployment.status, "queued");
         assert_eq!(deployment.trigger_kind, "manual");
+        assert_eq!(
+            store
+                .list_deployments(&project.id)
+                .await
+                .expect("history loads"),
+            vec![deployment.clone()]
+        );
 
         let claimed = store
             .claim_job("worker", 211, 60)
@@ -1386,11 +1448,39 @@ mod tests {
         assert!(claimed.payload_json.contains(&deployment.id));
         assert_eq!(
             store
-                .list_deployments(&project.id)
+                .deployment_by_id(&deployment.id)
                 .await
-                .expect("history loads"),
-            vec![deployment]
+                .expect("deployment reloads")
+                .status,
+            "building"
         );
+        store
+            .fail_job(&claimed.id, "worker", "build failed", 10, 212)
+            .await
+            .expect("retry records");
+        assert_eq!(
+            store
+                .deployment_by_id(&deployment.id)
+                .await
+                .expect("deployment reloads")
+                .status,
+            "queued"
+        );
+        store
+            .claim_job("worker", 223, 60)
+            .await
+            .expect("retry claim succeeds")
+            .expect("retry is available");
+        store
+            .complete_job(&claimed.id, "worker", Some("{}"), 224)
+            .await
+            .expect("deployment completes");
+        let completed = store
+            .deployment_by_id(&deployment.id)
+            .await
+            .expect("deployment reloads");
+        assert_eq!(completed.status, "succeeded");
+        assert_eq!(completed.finished_at, Some(224));
     }
 
     /// Proves active deduplication and expired-lease recovery survive worker restarts.

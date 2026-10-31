@@ -194,13 +194,13 @@ async fn process_job(
     match execute_job(store, worker_config, &job).await {
         Ok(result_json) => {
             let completed_at = time::OffsetDateTime::now_utc().unix_timestamp();
+            let completion_message = if job.kind == "inspect_repository" {
+                "Repository inspection completed."
+            } else {
+                "Deployment work completed."
+            };
             store
-                .append_job_event(
-                    &job.id,
-                    "info",
-                    "Repository inspection completed.",
-                    completed_at,
-                )
+                .append_job_event(&job.id, "info", completion_message, completed_at)
                 .await?;
             store
                 .complete_job(&job.id, worker_id, Some(&result_json), completed_at)
