@@ -234,6 +234,13 @@ pub struct Domain {
     pub updated_at: i64,
 }
 
+/// Loopback-only runtime selected for an exact validated incoming hostname.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GatewayTarget {
+    pub deployment_id: String,
+    pub host_port: u16,
+}
+
 /// Durable access to Depot's SQLite database.
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -849,6 +856,39 @@ impl Store {
         .await?;
         transaction.commit().await?;
         Ok(())
+    }
+
+    /// Resolves a hostname only to the newest successful runtime owned by its project.
+    pub async fn gateway_target(
+        &self,
+        hostname: &str,
+    ) -> Result<Option<GatewayTarget>, StoreError> {
+        let row = sqlx::query(
+            "SELECT deployments.id, deployments.host_port
+             FROM domains
+             JOIN deployments ON deployments.project_id = domains.project_id
+             WHERE domains.hostname = ? COLLATE NOCASE
+               AND deployments.status = 'succeeded'
+               AND deployments.host_port IS NOT NULL
+             ORDER BY deployments.finished_at DESC, deployments.id DESC
+             LIMIT 1",
+        )
+        .bind(hostname)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            let port: i64 = row.try_get("host_port")?;
+            let host_port = u16::try_from(port).map_err(|_| {
+                StoreError::Database(sqlx::Error::Protocol(
+                    "stored deployment port is invalid".to_owned(),
+                ))
+            })?;
+            Ok(GatewayTarget {
+                deployment_id: row.try_get("id")?,
+                host_port,
+            })
+        })
+        .transpose()
     }
 
     /// Enqueues work once per active deduplication key and returns the durable job.
@@ -1712,6 +1752,17 @@ mod tests {
         assert_eq!(completed.status, "succeeded");
         assert_eq!(completed.finished_at, Some(224));
         assert_eq!(completed.host_port, Some(43123));
+        store
+            .create_domain(&project.id, "app.example.com", &admin_id, 225)
+            .await
+            .expect("domain is created");
+        let target = store
+            .gateway_target("APP.EXAMPLE.COM")
+            .await
+            .expect("target lookup succeeds")
+            .expect("healthy target exists");
+        assert_eq!(target.deployment_id, deployment.id);
+        assert_eq!(target.host_port, 43123);
     }
 
     /// Proves active deduplication and expired-lease recovery survive worker restarts.

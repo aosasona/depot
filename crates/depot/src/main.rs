@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use axum::{
     Json, Router,
     body::Body,
-    http::{StatusCode, Uri, header},
+    http::{HeaderMap, Request, StatusCode, Uri, header},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -13,6 +13,8 @@ use clap::{Parser, Subcommand};
 use depot_auth::issue_bootstrap_token;
 use depot_core::Config;
 use depot_store::Store;
+use hyper::client::conn::http1;
+use hyper_util::rt::TokioIo;
 use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -389,10 +391,11 @@ fn init_tracing() {
 /// Runs the initial combined API and embedded frontend HTTP listener.
 async fn serve(config: Config) -> Result<(), AppError> {
     let store = Store::connect(&config.database.url).await?;
+    let gateway_store = store.clone();
     let app = Router::new()
         .route("/api/v1/system/health", get(system_health))
-        .merge(depot_api::router(store))
-        .fallback(get(serve_spa));
+        .merge(depot_api::router(store.clone()))
+        .fallback(move |request| gateway_or_spa(gateway_store.clone(), request));
     let listener = TcpListener::bind(config.server.bind)
         .await
         .map_err(AppError::Bind)?;
@@ -409,8 +412,87 @@ async fn system_health() -> Json<HealthResponse> {
     })
 }
 
+/// Routes exact project hostnames to healthy loopback runtimes, otherwise serves Depot's SPA.
+async fn gateway_or_spa(store: Store, request: Request<Body>) -> Response {
+    if request.uri().path().starts_with("/api/") {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    let hostname = request_hostname(request.headers());
+    if let Some(hostname) = hostname {
+        match store.gateway_target(&hostname).await {
+            Ok(Some(target)) => return proxy_to_runtime(request, target.host_port).await,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::error!(%error, "gateway target lookup failed");
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
+        }
+    }
+    serve_spa(request.uri()).await
+}
+
+/// Extracts a lowercase DNS hostname while rejecting malformed Host authorities.
+fn request_hostname(headers: &HeaderMap) -> Option<String> {
+    let authority = headers.get(header::HOST)?.to_str().ok()?;
+    let authority = authority.parse::<axum::http::uri::Authority>().ok()?;
+    let hostname = authority.host().trim_end_matches('.').to_ascii_lowercase();
+    (!hostname.is_empty()).then_some(hostname)
+}
+
+/// Proxies one request to a database-selected loopback port using an HTTP/1 connection.
+async fn proxy_to_runtime(mut request: Request<Body>, host_port: u16) -> Response {
+    strip_hop_by_hop_headers(request.headers_mut());
+    let stream = match tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, host_port)),
+    )
+    .await
+    {
+        Ok(Ok(stream)) => stream,
+        _ => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    let (mut sender, connection) = match http1::handshake(TokioIo::new(stream)).await {
+        Ok(parts) => parts,
+        Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
+    };
+    tokio::spawn(async move {
+        if let Err(error) = connection.await {
+            tracing::debug!(%error, "gateway upstream connection closed");
+        }
+    });
+    match tokio::time::timeout(
+        std::time::Duration::from_secs(30),
+        sender.send_request(request),
+    )
+    .await
+    {
+        Ok(Ok(upstream)) => {
+            let (mut parts, body) = upstream.into_parts();
+            strip_hop_by_hop_headers(&mut parts.headers);
+            Response::from_parts(parts, Body::new(body))
+        }
+        _ => StatusCode::BAD_GATEWAY.into_response(),
+    }
+}
+
+/// Removes connection-specific headers which cannot cross proxy hops safely.
+fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
+    for name in [
+        header::CONNECTION,
+        header::PROXY_AUTHENTICATE,
+        header::PROXY_AUTHORIZATION,
+        header::TE,
+        header::TRAILER,
+        header::TRANSFER_ENCODING,
+        header::UPGRADE,
+    ] {
+        headers.remove(name);
+    }
+    headers.remove("keep-alive");
+}
+
 /// Serves a requested embedded asset or the SPA shell for client-side routes.
-async fn serve_spa(uri: Uri) -> Response {
+async fn serve_spa(uri: &Uri) -> Response {
     let requested = uri.path().trim_start_matches('/');
     let asset_name = if requested.is_empty() {
         "index.html"
@@ -463,11 +545,29 @@ fn content_type(asset_name: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use super::content_type;
+    use axum::http::{HeaderMap, HeaderValue, header};
+
+    use super::{content_type, request_hostname};
 
     /// Ensures unknown embedded files cannot select an executable content type.
     #[test]
     fn unknown_assets_use_html_content_type() {
         assert_eq!(content_type("unknown.bin"), "text/html; charset=utf-8");
+    }
+
+    /// Ensures gateway host parsing normalizes valid authorities and rejects malformed ones.
+    #[test]
+    fn gateway_hostname_parses_authority_safely() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::HOST,
+            HeaderValue::from_static("App.Example.COM:443"),
+        );
+        assert_eq!(
+            request_hostname(&headers).as_deref(),
+            Some("app.example.com")
+        );
+        headers.insert(header::HOST, HeaderValue::from_static("invalid host"));
+        assert!(request_hostname(&headers).is_none());
     }
 }
