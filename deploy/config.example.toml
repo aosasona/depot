@@ -6,3 +6,7 @@ url = "sqlite:///var/lib/depot/depot.db"
 
 [security]
 public_origin = "https://depot.example.com"
+
+[worker]
+workspace_root = "/var/lib/depot/workspaces"
+git_timeout_seconds = 120

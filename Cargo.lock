@@ -482,6 +482,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "depot-git"
+version = "0.1.0"
+dependencies = [
+ "depot-core",
+ "serde",
+ "thiserror",
+ "tokio",
+ "tracing",
+ "uuid",
+]
+
+[[package]]
 name = "depot-store"
 version = "0.1.0"
 dependencies = [
