@@ -165,6 +165,14 @@ impl Store {
         Ok(count > 0)
     }
 
+    /// Verifies the SQLite pool can execute a minimal query for readiness checks.
+    pub async fn ping(&self) -> Result<(), StoreError> {
+        sqlx::query_scalar::<_, i64>("SELECT 1")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(())
+    }
+
     /// Loads an active user by normalized email for password verification.
     pub async fn auth_user_by_email(&self, email: &str) -> Result<Option<AuthUser>, StoreError> {
         let row = sqlx::query(

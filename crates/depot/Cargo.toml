@@ -10,6 +10,7 @@ axum.workspace = true
 clap.workspace = true
 depot-api = { path = "../depot-api" }
 depot-auth = { path = "../depot-auth" }
+depot-core = { path = "../depot-core" }
 depot-store = { path = "../depot-store" }
 rust-embed.workspace = true
 serde.workspace = true

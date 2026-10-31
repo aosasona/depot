@@ -44,6 +44,13 @@ struct BootstrapStatus {
     initialized: bool,
 }
 
+/// Dependency-aware readiness response for operators and the dashboard.
+#[derive(Debug, Serialize)]
+struct ReadinessResponse {
+    status: &'static str,
+    database: &'static str,
+}
+
 /// Minimal identity returned after successful first-admin creation.
 #[derive(Debug, Serialize)]
 struct BootstrapResponse {
@@ -121,9 +128,21 @@ pub fn router(store: Store) -> Router {
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/me", get(current_user))
+        .route("/api/v1/system/readiness", get(system_readiness))
         .route("/api/v1/users", get(list_users).post(create_user))
         .route("/api/v1/users/{user_id}", axum::routing::patch(update_user))
         .with_state(ApiState { store })
+}
+
+/// Distinguishes process liveness from readiness to serve control-plane requests.
+async fn system_readiness(
+    State(state): State<ApiState>,
+) -> Result<Json<ReadinessResponse>, ApiError> {
+    state.store.ping().await?;
+    Ok(Json(ReadinessResponse {
+        status: "ready",
+        database: "ready",
+    }))
 }
 
 /// Verifies credentials and returns secure cookies bound to a server-side session.

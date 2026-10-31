@@ -1,6 +1,6 @@
 //! Depot's single executable and process-mode entry point.
 
-use std::net::SocketAddr;
+use std::path::{Path, PathBuf};
 
 use axum::{
     Json, Router,
@@ -11,6 +11,7 @@ use axum::{
 };
 use clap::{Parser, Subcommand};
 use depot_auth::issue_bootstrap_token;
+use depot_core::Config;
 use depot_store::Store;
 use rust_embed::Embed;
 use serde::Serialize;
@@ -33,24 +34,31 @@ struct Cli {
 enum Command {
     /// Creates or rotates the short-lived token used for first-admin setup.
     Setup {
-        /// SQLite URL for the Depot control-plane database.
-        #[arg(long, env = "DEPOT_DATABASE_URL", default_value = "sqlite://depot.db")]
-        database_url: String,
+        /// TOML configuration path; local development defaults apply when omitted.
+        #[arg(long, env = "DEPOT_CONFIG")]
+        config: Option<PathBuf>,
         /// Number of minutes before the displayed setup token expires.
         #[arg(long, default_value_t = 30, value_parser = clap::value_parser!(i64).range(1..=120))]
         expires_in_minutes: i64,
     },
     /// Serves the API, private gateway, and embedded web application.
     Serve {
-        /// Address used by the initial combined HTTP listener.
-        #[arg(long, env = "DEPOT_BIND", default_value = "127.0.0.1:8080")]
-        bind: SocketAddr,
-        /// SQLite URL for the Depot control-plane database.
-        #[arg(long, env = "DEPOT_DATABASE_URL", default_value = "sqlite://depot.db")]
-        database_url: String,
+        /// TOML configuration path; local development defaults apply when omitted.
+        #[arg(long, env = "DEPOT_CONFIG")]
+        config: Option<PathBuf>,
     },
-    /// Prints environment checks required by the current foundation.
-    Doctor,
+    /// Applies all pending database migrations and exits.
+    Migrate {
+        /// TOML configuration path; local development defaults apply when omitted.
+        #[arg(long, env = "DEPOT_CONFIG")]
+        config: Option<PathBuf>,
+    },
+    /// Checks configuration, database access, migrations, and listener availability.
+    Doctor {
+        /// TOML configuration path; local development defaults apply when omitted.
+        #[arg(long, env = "DEPOT_CONFIG")]
+        config: Option<PathBuf>,
+    },
 }
 
 /// Describes a successful liveness response without overstating dependency health.
@@ -76,6 +84,8 @@ enum AppError {
     Store(#[from] depot_store::StoreError),
     #[error("setup token creation failed: {0}")]
     Auth(#[from] depot_auth::AuthError),
+    #[error("configuration failed: {0}")]
+    Config(#[from] depot_core::ConfigError),
 }
 
 /// Parses the command line and runs the selected Depot process mode.
@@ -85,23 +95,18 @@ async fn main() -> Result<(), AppError> {
 
     match Cli::parse().command {
         Command::Setup {
-            database_url,
+            config,
             expires_in_minutes,
-        } => setup(&database_url, expires_in_minutes).await,
-        Command::Serve { bind, database_url } => serve(bind, &database_url).await,
-        Command::Doctor => {
-            println!(
-                "depot {}: foundation checks passed",
-                env!("CARGO_PKG_VERSION")
-            );
-            Ok(())
-        }
+        } => setup(load_config(config.as_deref())?, expires_in_minutes).await,
+        Command::Serve { config } => serve(load_config(config.as_deref())?).await,
+        Command::Migrate { config } => migrate(load_config(config.as_deref())?).await,
+        Command::Doctor { config } => doctor(load_config(config.as_deref())?).await,
     }
 }
 
 /// Initializes storage and prints a short-lived bootstrap token exactly once.
-async fn setup(database_url: &str, expires_in_minutes: i64) -> Result<(), AppError> {
-    let store = Store::connect(database_url).await?;
+async fn setup(config: Config, expires_in_minutes: i64) -> Result<(), AppError> {
+    let store = Store::connect(&config.database.url).await?;
     let issued = issue_bootstrap_token(&store, Duration::minutes(expires_in_minutes)).await?;
     println!("Depot first-admin setup token (shown once):");
     println!("{}", issued.token);
@@ -112,6 +117,32 @@ async fn setup(database_url: &str, expires_in_minutes: i64) -> Result<(), AppErr
     Ok(())
 }
 
+/// Loads strict operator configuration or the documented local development defaults.
+fn load_config(path: Option<&Path>) -> Result<Config, depot_core::ConfigError> {
+    path.map_or_else(|| Ok(Config::local_default()), Config::load)
+}
+
+/// Opens storage, applies embedded migrations, and exits after durable completion.
+async fn migrate(config: Config) -> Result<(), AppError> {
+    Store::connect(&config.database.url).await?;
+    println!("Depot database migrations are current.");
+    Ok(())
+}
+
+/// Performs non-destructive startup checks and reports each verified dependency.
+async fn doctor(config: Config) -> Result<(), AppError> {
+    println!("[ok] configuration is valid");
+    Store::connect(&config.database.url).await?;
+    println!("[ok] SQLite is reachable and migrations are current");
+    let listener = TcpListener::bind(config.server.bind)
+        .await
+        .map_err(AppError::Bind)?;
+    drop(listener);
+    println!("[ok] listener {} is available", config.server.bind);
+    println!("Depot {} is ready to start.", env!("CARGO_PKG_VERSION"));
+    Ok(())
+}
+
 /// Installs structured logging with a safe, operator-configurable filter.
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("depot=info"));
@@ -119,15 +150,17 @@ fn init_tracing() {
 }
 
 /// Runs the initial combined API and embedded frontend HTTP listener.
-async fn serve(bind: SocketAddr, database_url: &str) -> Result<(), AppError> {
-    let store = Store::connect(database_url).await?;
+async fn serve(config: Config) -> Result<(), AppError> {
+    let store = Store::connect(&config.database.url).await?;
     let app = Router::new()
         .route("/api/v1/system/health", get(system_health))
         .merge(depot_api::router(store))
         .fallback(get(serve_spa));
-    let listener = TcpListener::bind(bind).await.map_err(AppError::Bind)?;
+    let listener = TcpListener::bind(config.server.bind)
+        .await
+        .map_err(AppError::Bind)?;
 
-    info!(%bind, "Depot HTTP listener started");
+    info!(bind = %config.server.bind, "Depot HTTP listener started");
     axum::serve(listener, app).await.map_err(AppError::Serve)
 }
 
