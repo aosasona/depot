@@ -222,6 +222,18 @@ pub struct NewDeployment<'a> {
     pub now_unix: i64,
 }
 
+/// One project hostname and its routing reconciliation state.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Domain {
+    pub id: String,
+    pub project_id: String,
+    pub hostname: String,
+    pub routing_status: String,
+    pub last_error: Option<String>,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
 /// Durable access to Depot's SQLite database.
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -261,6 +273,10 @@ pub enum StoreError {
     DeploymentNotFound,
     #[error("deployment runtime artifacts must be recorded before completion")]
     DeploymentRuntimeMissing,
+    #[error("a domain with that hostname already exists")]
+    DomainAlreadyExists,
+    #[error("the requested domain does not exist")]
+    DomainNotFound,
 }
 
 impl Store {
@@ -731,6 +747,108 @@ impl Store {
         .await?;
         transaction.commit().await?;
         self.service_config(project_id).await
+    }
+
+    /// Lists desired hostnames and reconciliation state for one project.
+    pub async fn list_domains(&self, project_id: &str) -> Result<Vec<Domain>, StoreError> {
+        self.project_by_id(project_id).await?;
+        let rows = sqlx::query(
+            "SELECT id, project_id, hostname, routing_status, last_error, created_at, updated_at
+             FROM domains WHERE project_id = ? ORDER BY created_at, hostname",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(domain_from_row).collect()
+    }
+
+    /// Adds one globally unique project hostname and records the requesting actor.
+    pub async fn create_domain(
+        &self,
+        project_id: &str,
+        hostname: &str,
+        actor_user_id: &str,
+        now_unix: i64,
+    ) -> Result<Domain, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let project_exists =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE id = ?")
+                .bind(project_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if project_exists == 0 {
+            return Err(StoreError::ProjectNotFound);
+        }
+        let exists = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM domains WHERE hostname = ? COLLATE NOCASE",
+        )
+        .bind(hostname)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if exists > 0 {
+            return Err(StoreError::DomainAlreadyExists);
+        }
+        let id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO domains
+             (id, project_id, hostname, routing_status, created_at, updated_at)
+             VALUES (?, ?, ?, 'pending', ?, ?)",
+        )
+        .bind(&id)
+        .bind(project_id)
+        .bind(hostname)
+        .bind(now_unix)
+        .bind(now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        insert_project_audit(
+            &mut transaction,
+            actor_user_id,
+            "domain.create",
+            project_id,
+            now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(Domain {
+            id,
+            project_id: project_id.to_owned(),
+            hostname: hostname.to_owned(),
+            routing_status: "pending".to_owned(),
+            last_error: None,
+            created_at: now_unix,
+            updated_at: now_unix,
+        })
+    }
+
+    /// Removes one desired hostname and records the project-level audit event.
+    pub async fn delete_domain(
+        &self,
+        domain_id: &str,
+        actor_user_id: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let project_id =
+            sqlx::query_scalar::<_, String>("SELECT project_id FROM domains WHERE id = ?")
+                .bind(domain_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(StoreError::DomainNotFound)?;
+        sqlx::query("DELETE FROM domains WHERE id = ?")
+            .bind(domain_id)
+            .execute(&mut *transaction)
+            .await?;
+        insert_project_audit(
+            &mut transaction,
+            actor_user_id,
+            "domain.delete",
+            &project_id,
+            now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
     }
 
     /// Enqueues work once per active deduplication key and returns the durable job.
@@ -1235,6 +1353,19 @@ fn service_config_from_row(row: SqliteRow) -> Result<ServiceConfig, StoreError> 
     })
 }
 
+/// Maps one domain row into its reconciliation representation.
+fn domain_from_row(row: SqliteRow) -> Result<Domain, StoreError> {
+    Ok(Domain {
+        id: row.try_get("id")?,
+        project_id: row.try_get("project_id")?,
+        hostname: row.try_get("hostname")?,
+        routing_status: row.try_get("routing_status")?,
+        last_error: row.try_get("last_error")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
 /// Converts a selected SQLite job row into its lease-safe domain representation.
 fn job_from_row(row: SqliteRow) -> Result<Job, StoreError> {
     Ok(Job {
@@ -1445,6 +1576,49 @@ mod tests {
         assert_eq!(updated.exposed_port, Some(8080));
         assert_eq!(updated.healthcheck_path.as_deref(), Some("/health"));
         assert_eq!(updated.updated_at, 210);
+    }
+
+    /// Proves project domains are unique, listable, and removable.
+    #[tokio::test]
+    async fn project_domains_enforce_global_hostname_ownership() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let project = store
+            .create_project(NewProject {
+                slug: "domain-owner",
+                name: "Domain owner",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/project.git",
+                branch: "main",
+                now_unix: 200,
+            })
+            .await
+            .expect("project is created");
+        let domain = store
+            .create_domain(&project.id, "app.example.com", &admin_id, 210)
+            .await
+            .expect("domain is created");
+        assert_eq!(domain.routing_status, "pending");
+        assert_eq!(
+            store.list_domains(&project.id).await.expect("domains list"),
+            vec![domain.clone()]
+        );
+        let duplicate = store
+            .create_domain(&project.id, "app.example.com", &admin_id, 211)
+            .await
+            .expect_err("duplicate is rejected");
+        assert!(matches!(duplicate, StoreError::DomainAlreadyExists));
+        store
+            .delete_domain(&domain.id, &admin_id, 220)
+            .await
+            .expect("domain deletes");
+        assert!(
+            store
+                .list_domains(&project.id)
+                .await
+                .expect("domains list")
+                .is_empty()
+        );
     }
 
     /// Proves deployment history and its durable build job are created atomically.

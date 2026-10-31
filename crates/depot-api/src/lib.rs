@@ -15,9 +15,12 @@ use depot_auth::{
     AuthError, authenticate_session, create_first_admin, create_managed_user,
     login as authenticate_login, logout as revoke_login, validate_csrf,
 };
-use depot_core::{ProjectValidationError, validate_project_slug, validate_repository_url};
+use depot_core::{
+    ProjectValidationError, validate_domain_hostname, validate_project_slug,
+    validate_repository_url,
+};
 use depot_store::{
-    Deployment, JobEvent, JobStatus, NewDeployment, NewJob, NewProject, ProjectSummary,
+    Deployment, Domain, JobEvent, JobStatus, NewDeployment, NewJob, NewProject, ProjectSummary,
     ServiceConfig, SessionUser, Store, StoreError, UpdateServiceConfig, UserRole, UserSummary,
 };
 use serde::{Deserialize, Serialize};
@@ -231,6 +234,24 @@ struct DeploymentResponse {
     finished_at: Option<i64>,
 }
 
+/// Desired project hostname and its current routing reconciliation state.
+#[derive(Debug, Serialize)]
+struct DomainResponse {
+    id: String,
+    project_id: String,
+    hostname: String,
+    routing_status: String,
+    last_error: Option<String>,
+    created_at: i64,
+    updated_at: i64,
+}
+
+/// Authenticated request to attach one public hostname to a project.
+#[derive(Debug, Deserialize)]
+struct CreateDomainRequest {
+    hostname: String,
+}
+
 /// Builds the versioned authentication routes backed by the supplied store.
 pub fn router(store: Store) -> Router {
     Router::new()
@@ -264,6 +285,14 @@ pub fn router(store: Store) -> Router {
             get(list_deployments).post(create_deployment),
         )
         .route("/api/v1/deployments/{deployment_id}", get(get_deployment))
+        .route(
+            "/api/v1/projects/{project_id}/domains",
+            get(list_domains).post(create_domain),
+        )
+        .route(
+            "/api/v1/domains/{domain_id}",
+            axum::routing::delete(delete_domain),
+        )
         .route("/api/v1/jobs/{job_id}", get(get_job_status))
         .with_state(ApiState { store })
 }
@@ -400,6 +429,58 @@ async fn get_deployment(
     Ok(Json(deployment_response(
         state.store.deployment_by_id(&deployment_id).await?,
     )))
+}
+
+/// Lists desired hostnames for one authenticated project.
+async fn list_domains(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<Json<Vec<DomainResponse>>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    let domains = state.store.list_domains(&project_id).await?;
+    Ok(Json(domains.into_iter().map(domain_response).collect()))
+}
+
+/// Validates and attaches a globally unique public hostname to one project.
+async fn create_domain(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(request): Json<CreateDomainRequest>,
+) -> Result<(StatusCode, Json<DomainResponse>), ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let hostname = validate_domain_hostname(&request.hostname)?;
+    let domain = state
+        .store
+        .create_domain(
+            &project_id,
+            &hostname,
+            &actor.id,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(domain_response(domain))))
+}
+
+/// Removes a desired hostname after session-bound CSRF verification.
+async fn delete_domain(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(domain_id): axum::extract::Path<String>,
+) -> Result<StatusCode, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    state
+        .store
+        .delete_domain(
+            &domain_id,
+            &actor.id,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 /// Validates and replaces project service settings after CSRF verification.
@@ -774,6 +855,19 @@ fn deployment_response(deployment: Deployment) -> DeploymentResponse {
     }
 }
 
+/// Maps one desired hostname into the stable authenticated API contract.
+fn domain_response(domain: Domain) -> DomainResponse {
+    DomainResponse {
+        id: domain.id,
+        project_id: domain.project_id,
+        hostname: domain.hostname,
+        routing_status: domain.routing_status,
+        last_error: domain.last_error,
+        created_at: domain.created_at,
+        updated_at: domain.updated_at,
+    }
+}
+
 /// Parses trusted worker JSON while keeping malformed results non-fatal to status reads.
 fn job_status_response(status: JobStatus, events: Vec<JobEvent>) -> JobStatusResponse {
     JobStatusResponse {
@@ -986,6 +1080,11 @@ impl IntoResponse for ApiError {
                 "private_repository_host",
                 "Repository URLs cannot target localhost or private IP addresses.",
             ),
+            Self::ProjectValidation(ProjectValidationError::InvalidDomainHostname) => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_domain_hostname",
+                "Enter a public DNS hostname without a scheme, port, or wildcard.",
+            ),
             Self::InvalidProjectField(message) => {
                 (StatusCode::UNPROCESSABLE_ENTITY, "invalid_project", message)
             }
@@ -1033,6 +1132,16 @@ impl IntoResponse for ApiError {
                 StatusCode::CONFLICT,
                 "deployment_runtime_missing",
                 "The deployment runtime is not ready to complete.",
+            ),
+            Self::Store(StoreError::DomainAlreadyExists) => (
+                StatusCode::CONFLICT,
+                "domain_already_exists",
+                "That hostname is already attached to a project.",
+            ),
+            Self::Store(StoreError::DomainNotFound) => (
+                StatusCode::NOT_FOUND,
+                "domain_not_found",
+                "The requested domain does not exist.",
             ),
             Self::ProjectNotInspected => (
                 StatusCode::CONFLICT,

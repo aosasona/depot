@@ -87,6 +87,8 @@ pub enum ProjectValidationError {
     InvalidRepositoryUrl,
     #[error("repository URL cannot target localhost or a private IP address")]
     PrivateRepositoryHost,
+    #[error("domain hostname must be a public lowercase DNS name")]
+    InvalidDomainHostname,
 }
 
 /// Validates a stable project slug suitable for database and filesystem identity.
@@ -138,6 +140,31 @@ pub fn validate_repository_url(value: &str) -> Result<(), ProjectValidationError
         }
     }
     Ok(())
+}
+
+/// Normalizes and validates one public DNS hostname without schemes, ports, or wildcards.
+pub fn validate_domain_hostname(value: &str) -> Result<String, ProjectValidationError> {
+    let hostname = value.trim().trim_end_matches('.').to_ascii_lowercase();
+    let labels: Vec<_> = hostname.split('.').collect();
+    let valid_label = |label: &&str| {
+        !label.is_empty()
+            && label.len() <= 63
+            && !label.starts_with('-')
+            && !label.ends_with('-')
+            && label
+                .bytes()
+                .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+    };
+    if hostname.len() > 253
+        || labels.len() < 2
+        || !labels.iter().all(valid_label)
+        || hostname == "localhost"
+        || hostname.ends_with(".localhost")
+        || hostname.parse::<std::net::IpAddr>().is_ok()
+    {
+        return Err(ProjectValidationError::InvalidDomainHostname);
+    }
+    Ok(hostname)
 }
 
 impl Config {
@@ -206,7 +233,8 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, ConfigError, ProjectValidationError, validate_project_slug, validate_repository_url,
+        Config, ConfigError, ProjectValidationError, validate_domain_hostname,
+        validate_project_slug, validate_repository_url,
     };
 
     /// Ensures the built-in development configuration satisfies all validation.
@@ -266,5 +294,19 @@ mod tests {
             validate_repository_url("https://user:secret@example.com/repository.git"),
             Err(ProjectValidationError::InvalidRepositoryUrl)
         );
+    }
+
+    /// Ensures domain input is normalized while local and malformed names are rejected.
+    #[test]
+    fn domain_hostname_is_normalized_and_public() {
+        assert_eq!(
+            validate_domain_hostname(" App.Example.COM. ").expect("hostname is valid"),
+            "app.example.com"
+        );
+        assert!(matches!(
+            validate_domain_hostname("localhost"),
+            Err(ProjectValidationError::InvalidDomainHostname)
+        ));
+        assert!(validate_domain_hostname("https://example.com").is_err());
     }
 }
