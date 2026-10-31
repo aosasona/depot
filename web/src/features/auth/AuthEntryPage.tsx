@@ -9,6 +9,7 @@ import {
   logout,
   type User,
 } from "../../lib/api/client";
+import { UsersPanel } from "../users/UsersPanel";
 import { bootstrapStatusQuery, currentUserQuery } from "./queries";
 
 const setupSchema = z.object({
@@ -308,6 +309,7 @@ function Dashboard({ user }: { user: User }) {
           <code>milestone/a</code>
         </div>
       </section>
+      {user.role === "admin" && <UsersPanel />}
     </main>
   );
 }

@@ -238,6 +238,93 @@ h1 {
   font-weight: 700;
   text-transform: uppercase;
 }
+.users-panel {
+  width: min(1100px, 90vw);
+  margin: 2rem auto 5rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.section-heading {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  padding: 2rem;
+  border-bottom: 1px solid var(--border);
+}
+.section-heading h2 {
+  margin: 0.4rem 0 0;
+  font-size: 2.5rem;
+}
+.count-block {
+  padding: 0.7rem;
+  background: var(--accent);
+  color: var(--accent-foreground);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.7rem;
+  font-weight: 900;
+}
+.create-user-grid {
+  display: grid;
+  grid-template-columns: 1.5fr 1.2fr 0.7fr auto;
+  gap: 1px;
+  padding: 1px;
+  border-bottom: 1px solid var(--border);
+  background: var(--border);
+}
+.create-user-grid input,
+.create-user-grid select {
+  min-width: 0;
+  min-height: 48px;
+  padding: 0 0.8rem;
+  border: 0;
+  background: var(--surface);
+  color: var(--text);
+}
+.create-user-grid .primary-action {
+  min-height: 48px;
+  margin: 0;
+  padding: 0 1.2rem;
+}
+.create-user-grid .notice {
+  grid-column: 1 / -1;
+  margin: 0;
+}
+.table-scroll {
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+}
+th,
+td {
+  padding: 1rem 1.2rem;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+}
+th {
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.68rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+td {
+  font-size: 0.88rem;
+}
+.table-action {
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.7rem;
+  text-transform: uppercase;
+}
+.table-action:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
 @media (max-width: 600px) {
   .technical-label {
     display: none;
@@ -270,6 +357,9 @@ h1 {
   .auth-intro {
     border-right: 0;
     border-bottom: 1px solid var(--border);
+  }
+  .create-user-grid {
+    grid-template-columns: 1fr;
   }
 }
 @media (prefers-reduced-motion: reduce) {

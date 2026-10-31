@@ -9,8 +9,13 @@ const userSchema = z.object({
   email: z.email(),
   role: z.enum(["admin", "member"]),
 });
+const adminUserSchema = userSchema.extend({
+  active: z.boolean(),
+  created_at: z.number(),
+});
 
 export type User = z.infer<typeof userSchema>;
+export type AdminUser = z.infer<typeof adminUserSchema>;
 
 /** Represents a safe API failure suitable for inline UI feedback. */
 export class ApiError extends Error {
@@ -88,16 +93,52 @@ function readCookie(name: string) {
     ?.slice(prefix.length);
 }
 
-/** Revokes the active session using the CSRF value bound to it. */
-export async function logout() {
+/** Returns the session-bound CSRF header required by authenticated mutations. */
+function csrfHeaders() {
   const csrfToken = readCookie("depot_csrf");
   if (!csrfToken)
     throw new ApiError("missing_csrf", "The session cannot be verified.");
+  return { "x-csrf-token": csrfToken };
+}
+
+/** Revokes the active session using the CSRF value bound to it. */
+export async function logout() {
   const response = await fetch("/api/v1/auth/logout", {
     method: "POST",
     credentials: "same-origin",
-    headers: { "x-csrf-token": csrfToken },
+    headers: csrfHeaders(),
   });
   if (!response.ok)
     throw new ApiError("logout_failed", "Depot could not sign you out.");
+}
+
+/** Lists all local users for an authenticated administrator. */
+export function listUsers() {
+  return request("/api/v1/users", z.array(adminUserSchema));
+}
+
+/** Creates a local account with an administrator-selected initial password. */
+export function createUser(input: {
+  email: string;
+  password: string;
+  role: "admin" | "member";
+}) {
+  return request("/api/v1/users", adminUserSchema, {
+    method: "POST",
+    headers: csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+/** Updates one user's role and activation state. */
+export function updateUser(input: {
+  id: string;
+  role: "admin" | "member";
+  active: boolean;
+}) {
+  return request(`/api/v1/users/${input.id}`, adminUserSchema, {
+    method: "PATCH",
+    headers: csrfHeaders(),
+    body: JSON.stringify({ role: input.role, active: input.active }),
+  });
 }
