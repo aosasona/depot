@@ -77,7 +77,7 @@ enum Command {
         config: PathBuf,
         /// JSON file containing the complete desired hostname array.
         #[arg(long)]
-        domains_file: PathBuf,
+        domains_file: Option<PathBuf>,
     },
 }
 
@@ -137,18 +137,22 @@ async fn main() -> Result<(), AppError> {
         Command::CaddyAgent {
             config,
             domains_file,
-        } => caddy_agent(&config, &domains_file).await,
+        } => caddy_agent(&config, domains_file.as_deref()).await,
     }
 }
 
 /// Applies one complete desired-domain snapshot through the restricted host reconciler.
-async fn caddy_agent(config_path: &Path, domains_file: &Path) -> Result<(), AppError> {
+async fn caddy_agent(config_path: &Path, domains_file: Option<&Path>) -> Result<(), AppError> {
     let config = depot_caddy::CaddyAgentConfig::load(config_path)?;
-    let source = std::fs::read_to_string(domains_file).map_err(AppError::DomainsRead)?;
-    let domains: Vec<String> = serde_json::from_str(&source).map_err(AppError::DomainsParse)?;
-    depot_caddy::reconcile(&config, &domains).await?;
-    println!("Depot-managed Caddy routes are reconciled.");
-    Ok(())
+    if let Some(domains_file) = domains_file {
+        let source = std::fs::read_to_string(domains_file).map_err(AppError::DomainsRead)?;
+        let domains: Vec<String> = serde_json::from_str(&source).map_err(AppError::DomainsParse)?;
+        depot_caddy::reconcile(&config, &domains).await?;
+        println!("Depot-managed Caddy routes are reconciled.");
+        Ok(())
+    } else {
+        depot_caddy::serve(config).await.map_err(AppError::from)
+    }
 }
 
 /// Initializes storage and prints a short-lived bootstrap token exactly once.

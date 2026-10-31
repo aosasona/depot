@@ -6,8 +6,10 @@ license.workspace = true
 rust-version.workspace = true
 
 [dependencies]
+axum.workspace = true
 depot-core = { path = "../depot-core" }
 serde.workspace = true
+subtle.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 toml.workspace = true

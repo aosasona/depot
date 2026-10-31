@@ -492,8 +492,10 @@ dependencies = [
 name = "depot-caddy"
 version = "0.1.0"
 dependencies = [
+ "axum",
  "depot-core",
  "serde",
+ "subtle",
  "thiserror",
  "tokio",
  "toml",

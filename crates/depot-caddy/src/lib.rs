@@ -8,8 +8,15 @@ use std::{
     time::Duration,
 };
 
+use axum::{
+    Json, Router,
+    extract::State,
+    http::{HeaderMap, StatusCode, header},
+    routing::post,
+};
 use depot_core::validate_domain_hostname;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use thiserror::Error;
 use tokio::process::Command;
 
@@ -17,6 +24,8 @@ use tokio::process::Command;
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CaddyAgentConfig {
+    pub bind: SocketAddr,
+    pub auth_token: String,
     pub gateway_upstream: SocketAddr,
     pub allowed_domain_suffixes: Vec<String>,
     pub managed_directory: PathBuf,
@@ -48,6 +57,10 @@ pub enum CaddyError {
     ValidationFailed,
     #[error("Caddy reload failed; the previous generated configuration was restored")]
     ReloadFailed,
+    #[error("could not bind Caddy agent listener: {0}")]
+    Bind(#[source] std::io::Error),
+    #[error("Caddy agent listener stopped unexpectedly: {0}")]
+    Serve(#[source] std::io::Error),
 }
 
 impl CaddyAgentConfig {
@@ -66,6 +79,7 @@ impl CaddyAgentConfig {
             || self.managed_directory == Path::new(".");
         if unsafe_directory
             || self.allowed_domain_suffixes.is_empty()
+            || self.auth_token.len() < 32
             || self.caddy_binary.trim().is_empty()
             || self.command_timeout_seconds == 0
             || self.command_timeout_seconds > 300
@@ -77,6 +91,72 @@ impl CaddyAgentConfig {
         }
         Ok(())
     }
+}
+
+/// Complete desired-domain snapshot accepted by the authenticated agent endpoint.
+#[derive(Debug, Deserialize)]
+struct ReconcileRequest {
+    domains: Vec<String>,
+}
+
+/// Minimal acknowledgment which does not overstate DNS or certificate readiness.
+#[derive(Debug, Serialize)]
+struct ReconcileResponse {
+    accepted: usize,
+}
+
+/// Shared agent state serializes filesystem and Caddy side effects.
+#[derive(Clone, Debug)]
+struct AgentState {
+    config: CaddyAgentConfig,
+    lock: std::sync::Arc<tokio::sync::Mutex<()>>,
+}
+
+/// Serves the private authenticated reconciliation endpoint until shutdown.
+pub async fn serve(config: CaddyAgentConfig) -> Result<(), CaddyError> {
+    config.validate()?;
+    let bind = config.bind;
+    let state = AgentState {
+        config,
+        lock: std::sync::Arc::new(tokio::sync::Mutex::new(())),
+    };
+    let app = Router::new()
+        .route("/v1/reconcile", post(reconcile_handler))
+        .with_state(state);
+    let listener = tokio::net::TcpListener::bind(bind)
+        .await
+        .map_err(CaddyError::Bind)?;
+    axum::serve(listener, app).await.map_err(CaddyError::Serve)
+}
+
+/// Authenticates and applies one complete desired-domain snapshot serially.
+async fn reconcile_handler(
+    State(state): State<AgentState>,
+    headers: HeaderMap,
+    Json(request): Json<ReconcileRequest>,
+) -> Result<Json<ReconcileResponse>, StatusCode> {
+    if !valid_bearer_token(&headers, &state.config.auth_token) {
+        return Err(StatusCode::UNAUTHORIZED);
+    }
+    let _guard = state.lock.lock().await;
+    reconcile(&state.config, &request.domains)
+        .await
+        .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+    Ok(Json(ReconcileResponse {
+        accepted: request.domains.len(),
+    }))
+}
+
+/// Compares the complete bearer token in constant time after exact scheme parsing.
+fn valid_bearer_token(headers: &HeaderMap, expected: &str) -> bool {
+    let Some(value) = headers
+        .get(header::AUTHORIZATION)
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+    else {
+        return false;
+    };
+    value.len() == expected.len() && value.as_bytes().ct_eq(expected.as_bytes()).into()
 }
 
 /// Atomically replaces only Depot's generated import and restores it on command failure.
@@ -201,6 +281,8 @@ mod tests {
     /// Builds a safe isolated configuration for pure generation tests.
     fn config() -> CaddyAgentConfig {
         CaddyAgentConfig {
+            bind: "127.0.0.1:9080".parse().expect("bind parses"),
+            auth_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             gateway_upstream: "10.0.0.20:8080".parse().expect("upstream parses"),
             allowed_domain_suffixes: vec!["example.com".to_owned()],
             managed_directory: PathBuf::from("/etc/caddy/depot"),
@@ -232,6 +314,24 @@ mod tests {
     fn routes_reject_domains_outside_allowlist() {
         assert!(generate_routes(&config(), &["attacker.test".to_owned()]).is_err());
         assert!(generate_routes(&config(), &["bad.example.com {".to_owned()]).is_err());
+    }
+
+    /// Proves bearer authentication requires an exact token and scheme.
+    #[test]
+    fn bearer_token_requires_exact_secret() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            axum::http::header::AUTHORIZATION,
+            axum::http::HeaderValue::from_static("Bearer aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+        );
+        assert!(super::valid_bearer_token(
+            &headers,
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+        ));
+        assert!(!super::valid_bearer_token(
+            &headers,
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+        ));
     }
 
     /// Proves a failed reload restores the exact previously managed route file.
