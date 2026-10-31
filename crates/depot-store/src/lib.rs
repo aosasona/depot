@@ -205,6 +205,9 @@ pub struct Deployment {
     pub trigger_kind: String,
     pub status: String,
     pub failure_reason: Option<String>,
+    pub image_id: Option<String>,
+    pub container_id: Option<String>,
+    pub host_port: Option<i64>,
     pub created_at: i64,
     pub updated_at: i64,
     pub finished_at: Option<i64>,
@@ -256,6 +259,8 @@ pub enum StoreError {
     JobNotFound,
     #[error("the requested deployment does not exist")]
     DeploymentNotFound,
+    #[error("deployment runtime artifacts must be recorded before completion")]
+    DeploymentRuntimeMissing,
 }
 
 impl Store {
@@ -817,7 +822,8 @@ impl Store {
         self.project_by_id(project_id).await?;
         let rows = sqlx::query(
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
-                    failure_reason, created_at, updated_at, finished_at
+                    failure_reason, image_id, container_id, host_port,
+                    created_at, updated_at, finished_at
              FROM deployments WHERE project_id = ? ORDER BY created_at DESC, id DESC",
         )
         .bind(project_id)
@@ -830,7 +836,8 @@ impl Store {
     pub async fn deployment_by_id(&self, deployment_id: &str) -> Result<Deployment, StoreError> {
         let row = sqlx::query(
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
-                    failure_reason, created_at, updated_at, finished_at
+                    failure_reason, image_id, container_id, host_port,
+                    created_at, updated_at, finished_at
              FROM deployments WHERE id = ?",
         )
         .bind(deployment_id)
@@ -838,6 +845,32 @@ impl Store {
         .await?
         .ok_or(StoreError::DeploymentNotFound)?;
         deployment_from_row(row)
+    }
+
+    /// Persists verified runtime artifacts before the linked job completes successfully.
+    pub async fn record_deployment_runtime(
+        &self,
+        deployment_id: &str,
+        image_id: &str,
+        container_id: &str,
+        host_port: u16,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "UPDATE deployments SET image_id = ?, container_id = ?, host_port = ?, updated_at = ?
+             WHERE id = ? AND status = 'building'",
+        )
+        .bind(image_id)
+        .bind(container_id)
+        .bind(i64::from(host_port))
+        .bind(now_unix)
+        .bind(deployment_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::DeploymentNotFound);
+        }
+        Ok(())
     }
 
     /// Claims the oldest eligible job, including work whose previous lease expired.
@@ -895,6 +928,16 @@ impl Store {
         now_unix: i64,
     ) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin().await?;
+        let missing_runtime = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM deployments
+             WHERE job_id = ? AND (image_id IS NULL OR container_id IS NULL OR host_port IS NULL)",
+        )
+        .bind(job_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if missing_runtime > 0 {
+            return Err(StoreError::DeploymentRuntimeMissing);
+        }
         let result = sqlx::query(
             "UPDATE jobs SET state = 'succeeded', lease_owner = NULL,
                     lease_expires_at = NULL, result_json = ?, updated_at = ?
@@ -1214,6 +1257,9 @@ fn deployment_from_row(row: SqliteRow) -> Result<Deployment, StoreError> {
         trigger_kind: row.try_get("trigger_kind")?,
         status: row.try_get("status")?,
         failure_reason: row.try_get("failure_reason")?,
+        image_id: row.try_get("image_id")?,
+        container_id: row.try_get("container_id")?,
+        host_port: row.try_get("host_port")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         finished_at: row.try_get("finished_at")?,
@@ -1472,6 +1518,16 @@ mod tests {
             .expect("retry claim succeeds")
             .expect("retry is available");
         store
+            .record_deployment_runtime(
+                &deployment.id,
+                "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+                43123,
+                223,
+            )
+            .await
+            .expect("runtime identity records");
+        store
             .complete_job(&claimed.id, "worker", Some("{}"), 224)
             .await
             .expect("deployment completes");
@@ -1481,6 +1537,7 @@ mod tests {
             .expect("deployment reloads");
         assert_eq!(completed.status, "succeeded");
         assert_eq!(completed.finished_at, Some(224));
+        assert_eq!(completed.host_port, Some(43123));
     }
 
     /// Proves active deduplication and expired-lease recovery survive worker restarts.

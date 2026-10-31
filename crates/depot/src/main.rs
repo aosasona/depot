@@ -306,7 +306,7 @@ async fn execute_deployment(
     .await
     .map_err(|error| error.to_string())?;
     let image_tag = format!("depot/{}:{}", project.slug, &checkout.commit_sha()[..12]);
-    let result = depot_build::build_dockerfile(depot_build::DockerBuildRequest {
+    let build = depot_build::build_dockerfile(depot_build::DockerBuildRequest {
         docker_binary: &worker_config.docker_binary,
         checkout_path: checkout.path(),
         context_path: &config.context_path,
@@ -316,8 +316,68 @@ async fn execute_deployment(
     })
     .await
     .map_err(|error| error.to_string())?;
-    serde_json::to_string(&result)
-        .map_err(|_| "Docker build result could not be encoded.".to_owned())
+    let container_port = config
+        .exposed_port
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| "Service deployments require a valid exposed port.".to_owned())?;
+    let running = depot_runtime::start_container(depot_runtime::StartContainerRequest {
+        docker_binary: &worker_config.docker_binary,
+        deployment_id: &deployment.id,
+        image_id: &build.image_id,
+        container_port,
+        timeout: std::time::Duration::from_secs(30),
+    })
+    .await
+    .map_err(|error| error.to_string())?;
+    let healthcheck_path = config.healthcheck_path.as_deref().unwrap_or("/");
+    if let Err(error) = depot_runtime::wait_for_http_ready(
+        running.host_port,
+        healthcheck_path,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    {
+        if let Err(cleanup_error) = depot_runtime::remove_container(
+            &worker_config.docker_binary,
+            &running.container_id,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        {
+            tracing::warn!(%cleanup_error, container_id = %running.container_id, "could not remove unready candidate container");
+        }
+        return Err(error.to_string());
+    }
+    if store
+        .record_deployment_runtime(
+            &deployment.id,
+            &build.image_id,
+            &running.container_id,
+            running.host_port,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await
+        .is_err()
+    {
+        if let Err(cleanup_error) = depot_runtime::remove_container(
+            &worker_config.docker_binary,
+            &running.container_id,
+            std::time::Duration::from_secs(30),
+        )
+        .await
+        {
+            tracing::warn!(%cleanup_error, container_id = %running.container_id, "could not remove unpersisted candidate container");
+        }
+        return Err("Verified runtime identity could not be persisted.".to_owned());
+    }
+    serde_json::to_string(&serde_json::json!({
+        "image_id": build.image_id,
+        "image_tag": build.image_tag,
+        "container_id": running.container_id,
+        "host_port": running.host_port,
+        "logs": build.logs,
+    }))
+    .map_err(|_| "Deployment result could not be encoded.".to_owned())
 }
 
 /// Installs structured logging with a safe, operator-configurable filter.

@@ -429,6 +429,7 @@ dependencies = [
  "depot-build",
  "depot-core",
  "depot-git",
+ "depot-runtime",
  "depot-store",
  "rust-embed",
  "serde",
@@ -504,6 +505,15 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
+]
+
+[[package]]
+name = "depot-runtime"
+version = "0.1.0"
+dependencies = [
+ "serde",
+ "thiserror",
+ "tokio",
 ]
 
 [[package]]

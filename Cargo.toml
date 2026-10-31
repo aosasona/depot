@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/depot", "crates/depot-api", "crates/depot-auth", "crates/depot-build", "crates/depot-core", "crates/depot-git", "crates/depot-store"]
+members = ["crates/depot", "crates/depot-api", "crates/depot-auth", "crates/depot-build", "crates/depot-core", "crates/depot-git", "crates/depot-runtime", "crates/depot-store"]
 resolver = "2"
 
 [workspace.package]
@@ -22,7 +22,7 @@ subtle = "2.6.1"
 thiserror = "2.0.17"
 time = "0.3.55"
 toml = "1.1.8"
-tokio = { version = "1.54.1", features = ["macros", "net", "process", "rt-multi-thread", "signal", "time"] }
+tokio = { version = "1.54.1", features = ["io-util", "macros", "net", "process", "rt-multi-thread", "signal", "time"] }
 tracing = "0.1.41"
 tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 tower = { version = "0.5.3", features = ["util"] }

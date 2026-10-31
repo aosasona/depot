@@ -44,6 +44,8 @@ const inspectionResultSchema = z.object({
 const dockerBuildResultSchema = z.object({
   image_id: z.string(),
   image_tag: z.string(),
+  container_id: z.string(),
+  host_port: z.number().int(),
   logs: z.string(),
 });
 const jobStatusSchema = z.object({
@@ -74,6 +76,9 @@ const deploymentSchema = z.object({
   trigger_kind: z.enum(["manual", "webhook"]),
   status: z.enum(["queued", "building", "succeeded", "failed"]),
   failure_reason: z.string().nullable(),
+  image_id: z.string().nullable(),
+  container_id: z.string().nullable(),
+  host_port: z.number().int().nullable(),
   created_at: z.number(),
   updated_at: z.number(),
   finished_at: z.number().nullable(),

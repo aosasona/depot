@@ -13,6 +13,7 @@ depot-auth = { path = "../depot-auth" }
 depot-build = { path = "../depot-build" }
 depot-core = { path = "../depot-core" }
 depot-git = { path = "../depot-git" }
+depot-runtime = { path = "../depot-runtime" }
 depot-store = { path = "../depot-store" }
 rust-embed.workspace = true
 serde.workspace = true

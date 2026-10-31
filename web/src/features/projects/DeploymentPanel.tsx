@@ -86,6 +86,7 @@ function DeploymentRow({ deployment }: { deployment: Deployment }) {
       <code>{deployment.commit_sha.slice(0, 12)}</code>
       <span>{deployment.trigger_kind}</span>
       {image && <code title={image.image_id}>{image.image_tag}</code>}
+      {deployment.host_port && <code>127.0.0.1:{deployment.host_port}</code>}
       {deployment.failure_reason && (
         <p className="inspection-error">{deployment.failure_reason}</p>
       )}
