@@ -11,6 +11,7 @@ clap.workspace = true
 depot-api = { path = "../depot-api" }
 depot-auth = { path = "../depot-auth" }
 depot-build = { path = "../depot-build" }
+depot-caddy = { path = "../depot-caddy" }
 depot-core = { path = "../depot-core" }
 depot-git = { path = "../depot-git" }
 depot-runtime = { path = "../depot-runtime" }

@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/depot", "crates/depot-api", "crates/depot-auth", "crates/depot-build", "crates/depot-core", "crates/depot-git", "crates/depot-runtime", "crates/depot-store"]
+members = ["crates/depot", "crates/depot-api", "crates/depot-auth", "crates/depot-build", "crates/depot-caddy", "crates/depot-core", "crates/depot-git", "crates/depot-runtime", "crates/depot-store"]
 resolver = "2"
 
 [workspace.package]

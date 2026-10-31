@@ -1,0 +1,6 @@
+gateway_upstream = "10.0.0.20:8080"
+allowed_domain_suffixes = ["example.com"]
+managed_directory = "/etc/caddy/depot"
+caddyfile = "/etc/caddy/Caddyfile"
+caddy_binary = "caddy"
+command_timeout_seconds = 30

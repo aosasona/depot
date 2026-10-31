@@ -70,6 +70,15 @@ enum Command {
         #[arg(long)]
         once: bool,
     },
+    /// Reconciles an authenticated desired-domain snapshot on the Caddy host.
+    CaddyAgent {
+        /// Host-owned Caddy agent TOML configuration path.
+        #[arg(long, env = "DEPOT_CADDY_AGENT_CONFIG")]
+        config: PathBuf,
+        /// JSON file containing the complete desired hostname array.
+        #[arg(long)]
+        domains_file: PathBuf,
+    },
 }
 
 /// Describes a successful liveness response without overstating dependency health.
@@ -103,6 +112,12 @@ enum AppError {
     Auth(#[from] depot_auth::AuthError),
     #[error("configuration failed: {0}")]
     Config(#[from] depot_core::ConfigError),
+    #[error("Caddy reconciliation failed: {0}")]
+    Caddy(#[from] depot_caddy::CaddyError),
+    #[error("could not read desired domains file: {0}")]
+    DomainsRead(#[source] std::io::Error),
+    #[error("desired domains file must be a JSON string array: {0}")]
+    DomainsParse(#[source] serde_json::Error),
 }
 
 /// Parses the command line and runs the selected Depot process mode.
@@ -119,7 +134,21 @@ async fn main() -> Result<(), AppError> {
         Command::Migrate { config } => migrate(load_config(config.as_deref())?).await,
         Command::Doctor { config } => doctor(load_config(config.as_deref())?).await,
         Command::Worker { config, once } => worker(load_config(config.as_deref())?, once).await,
+        Command::CaddyAgent {
+            config,
+            domains_file,
+        } => caddy_agent(&config, &domains_file).await,
     }
+}
+
+/// Applies one complete desired-domain snapshot through the restricted host reconciler.
+async fn caddy_agent(config_path: &Path, domains_file: &Path) -> Result<(), AppError> {
+    let config = depot_caddy::CaddyAgentConfig::load(config_path)?;
+    let source = std::fs::read_to_string(domains_file).map_err(AppError::DomainsRead)?;
+    let domains: Vec<String> = serde_json::from_str(&source).map_err(AppError::DomainsParse)?;
+    depot_caddy::reconcile(&config, &domains).await?;
+    println!("Depot-managed Caddy routes are reconciled.");
+    Ok(())
 }
 
 /// Initializes storage and prints a short-lived bootstrap token exactly once.

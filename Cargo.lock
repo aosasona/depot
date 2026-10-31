@@ -427,6 +427,7 @@ dependencies = [
  "depot-api",
  "depot-auth",
  "depot-build",
+ "depot-caddy",
  "depot-core",
  "depot-git",
  "depot-runtime",
@@ -485,6 +486,17 @@ dependencies = [
  "thiserror",
  "tokio",
  "uuid",
+]
+
+[[package]]
+name = "depot-caddy"
+version = "0.1.0"
+dependencies = [
+ "depot-core",
+ "serde",
+ "thiserror",
+ "tokio",
+ "toml",
 ]
 
 [[package]]
