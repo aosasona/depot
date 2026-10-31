@@ -444,6 +444,7 @@ dependencies = [
  "axum",
  "axum-extra",
  "depot-auth",
+ "depot-core",
  "depot-store",
  "http-body-util",
  "serde",
