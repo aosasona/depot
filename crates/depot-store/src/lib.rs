@@ -120,6 +120,28 @@ pub struct NewProject<'a> {
     pub now_unix: i64,
 }
 
+/// A durable unit of background work claimed by one worker lease at a time.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct Job {
+    pub id: String,
+    pub kind: String,
+    pub project_id: Option<String>,
+    pub payload_json: String,
+    pub attempts: i64,
+    pub max_attempts: i64,
+}
+
+/// Validated durable job data supplied by an API or reconciliation producer.
+#[derive(Debug)]
+pub struct NewJob<'a> {
+    pub kind: &'a str,
+    pub project_id: Option<&'a str>,
+    pub payload_json: &'a str,
+    pub deduplication_key: &'a str,
+    pub max_attempts: i64,
+    pub now_unix: i64,
+}
+
 /// Durable access to Depot's SQLite database.
 #[derive(Clone, Debug)]
 pub struct Store {
@@ -151,6 +173,8 @@ pub enum StoreError {
     ProjectSlugAlreadyExists,
     #[error("the requested project does not exist")]
     ProjectNotFound,
+    #[error("the requested job does not exist or its lease is no longer owned")]
+    JobLeaseLost,
 }
 
 impl Store {
@@ -554,6 +578,150 @@ impl Store {
         Ok(())
     }
 
+    /// Enqueues work once per active deduplication key and returns the durable job.
+    pub async fn enqueue_job(&self, input: NewJob<'_>) -> Result<Job, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let candidate_id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT OR IGNORE INTO jobs
+             (id, kind, project_id, payload_json, state, deduplication_key,
+              attempts, max_attempts, available_at, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'queued', ?, 0, ?, ?, ?, ?)",
+        )
+        .bind(&candidate_id)
+        .bind(input.kind)
+        .bind(input.project_id)
+        .bind(input.payload_json)
+        .bind(input.deduplication_key)
+        .bind(input.max_attempts)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        let row = sqlx::query(
+            "SELECT id, kind, project_id, payload_json, attempts, max_attempts
+             FROM jobs WHERE deduplication_key = ? AND state IN ('queued', 'running')",
+        )
+        .bind(input.deduplication_key)
+        .fetch_one(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        job_from_row(row)
+    }
+
+    /// Claims the oldest eligible job, including work whose previous lease expired.
+    pub async fn claim_job(
+        &self,
+        worker_id: &str,
+        now_unix: i64,
+        lease_seconds: i64,
+    ) -> Result<Option<Job>, StoreError> {
+        let row = sqlx::query(
+            "UPDATE jobs
+             SET state = 'running', lease_owner = ?, lease_expires_at = ?,
+                 attempts = attempts + 1, updated_at = ?
+             WHERE id = (
+                 SELECT id FROM jobs
+                 WHERE attempts < max_attempts
+                   AND ((state = 'queued' AND available_at <= ?)
+                        OR (state = 'running' AND lease_expires_at < ?))
+                 ORDER BY created_at, id LIMIT 1
+             )
+             RETURNING id, kind, project_id, payload_json, attempts, max_attempts",
+        )
+        .bind(worker_id)
+        .bind(now_unix + lease_seconds)
+        .bind(now_unix)
+        .bind(now_unix)
+        .bind(now_unix)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(job_from_row).transpose()
+    }
+
+    /// Marks a leased job successful only when the caller still owns its lease.
+    pub async fn complete_job(
+        &self,
+        job_id: &str,
+        worker_id: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "UPDATE jobs SET state = 'succeeded', lease_owner = NULL,
+                    lease_expires_at = NULL, updated_at = ?
+             WHERE id = ? AND state = 'running' AND lease_owner = ?",
+        )
+        .bind(now_unix)
+        .bind(job_id)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::JobLeaseLost);
+        }
+        Ok(())
+    }
+
+    /// Records a failure and either requeues with delay or exhausts retry attempts.
+    pub async fn fail_job(
+        &self,
+        job_id: &str,
+        worker_id: &str,
+        error: &str,
+        retry_delay_seconds: i64,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "UPDATE jobs
+             SET state = CASE WHEN attempts < max_attempts THEN 'queued' ELSE 'failed' END,
+                 available_at = CASE WHEN attempts < max_attempts THEN ? ELSE available_at END,
+                 lease_owner = NULL, lease_expires_at = NULL, last_error = ?, updated_at = ?
+             WHERE id = ? AND state = 'running' AND lease_owner = ?",
+        )
+        .bind(now_unix + retry_delay_seconds)
+        .bind(error)
+        .bind(now_unix)
+        .bind(job_id)
+        .bind(worker_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::JobLeaseLost);
+        }
+        Ok(())
+    }
+
+    /// Appends a monotonically ordered, bounded worker event for log streaming.
+    pub async fn append_job_event(
+        &self,
+        job_id: &str,
+        level: &str,
+        message: &str,
+        now_unix: i64,
+    ) -> Result<i64, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let sequence = sqlx::query_scalar::<_, i64>(
+            "SELECT COALESCE(MAX(sequence), 0) + 1 FROM job_events WHERE job_id = ?",
+        )
+        .bind(job_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO job_events (job_id, sequence, level, message, created_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(job_id)
+        .bind(sequence)
+        .bind(level)
+        .bind(message)
+        .bind(now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        Ok(sequence)
+    }
+
     /// Replaces any unused token with one newly issued by an explicit setup command.
     pub async fn replace_bootstrap_token(
         &self,
@@ -675,6 +843,18 @@ fn project_from_row(row: SqliteRow) -> Result<ProjectSummary, StoreError> {
     })
 }
 
+/// Converts a selected SQLite job row into its lease-safe domain representation.
+fn job_from_row(row: SqliteRow) -> Result<Job, StoreError> {
+    Ok(Job {
+        id: row.try_get("id")?,
+        kind: row.try_get("kind")?,
+        project_id: row.try_get("project_id")?,
+        payload_json: row.try_get("payload_json")?,
+        attempts: row.try_get("attempts")?,
+        max_attempts: row.try_get("max_attempts")?,
+    })
+}
+
 /// Appends a project lifecycle audit event inside the caller's transaction.
 async fn insert_project_audit(
     transaction: &mut Transaction<'_, Sqlite>,
@@ -698,7 +878,7 @@ async fn insert_project_audit(
 
 #[cfg(test)]
 mod tests {
-    use super::{BootstrapAdmin, NewUser, Store, StoreError, UserRole};
+    use super::{BootstrapAdmin, NewJob, NewUser, Store, StoreError, UserRole};
 
     /// Proves a setup token can initialize an instance exactly once.
     #[tokio::test]
@@ -787,5 +967,109 @@ mod tests {
             .await
             .expect("admin can be demoted when another remains");
         assert_eq!(updated.role, UserRole::Member);
+    }
+
+    /// Proves active deduplication and expired-lease recovery survive worker restarts.
+    #[tokio::test]
+    async fn jobs_deduplicate_and_recover_expired_leases() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let input = NewJob {
+            kind: "inspect_repository",
+            project_id: None,
+            payload_json: "{}",
+            deduplication_key: "inspect:project:commit",
+            max_attempts: 3,
+            now_unix: 100,
+        };
+        let first = store.enqueue_job(input).await.expect("job enqueues");
+        let duplicate = store
+            .enqueue_job(NewJob {
+                kind: "inspect_repository",
+                project_id: None,
+                payload_json: "{}",
+                deduplication_key: "inspect:project:commit",
+                max_attempts: 3,
+                now_unix: 101,
+            })
+            .await
+            .expect("duplicate resolves");
+        assert_eq!(first.id, duplicate.id);
+
+        let claimed = store
+            .claim_job("worker-a", 110, 30)
+            .await
+            .expect("claim succeeds")
+            .expect("job is available");
+        assert_eq!(claimed.attempts, 1);
+        assert!(
+            store
+                .claim_job("worker-b", 120, 30)
+                .await
+                .expect("claim query succeeds")
+                .is_none()
+        );
+        let recovered = store
+            .claim_job("worker-b", 141, 30)
+            .await
+            .expect("recovery succeeds")
+            .expect("expired job is available");
+        assert_eq!(recovered.id, first.id);
+        assert_eq!(recovered.attempts, 2);
+        assert!(matches!(
+            store.complete_job(&first.id, "worker-a", 142).await,
+            Err(StoreError::JobLeaseLost)
+        ));
+        store
+            .complete_job(&first.id, "worker-b", 143)
+            .await
+            .expect("current lease owner completes");
+    }
+
+    /// Proves retries are delayed and stop once the configured attempt budget is spent.
+    #[tokio::test]
+    async fn failed_jobs_respect_backoff_and_attempt_limit() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let job = store
+            .enqueue_job(NewJob {
+                kind: "inspect_repository",
+                project_id: None,
+                payload_json: "{}",
+                deduplication_key: "retry:test",
+                max_attempts: 2,
+                now_unix: 100,
+            })
+            .await
+            .expect("job enqueues");
+        store
+            .claim_job("worker", 100, 30)
+            .await
+            .expect("claim succeeds");
+        store
+            .fail_job(&job.id, "worker", "temporary", 10, 101)
+            .await
+            .expect("failure records");
+        assert!(
+            store
+                .claim_job("worker", 105, 30)
+                .await
+                .expect("claim query succeeds")
+                .is_none()
+        );
+        store
+            .claim_job("worker", 111, 30)
+            .await
+            .expect("retry claim succeeds")
+            .expect("retry is available");
+        store
+            .fail_job(&job.id, "worker", "permanent", 10, 112)
+            .await
+            .expect("final failure records");
+        assert!(
+            store
+                .claim_job("worker", 200, 30)
+                .await
+                .expect("claim query succeeds")
+                .is_none()
+        );
     }
 }
