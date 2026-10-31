@@ -59,6 +59,15 @@ enum Command {
         #[arg(long, env = "DEPOT_CONFIG")]
         config: Option<PathBuf>,
     },
+    /// Claims and executes durable background jobs from the shared SQLite queue.
+    Worker {
+        /// TOML configuration path; local development defaults apply when omitted.
+        #[arg(long, env = "DEPOT_CONFIG")]
+        config: Option<PathBuf>,
+        /// Claims at most one available job and exits, primarily for supervision checks.
+        #[arg(long)]
+        once: bool,
+    },
 }
 
 /// Describes a successful liveness response without overstating dependency health.
@@ -101,6 +110,7 @@ async fn main() -> Result<(), AppError> {
         Command::Serve { config } => serve(load_config(config.as_deref())?).await,
         Command::Migrate { config } => migrate(load_config(config.as_deref())?).await,
         Command::Doctor { config } => doctor(load_config(config.as_deref())?).await,
+        Command::Worker { config, once } => worker(load_config(config.as_deref())?, once).await,
     }
 }
 
@@ -140,6 +150,51 @@ async fn doctor(config: Config) -> Result<(), AppError> {
     drop(listener);
     println!("[ok] listener {} is available", config.server.bind);
     println!("Depot {} is ready to start.", env!("CARGO_PKG_VERSION"));
+    Ok(())
+}
+
+/// Runs the durable worker claim loop with bounded polling and graceful shutdown.
+async fn worker(config: Config, once: bool) -> Result<(), AppError> {
+    let store = Store::connect(&config.database.url).await?;
+    let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
+    info!(%worker_id, "Depot worker started");
+    loop {
+        let now = time::OffsetDateTime::now_utc().unix_timestamp();
+        let claimed = store.claim_job(&worker_id, now, 60).await?;
+        if let Some(job) = claimed {
+            process_job(&store, &worker_id, job).await?;
+        }
+        if once {
+            return Ok(());
+        }
+        tokio::select! {
+            () = tokio::time::sleep(std::time::Duration::from_secs(2)) => {}
+            result = tokio::signal::ctrl_c() => {
+                if let Err(error) = result {
+                    tracing::warn!(%error, "could not install worker shutdown signal");
+                }
+                info!(%worker_id, "Depot worker stopping");
+                return Ok(());
+            }
+        }
+    }
+}
+
+/// Fails unsupported jobs explicitly until their real capability handler is installed.
+async fn process_job(
+    store: &Store,
+    worker_id: &str,
+    job: depot_store::Job,
+) -> Result<(), AppError> {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let message = format!("unsupported job kind: {}", job.kind);
+    store
+        .append_job_event(&job.id, "error", &message, now)
+        .await?;
+    store
+        .fail_job(&job.id, worker_id, &message, 30, now)
+        .await?;
+    tracing::warn!(job_id = %job.id, kind = %job.kind, "job handler is not installed");
     Ok(())
 }
 
