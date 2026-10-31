@@ -391,6 +391,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "clap",
+ "depot-api",
  "depot-auth",
  "depot-store",
  "rust-embed",
@@ -400,6 +401,22 @@ dependencies = [
  "tokio",
  "tracing",
  "tracing-subscriber",
+]
+
+[[package]]
+name = "depot-api"
+version = "0.1.0"
+dependencies = [
+ "axum",
+ "depot-auth",
+ "depot-store",
+ "http-body-util",
+ "serde",
+ "serde_json",
+ "time",
+ "tokio",
+ "tower",
+ "tracing",
 ]
 
 [[package]]

@@ -8,6 +8,7 @@ rust-version.workspace = true
 [dependencies]
 axum.workspace = true
 clap.workspace = true
+depot-api = { path = "../depot-api" }
 depot-auth = { path = "../depot-auth" }
 depot-store = { path = "../depot-store" }
 rust-embed.workspace = true

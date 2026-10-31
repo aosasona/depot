@@ -45,6 +45,9 @@ enum Command {
         /// Address used by the initial combined HTTP listener.
         #[arg(long, env = "DEPOT_BIND", default_value = "127.0.0.1:8080")]
         bind: SocketAddr,
+        /// SQLite URL for the Depot control-plane database.
+        #[arg(long, env = "DEPOT_DATABASE_URL", default_value = "sqlite://depot.db")]
+        database_url: String,
     },
     /// Prints environment checks required by the current foundation.
     Doctor,
@@ -85,7 +88,7 @@ async fn main() -> Result<(), AppError> {
             database_url,
             expires_in_minutes,
         } => setup(&database_url, expires_in_minutes).await,
-        Command::Serve { bind } => serve(bind).await,
+        Command::Serve { bind, database_url } => serve(bind, &database_url).await,
         Command::Doctor => {
             println!(
                 "depot {}: foundation checks passed",
@@ -116,9 +119,11 @@ fn init_tracing() {
 }
 
 /// Runs the initial combined API and embedded frontend HTTP listener.
-async fn serve(bind: SocketAddr) -> Result<(), AppError> {
+async fn serve(bind: SocketAddr, database_url: &str) -> Result<(), AppError> {
+    let store = Store::connect(database_url).await?;
     let app = Router::new()
         .route("/api/v1/system/health", get(system_health))
+        .merge(depot_api::router(store))
         .fallback(get(serve_spa));
     let listener = TcpListener::bind(bind).await.map_err(AppError::Bind)?;
 

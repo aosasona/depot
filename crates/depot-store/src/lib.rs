@@ -76,8 +76,7 @@ impl Store {
     }
 
     /// Opens an isolated single-connection database for integration tests.
-    #[cfg(test)]
-    async fn in_memory() -> Result<Self, StoreError> {
+    pub async fn connect_in_memory() -> Result<Self, StoreError> {
         let options = SqliteConnectOptions::from_str("sqlite::memory:")?
             .foreign_keys(true)
             .journal_mode(SqliteJournalMode::Memory);
@@ -87,6 +86,16 @@ impl Store {
             .await?;
         MIGRATOR.run(&pool).await?;
         Ok(Self { pool })
+    }
+
+    /// Reports whether initial setup has committed an active administrator.
+    pub async fn is_initialized(&self) -> Result<bool, StoreError> {
+        let count = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM users WHERE role = 'admin' AND active = 1",
+        )
+        .fetch_one(&self.pool)
+        .await?;
+        Ok(count > 0)
     }
 
     /// Replaces any unused token with one newly issued by an explicit setup command.
@@ -182,7 +191,7 @@ mod tests {
     /// Proves a setup token can initialize an instance exactly once.
     #[tokio::test]
     async fn bootstrap_is_single_use_and_closes_setup() {
-        let store = Store::in_memory().await.expect("store opens");
+        let store = Store::connect_in_memory().await.expect("store opens");
         let token_hash = [1_u8; 32];
         store
             .replace_bootstrap_token(&token_hash, 200, 100)
@@ -209,7 +218,7 @@ mod tests {
     /// Proves expired setup credentials cannot create an administrator.
     #[tokio::test]
     async fn expired_bootstrap_token_is_rejected() {
-        let store = Store::in_memory().await.expect("store opens");
+        let store = Store::connect_in_memory().await.expect("store opens");
         let token_hash = [1_u8; 32];
         store
             .replace_bootstrap_token(&token_hash, 100, 50)
