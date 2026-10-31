@@ -17,8 +17,8 @@ use depot_auth::{
 };
 use depot_core::{ProjectValidationError, validate_project_slug, validate_repository_url};
 use depot_store::{
-    JobEvent, JobStatus, NewJob, NewProject, ProjectSummary, SessionUser, Store, StoreError,
-    UserRole, UserSummary,
+    JobEvent, JobStatus, NewJob, NewProject, ProjectSummary, ServiceConfig, SessionUser, Store,
+    StoreError, UpdateServiceConfig, UserRole, UserSummary,
 };
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -132,6 +132,32 @@ struct UpdateProjectRequest {
     branch: String,
 }
 
+/// Project build and runtime configuration returned to authenticated members.
+#[derive(Debug, Serialize)]
+struct ServiceConfigResponse {
+    project_id: String,
+    project_kind: String,
+    builder: String,
+    context_path: String,
+    dockerfile_path: String,
+    static_output_dir: Option<String>,
+    exposed_port: Option<i64>,
+    healthcheck_path: Option<String>,
+    updated_at: i64,
+}
+
+/// Complete mutable service configuration accepted as one coherent replacement.
+#[derive(Debug, Deserialize)]
+struct UpdateServiceConfigRequest {
+    project_kind: String,
+    builder: String,
+    context_path: String,
+    dockerfile_path: String,
+    static_output_dir: Option<String>,
+    exposed_port: Option<i64>,
+    healthcheck_path: Option<String>,
+}
+
 /// Accepted inspection job identifier returned after durable enqueueing.
 #[derive(Debug, Serialize)]
 struct EnqueuedJobResponse {
@@ -210,6 +236,10 @@ pub fn router(store: Store) -> Router {
             "/api/v1/projects/{project_id}/inspect",
             post(enqueue_project_inspection),
         )
+        .route(
+            "/api/v1/projects/{project_id}/config",
+            get(get_service_config).put(update_service_config),
+        )
         .route("/api/v1/jobs/{job_id}", get(get_job_status))
         .with_state(ApiState { store })
 }
@@ -274,6 +304,48 @@ async fn get_project(
     Ok(Json(project_response(
         state.store.project_by_id(&project_id).await?,
     )))
+}
+
+/// Loads one project's build and runtime settings for an authenticated member.
+async fn get_service_config(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<Json<ServiceConfigResponse>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    Ok(Json(service_config_response(
+        state.store.service_config(&project_id).await?,
+    )))
+}
+
+/// Validates and replaces project service settings after CSRF verification.
+async fn update_service_config(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(request): Json<UpdateServiceConfigRequest>,
+) -> Result<Json<ServiceConfigResponse>, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    validate_service_config(&request)?;
+    let config = state
+        .store
+        .update_service_config(
+            &project_id,
+            UpdateServiceConfig {
+                project_kind: &request.project_kind,
+                builder: &request.builder,
+                context_path: request.context_path.trim(),
+                dockerfile_path: request.dockerfile_path.trim(),
+                static_output_dir: trimmed_optional(request.static_output_dir.as_deref()),
+                exposed_port: request.exposed_port,
+                healthcheck_path: trimmed_optional(request.healthcheck_path.as_deref()),
+                actor_user_id: &actor.id,
+                now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
+            },
+        )
+        .await?;
+    Ok(Json(service_config_response(config)))
 }
 
 /// Creates a validated project and attributes ownership to the current user.
@@ -507,6 +579,68 @@ fn validate_project_input(
     Ok(())
 }
 
+/// Rejects unsafe paths and contradictory project service settings.
+fn validate_service_config(request: &UpdateServiceConfigRequest) -> Result<(), ApiError> {
+    if !matches!(request.project_kind.as_str(), "auto" | "service" | "static") {
+        return Err(ApiError::InvalidProjectField("Project kind is invalid."));
+    }
+    if !matches!(request.builder.as_str(), "auto" | "dockerfile" | "railpack") {
+        return Err(ApiError::InvalidProjectField("Builder is invalid."));
+    }
+    for (value, message) in [
+        (&request.context_path, "Build context path is invalid."),
+        (&request.dockerfile_path, "Dockerfile path is invalid."),
+    ] {
+        if !is_safe_relative_path(value) {
+            return Err(ApiError::InvalidProjectField(message));
+        }
+    }
+    if let Some(path) = trimmed_optional(request.static_output_dir.as_deref())
+        && !is_safe_relative_path(path)
+    {
+        return Err(ApiError::InvalidProjectField(
+            "Static output path is invalid.",
+        ));
+    }
+    if request.project_kind == "static"
+        && trimmed_optional(request.static_output_dir.as_deref()).is_none()
+    {
+        return Err(ApiError::InvalidProjectField(
+            "Static projects require an output directory.",
+        ));
+    }
+    if request
+        .exposed_port
+        .is_some_and(|port| !(1..=65_535).contains(&port))
+    {
+        return Err(ApiError::InvalidProjectField("Exposed port is invalid."));
+    }
+    if let Some(path) = trimmed_optional(request.healthcheck_path.as_deref())
+        && (!path.starts_with('/') || path.len() > 255 || path.chars().any(char::is_control))
+    {
+        return Err(ApiError::InvalidProjectField(
+            "Health-check path is invalid.",
+        ));
+    }
+    Ok(())
+}
+
+/// Accepts bounded repository-relative paths without traversal or absolute roots.
+fn is_safe_relative_path(value: &str) -> bool {
+    let value = value.trim();
+    !value.is_empty()
+        && value.len() <= 255
+        && !value.starts_with('/')
+        && !value.starts_with('\\')
+        && !value.chars().any(char::is_control)
+        && !value.split(['/', '\\']).any(|segment| segment == "..")
+}
+
+/// Normalizes blank optional form values to absent database fields.
+fn trimmed_optional(value: Option<&str>) -> Option<&str> {
+    value.map(str::trim).filter(|value| !value.is_empty())
+}
+
 /// Maps a stored project into the stable API contract.
 fn project_response(project: ProjectSummary) -> ProjectResponse {
     ProjectResponse {
@@ -519,6 +653,21 @@ fn project_response(project: ProjectSummary) -> ProjectResponse {
         created_at: project.created_at,
         updated_at: project.updated_at,
         latest_inspection_job_id: project.latest_inspection_job_id,
+    }
+}
+
+/// Maps stored service settings into the stable authenticated API contract.
+fn service_config_response(config: ServiceConfig) -> ServiceConfigResponse {
+    ServiceConfigResponse {
+        project_id: config.project_id,
+        project_kind: config.project_kind,
+        builder: config.builder,
+        context_path: config.context_path,
+        dockerfile_path: config.dockerfile_path,
+        static_output_dir: config.static_output_dir,
+        exposed_port: config.exposed_port,
+        healthcheck_path: config.healthcheck_path,
+        updated_at: config.updated_at,
     }
 }
 
@@ -822,7 +971,7 @@ mod tests {
     use time::Duration;
     use tower::ServiceExt;
 
-    use super::router;
+    use super::{UpdateServiceConfigRequest, router, validate_service_config};
 
     /// Parses a JSON response body for focused API assertions.
     async fn json_body(response: axum::response::Response) -> Value {
@@ -844,6 +993,32 @@ mod tests {
             .filter_map(|value| value.to_str().ok()?.split(';').next())
             .collect::<Vec<_>>()
             .join("; ")
+    }
+
+    /// Proves repository-relative build paths cannot escape the checked-out source.
+    #[test]
+    fn service_config_rejects_traversal_and_incomplete_static_settings() {
+        let traversal = UpdateServiceConfigRequest {
+            project_kind: "service".to_owned(),
+            builder: "dockerfile".to_owned(),
+            context_path: "../secrets".to_owned(),
+            dockerfile_path: "Dockerfile".to_owned(),
+            static_output_dir: None,
+            exposed_port: Some(8080),
+            healthcheck_path: Some("/health".to_owned()),
+        };
+        assert!(validate_service_config(&traversal).is_err());
+
+        let incomplete_static = UpdateServiceConfigRequest {
+            project_kind: "static".to_owned(),
+            builder: "railpack".to_owned(),
+            context_path: ".".to_owned(),
+            dockerfile_path: "Dockerfile".to_owned(),
+            static_output_dir: Some("  ".to_owned()),
+            exposed_port: None,
+            healthcheck_path: None,
+        };
+        assert!(validate_service_config(&incomplete_static).is_err());
     }
 
     /// Proves setup status flips only after valid first-admin creation.

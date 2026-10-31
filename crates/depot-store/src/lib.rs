@@ -121,6 +121,34 @@ pub struct NewProject<'a> {
     pub now_unix: i64,
 }
 
+/// Non-secret build and runtime settings attached one-to-one to a project.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ServiceConfig {
+    pub project_id: String,
+    pub project_kind: String,
+    pub builder: String,
+    pub context_path: String,
+    pub dockerfile_path: String,
+    pub static_output_dir: Option<String>,
+    pub exposed_port: Option<i64>,
+    pub healthcheck_path: Option<String>,
+    pub updated_at: i64,
+}
+
+/// Validated mutable build and runtime settings ready for persistence.
+#[derive(Debug)]
+pub struct UpdateServiceConfig<'a> {
+    pub project_kind: &'a str,
+    pub builder: &'a str,
+    pub context_path: &'a str,
+    pub dockerfile_path: &'a str,
+    pub static_output_dir: Option<&'a str>,
+    pub exposed_port: Option<i64>,
+    pub healthcheck_path: Option<&'a str>,
+    pub actor_user_id: &'a str,
+    pub now_unix: i64,
+}
+
 /// A durable unit of background work claimed by one worker lease at a time.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Job {
@@ -526,6 +554,15 @@ impl Store {
         .bind(input.now_unix)
         .execute(&mut *transaction)
         .await?;
+        sqlx::query(
+            "INSERT INTO service_configs
+             (project_id, created_at, updated_at) VALUES (?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&mut *transaction)
+        .await?;
         insert_project_audit(
             &mut transaction,
             input.owner_user_id,
@@ -610,6 +647,59 @@ impl Store {
         .await?;
         transaction.commit().await?;
         Ok(())
+    }
+
+    /// Loads the build and runtime configuration for an existing project.
+    pub async fn service_config(&self, project_id: &str) -> Result<ServiceConfig, StoreError> {
+        let row = sqlx::query(
+            "SELECT project_id, project_kind, builder, context_path, dockerfile_path,
+                    static_output_dir, exposed_port, healthcheck_path, updated_at
+             FROM service_configs WHERE project_id = ?",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or(StoreError::ProjectNotFound)?;
+        service_config_from_row(row)
+    }
+
+    /// Replaces a project's validated service configuration and records its actor.
+    pub async fn update_service_config(
+        &self,
+        project_id: &str,
+        input: UpdateServiceConfig<'_>,
+    ) -> Result<ServiceConfig, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let result = sqlx::query(
+            "UPDATE service_configs
+             SET project_kind = ?, builder = ?, context_path = ?, dockerfile_path = ?,
+                 static_output_dir = ?, exposed_port = ?, healthcheck_path = ?, updated_at = ?
+             WHERE project_id = ?",
+        )
+        .bind(input.project_kind)
+        .bind(input.builder)
+        .bind(input.context_path)
+        .bind(input.dockerfile_path)
+        .bind(input.static_output_dir)
+        .bind(input.exposed_port)
+        .bind(input.healthcheck_path)
+        .bind(input.now_unix)
+        .bind(project_id)
+        .execute(&mut *transaction)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::ProjectNotFound);
+        }
+        insert_project_audit(
+            &mut transaction,
+            input.actor_user_id,
+            "project.config.update",
+            project_id,
+            input.now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        self.service_config(project_id).await
     }
 
     /// Enqueues work once per active deduplication key and returns the durable job.
@@ -926,6 +1016,21 @@ fn project_from_row(row: SqliteRow) -> Result<ProjectSummary, StoreError> {
     })
 }
 
+/// Maps one service configuration row into its domain representation.
+fn service_config_from_row(row: SqliteRow) -> Result<ServiceConfig, StoreError> {
+    Ok(ServiceConfig {
+        project_id: row.try_get("project_id")?,
+        project_kind: row.try_get("project_kind")?,
+        builder: row.try_get("builder")?,
+        context_path: row.try_get("context_path")?,
+        dockerfile_path: row.try_get("dockerfile_path")?,
+        static_output_dir: row.try_get("static_output_dir")?,
+        exposed_port: row.try_get("exposed_port")?,
+        healthcheck_path: row.try_get("healthcheck_path")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
 /// Converts a selected SQLite job row into its lease-safe domain representation.
 fn job_from_row(row: SqliteRow) -> Result<Job, StoreError> {
     Ok(Job {
@@ -961,7 +1066,28 @@ async fn insert_project_audit(
 
 #[cfg(test)]
 mod tests {
-    use super::{BootstrapAdmin, NewJob, NewUser, Store, StoreError, UserRole};
+    use super::{
+        BootstrapAdmin, NewJob, NewProject, NewUser, Store, StoreError, UpdateServiceConfig,
+        UserRole,
+    };
+
+    /// Creates one administrator in a fresh store for project-focused tests.
+    async fn create_test_admin(store: &Store) -> String {
+        let token_hash = [7_u8; 32];
+        store
+            .replace_bootstrap_token(&token_hash, 200, 100)
+            .await
+            .expect("token is created");
+        store
+            .create_first_admin(BootstrapAdmin {
+                email: "admin@example.com",
+                password_hash: "password hash",
+                token_hash: &token_hash,
+                now_unix: 150,
+            })
+            .await
+            .expect("admin is created")
+    }
 
     /// Proves a setup token can initialize an instance exactly once.
     #[tokio::test]
@@ -1050,6 +1176,52 @@ mod tests {
             .await
             .expect("admin can be demoted when another remains");
         assert_eq!(updated.role, UserRole::Member);
+    }
+
+    /// Proves every project receives defaults and configuration updates round-trip.
+    #[tokio::test]
+    async fn project_service_config_is_created_and_updated() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let project = store
+            .create_project(NewProject {
+                slug: "example",
+                name: "Example",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/project.git",
+                branch: "main",
+                now_unix: 200,
+            })
+            .await
+            .expect("project is created");
+        let defaults = store
+            .service_config(&project.id)
+            .await
+            .expect("defaults load");
+        assert_eq!(defaults.project_kind, "auto");
+        assert_eq!(defaults.builder, "auto");
+        assert_eq!(defaults.context_path, ".");
+
+        let updated = store
+            .update_service_config(
+                &project.id,
+                UpdateServiceConfig {
+                    project_kind: "service",
+                    builder: "dockerfile",
+                    context_path: "apps/web",
+                    dockerfile_path: "deploy/Dockerfile",
+                    static_output_dir: None,
+                    exposed_port: Some(8080),
+                    healthcheck_path: Some("/health"),
+                    actor_user_id: &admin_id,
+                    now_unix: 210,
+                },
+            )
+            .await
+            .expect("configuration updates");
+        assert_eq!(updated.exposed_port, Some(8080));
+        assert_eq!(updated.healthcheck_path.as_deref(), Some("/health"));
+        assert_eq!(updated.updated_at, 210);
     }
 
     /// Proves active deduplication and expired-lease recovery survive worker restarts.
