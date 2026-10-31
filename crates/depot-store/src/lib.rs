@@ -251,6 +251,37 @@ pub struct DeployTokenIdentity {
     pub created_by_user_id: String,
 }
 
+/// Masked metadata for one encrypted runtime variable.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ProjectVariable {
+    pub id: String,
+    pub project_id: String,
+    pub name: String,
+    pub is_secret: bool,
+    pub created_at: i64,
+    pub updated_at: i64,
+}
+
+/// Encrypted variable payload loaded only by the trusted worker boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct EncryptedProjectVariable {
+    pub name: String,
+    pub ciphertext: Vec<u8>,
+    pub nonce: Vec<u8>,
+}
+
+/// Authenticated encrypted value ready for insertion or replacement.
+#[derive(Debug)]
+pub struct UpsertProjectVariable<'a> {
+    pub project_id: &'a str,
+    pub name: &'a str,
+    pub ciphertext: &'a [u8],
+    pub nonce: &'a [u8],
+    pub is_secret: bool,
+    pub actor_user_id: &'a str,
+    pub now_unix: i64,
+}
+
 /// One project hostname and its routing reconciliation state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Domain {
@@ -316,6 +347,112 @@ pub enum StoreError {
 }
 
 impl Store {
+    /// Inserts or replaces one encrypted runtime variable without exposing its value.
+    pub async fn upsert_project_variable(
+        &self,
+        input: UpsertProjectVariable<'_>,
+    ) -> Result<ProjectVariable, StoreError> {
+        self.project_by_id(input.project_id).await?;
+        let id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO project_variables
+             (id, project_id, name, ciphertext, nonce, is_secret,
+              created_by_user_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(project_id, name) DO UPDATE SET
+               ciphertext = excluded.ciphertext,
+               nonce = excluded.nonce,
+               is_secret = excluded.is_secret,
+               created_by_user_id = excluded.created_by_user_id,
+               updated_at = excluded.updated_at",
+        )
+        .bind(&id)
+        .bind(input.project_id)
+        .bind(input.name)
+        .bind(input.ciphertext)
+        .bind(input.nonce)
+        .bind(input.is_secret)
+        .bind(input.actor_user_id)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&self.pool)
+        .await?;
+        self.project_variable_by_name(input.project_id, input.name)
+            .await
+    }
+
+    /// Lists masked runtime variable metadata for an authenticated project view.
+    pub async fn list_project_variables(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<ProjectVariable>, StoreError> {
+        self.project_by_id(project_id).await?;
+        let rows = sqlx::query(
+            "SELECT id, project_id, name, is_secret, created_at, updated_at
+             FROM project_variables WHERE project_id = ? ORDER BY name",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(project_variable_from_row).collect()
+    }
+
+    /// Loads encrypted values only for the worker immediately before runtime creation.
+    pub async fn encrypted_project_variables(
+        &self,
+        project_id: &str,
+    ) -> Result<Vec<EncryptedProjectVariable>, StoreError> {
+        self.project_by_id(project_id).await?;
+        let rows = sqlx::query(
+            "SELECT name, ciphertext, nonce FROM project_variables
+             WHERE project_id = ? ORDER BY name",
+        )
+        .bind(project_id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(EncryptedProjectVariable {
+                    name: row.try_get("name")?,
+                    ciphertext: row.try_get("ciphertext")?,
+                    nonce: row.try_get("nonce")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Deletes one runtime variable by project and opaque identifier.
+    pub async fn delete_project_variable(
+        &self,
+        project_id: &str,
+        variable_id: &str,
+    ) -> Result<bool, StoreError> {
+        self.project_by_id(project_id).await?;
+        let result = sqlx::query("DELETE FROM project_variables WHERE id = ? AND project_id = ?")
+            .bind(variable_id)
+            .bind(project_id)
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Loads one masked variable after an upsert.
+    async fn project_variable_by_name(
+        &self,
+        project_id: &str,
+        name: &str,
+    ) -> Result<ProjectVariable, StoreError> {
+        let row = sqlx::query(
+            "SELECT id, project_id, name, is_secret, created_at, updated_at
+             FROM project_variables WHERE project_id = ? AND name = ?",
+        )
+        .bind(project_id)
+        .bind(name)
+        .fetch_one(&self.pool)
+        .await?;
+        project_variable_from_row(row)
+    }
+
     /// Persists a project deploy credential while retaining only its digest.
     pub async fn create_deploy_token(
         &self,
@@ -1594,6 +1731,18 @@ fn deployment_from_row(row: SqliteRow) -> Result<Deployment, StoreError> {
     })
 }
 
+/// Converts one masked project-variable row without loading encrypted bytes.
+fn project_variable_from_row(row: SqliteRow) -> Result<ProjectVariable, StoreError> {
+    Ok(ProjectVariable {
+        id: row.try_get("id")?,
+        project_id: row.try_get("project_id")?,
+        name: row.try_get("name")?,
+        is_secret: row.try_get("is_secret")?,
+        created_at: row.try_get("created_at")?,
+        updated_at: row.try_get("updated_at")?,
+    })
+}
+
 /// Appends a project lifecycle audit event inside the caller's transaction.
 async fn insert_project_audit(
     transaction: &mut Transaction<'_, Sqlite>,
@@ -1619,7 +1768,7 @@ async fn insert_project_audit(
 mod tests {
     use super::{
         BootstrapAdmin, NewDeployment, NewJob, NewProject, NewUser, Store, StoreError,
-        UpdateServiceConfig, UserRole,
+        UpdateServiceConfig, UpsertProjectVariable, UserRole,
     };
 
     /// Creates one administrator in a fresh store for project-focused tests.
@@ -1948,6 +2097,50 @@ mod tests {
             .expect("healthy target exists");
         assert_eq!(target.deployment_id, deployment.id);
         assert_eq!(target.host_port, 43123);
+    }
+
+    /// Proves runtime values remain encrypted while list queries return metadata only.
+    #[tokio::test]
+    async fn project_variables_persist_only_encrypted_values() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let project = store
+            .create_project(NewProject {
+                slug: "variable-test",
+                name: "Variable test",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/project.git",
+                branch: "main",
+                now_unix: 100,
+            })
+            .await
+            .expect("project is created");
+        let ciphertext = b"authenticated ciphertext";
+        store
+            .upsert_project_variable(UpsertProjectVariable {
+                project_id: &project.id,
+                name: "DATABASE_URL",
+                ciphertext,
+                nonce: &[7_u8; 24],
+                is_secret: true,
+                actor_user_id: &admin_id,
+                now_unix: 200,
+            })
+            .await
+            .expect("variable is stored");
+        let metadata = store
+            .list_project_variables(&project.id)
+            .await
+            .expect("metadata lists");
+        assert_eq!(metadata.len(), 1);
+        assert_eq!(metadata[0].name, "DATABASE_URL");
+        assert!(metadata[0].is_secret);
+        let encrypted = store
+            .encrypted_project_variables(&project.id)
+            .await
+            .expect("worker payload loads");
+        assert_eq!(encrypted[0].ciphertext, ciphertext);
+        assert_eq!(encrypted[0].nonce, [7_u8; 24]);
     }
 
     /// Proves active deduplication and expired-lease recovery survive worker restarts.

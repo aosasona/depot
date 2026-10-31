@@ -1,5 +1,5 @@
 [workspace]
-members = ["crates/depot", "crates/depot-api", "crates/depot-auth", "crates/depot-build", "crates/depot-caddy", "crates/depot-core", "crates/depot-git", "crates/depot-runtime", "crates/depot-store"]
+members = ["crates/depot", "crates/depot-api", "crates/depot-auth", "crates/depot-build", "crates/depot-caddy", "crates/depot-core", "crates/depot-git", "crates/depot-runtime", "crates/depot-secrets", "crates/depot-store"]
 resolver = "2"
 
 [workspace.package]
@@ -15,6 +15,7 @@ hyper = { version = "1.8.1", features = ["client", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }
 axum-extra = { version = "0.12.6", features = ["cookie"] }
 argon2 = "0.6.0"
+chacha20poly1305 = { version = "0.11.0", features = ["getrandom", "zeroize"] }
 clap = { version = "4.6.7", features = ["derive", "env"] }
 rand = "0.10.3"
 rust-embed = "8.13.0"
@@ -31,6 +32,7 @@ tracing-subscriber = { version = "0.3.20", features = ["env-filter", "fmt"] }
 tower = { version = "0.5.3", features = ["util"] }
 uuid = { version = "1.29.0", features = ["v7"] }
 url = "2.5.8"
+zeroize = "1.9.1"
 
 [profile.release]
 lto = "thin"

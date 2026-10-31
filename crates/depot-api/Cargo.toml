@@ -10,6 +10,7 @@ axum.workspace = true
 axum-extra.workspace = true
 depot-auth = { path = "../depot-auth" }
 depot-core = { path = "../depot-core" }
+depot-secrets = { path = "../depot-secrets" }
 depot-store = { path = "../depot-store" }
 serde.workspace = true
 serde_json = "1.0.154"

@@ -15,6 +15,7 @@ depot-caddy = { path = "../depot-caddy" }
 depot-core = { path = "../depot-core" }
 depot-git = { path = "../depot-git" }
 depot-runtime = { path = "../depot-runtime" }
+depot-secrets = { path = "../depot-secrets" }
 depot-store = { path = "../depot-store" }
 hyper.workspace = true
 hyper-util.workspace = true
@@ -27,3 +28,4 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 uuid.workspace = true
+zeroize.workspace = true

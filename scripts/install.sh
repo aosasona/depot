@@ -39,6 +39,9 @@ if [ "$mode" = "vm" ]; then
     fi
     install -m 0644 "$repository_root/deploy/systemd/depot.service" "$stage/etc/systemd/system/depot.service"
     install -m 0644 "$repository_root/deploy/systemd/depot-worker.service" "$stage/etc/systemd/system/depot-worker.service"
+    if [ ! -e "$stage/etc/depot/master.key" ]; then
+        "$stage/usr/local/bin/depot" generate-key --output "$stage/etc/depot/master.key"
+    fi
 else
     install -d -m 0750 "$stage/etc/caddy/depot"
     if [ ! -e "$stage/etc/depot/caddy-agent.toml" ]; then
@@ -62,6 +65,8 @@ if [ "$mode" = "vm" ]; then
     chown -R depot:depot /var/lib/depot
     chmod -R g+rwX /var/lib/depot
     chown depot:depot /etc/depot/config.toml
+    chown root:depot /etc/depot/master.key
+    chmod 0640 /etc/depot/master.key
     if getent group docker >/dev/null 2>&1; then
         usermod --append --groups docker depot-worker
     else

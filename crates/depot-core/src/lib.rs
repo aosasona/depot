@@ -35,6 +35,7 @@ pub struct DatabaseConfig {
 #[serde(deny_unknown_fields)]
 pub struct SecurityConfig {
     pub public_origin: String,
+    pub master_key_file: String,
 }
 
 /// Filesystem and timeout limits applied to isolated background work.
@@ -90,6 +91,8 @@ pub enum ConfigError {
     InvalidDatabaseUrl,
     #[error("security.public_origin must contain only an http(s) origin without a path")]
     InvalidPublicOrigin,
+    #[error("security.master_key_file must not be empty")]
+    InvalidMasterKeyFile,
     #[error("worker workspace and timeout configuration is invalid")]
     InvalidWorkerConfig,
 }
@@ -208,6 +211,7 @@ impl Config {
             },
             security: SecurityConfig {
                 public_origin: "http://127.0.0.1:8080".to_owned(),
+                master_key_file: ".tmp/master.key".to_owned(),
             },
             worker: WorkerConfig {
                 workspace_root: ".tmp/workspaces".to_owned(),
@@ -233,6 +237,9 @@ impl Config {
             && !origin.cannot_be_a_base();
         if !valid_scheme || !is_origin_only || origin.host_str().is_none() {
             return Err(ConfigError::InvalidPublicOrigin);
+        }
+        if self.security.master_key_file.trim().is_empty() {
+            return Err(ConfigError::InvalidMasterKeyFile);
         }
         if self.worker.workspace_root.trim().is_empty()
             || self.worker.git_timeout_seconds == 0

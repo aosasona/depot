@@ -1,5 +1,7 @@
 //! Depot's single executable and process-mode entry point.
 
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 
 use axum::{
@@ -22,6 +24,7 @@ use time::Duration;
 use tokio::net::TcpListener;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
+use zeroize::Zeroize;
 
 /// Depot's top-level command-line interface.
 #[derive(Debug, Parser)]
@@ -57,6 +60,12 @@ enum Command {
         /// Human-readable purpose retained after the secret is hidden.
         #[arg(long, default_value = "CI deployment")]
         label: String,
+    },
+    /// Generates a new master key file without overwriting an existing key.
+    GenerateKey {
+        /// Destination referenced by security.master_key_file.
+        #[arg(long)]
+        output: PathBuf,
     },
     /// Serves the API, private gateway, and embedded web application.
     Serve {
@@ -135,6 +144,10 @@ enum AppError {
     DomainsParse(#[source] serde_json::Error),
     #[error("deploy token label must contain 1-80 characters")]
     InvalidDeployTokenLabel,
+    #[error("secret encryption failed: {0}")]
+    Secrets(#[from] depot_secrets::SecretError),
+    #[error("could not create master key file: {0}")]
+    KeyWrite(#[source] std::io::Error),
 }
 
 /// Parses the command line and runs the selected Depot process mode.
@@ -161,6 +174,7 @@ async fn main() -> Result<(), AppError> {
             )
             .await
         }
+        Command::GenerateKey { output } => generate_master_key(&output),
         Command::Serve { config } => serve(load_config(config.as_deref())?).await,
         Command::Migrate { config } => migrate(load_config(config.as_deref())?).await,
         Command::Doctor { config } => doctor(load_config(config.as_deref())?).await,
@@ -170,6 +184,25 @@ async fn main() -> Result<(), AppError> {
             domains_file,
         } => caddy_agent(&config, domains_file.as_deref()).await,
     }
+}
+
+/// Creates a mode-0600 master key file and refuses to replace existing material.
+fn generate_master_key(output: &Path) -> Result<(), AppError> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    options.mode(0o600);
+    let mut file = options.open(output).map_err(AppError::KeyWrite)?;
+    use std::io::Write;
+    writeln!(file, "{}", depot_secrets::generate_key_hex()).map_err(AppError::KeyWrite)?;
+    println!("Created Depot master key at {}.", output.display());
+    Ok(())
+}
+
+/// Loads the external secret key required by API and worker process modes.
+fn load_secret_cipher(config: &Config) -> Result<depot_secrets::SecretCipher, AppError> {
+    depot_secrets::SecretCipher::load(Path::new(&config.security.master_key_file))
+        .map_err(AppError::from)
 }
 
 /// Creates and prints one project deploy token exactly once for operator delivery.
@@ -247,13 +280,14 @@ async fn doctor(config: Config) -> Result<(), AppError> {
 /// Runs the durable worker claim loop with bounded polling and graceful shutdown.
 async fn worker(config: Config, once: bool) -> Result<(), AppError> {
     let store = Store::connect(&config.database.url).await?;
+    let secrets = load_secret_cipher(&config)?;
     let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
     info!(%worker_id, "Depot worker started");
     loop {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let claimed = store.claim_job(&worker_id, now, 60).await?;
         if let Some(job) = claimed {
-            process_job(&store, &config.worker, &worker_id, job).await?;
+            process_job(&store, &config.worker, &secrets, &worker_id, job).await?;
         }
         if once {
             return Ok(());
@@ -275,6 +309,7 @@ async fn worker(config: Config, once: bool) -> Result<(), AppError> {
 async fn process_job(
     store: &Store,
     worker_config: &depot_core::WorkerConfig,
+    secrets: &depot_secrets::SecretCipher,
     worker_id: &str,
     job: depot_store::Job,
 ) -> Result<(), AppError> {
@@ -282,7 +317,7 @@ async fn process_job(
     store
         .append_job_event(&job.id, "info", "Worker claimed durable job.", now)
         .await?;
-    match execute_job(store, worker_config, &job).await {
+    match execute_job(store, worker_config, secrets, &job).await {
         Ok(result_json) => {
             let completed_at = time::OffsetDateTime::now_utc().unix_timestamp();
             let completion_message = if job.kind == "inspect_repository" {
@@ -315,11 +350,12 @@ async fn process_job(
 async fn execute_job(
     store: &Store,
     worker_config: &depot_core::WorkerConfig,
+    secrets: &depot_secrets::SecretCipher,
     job: &depot_store::Job,
 ) -> Result<String, String> {
     match job.kind.as_str() {
         "inspect_repository" => execute_inspection(store, worker_config, job).await,
-        "deploy_project" => execute_deployment(store, worker_config, job).await,
+        "deploy_project" => execute_deployment(store, worker_config, secrets, job).await,
         "reconcile_domains" => execute_domain_reconciliation(store, worker_config).await,
         _ => Err(format!("Unsupported job kind: {}", job.kind)),
     }
@@ -396,6 +432,7 @@ async fn execute_inspection(
 async fn execute_deployment(
     store: &Store,
     worker_config: &depot_core::WorkerConfig,
+    secrets: &depot_secrets::SecretCipher,
     job: &depot_store::Job,
 ) -> Result<String, String> {
     let payload: DeploymentJobPayload = serde_json::from_str(&job.payload_json)
@@ -447,15 +484,32 @@ async fn execute_deployment(
         .exposed_port
         .and_then(|port| u16::try_from(port).ok())
         .ok_or_else(|| "Service deployments require a valid exposed port.".to_owned())?;
+    let mut environment = Vec::new();
+    for variable in store
+        .encrypted_project_variables(project_id)
+        .await
+        .map_err(|_| "Runtime variables could not be loaded.".to_owned())?
+    {
+        let context = format!("depot:v1:{project_id}:{}", variable.name);
+        let value = secrets
+            .decrypt(&variable.ciphertext, &variable.nonce, context.as_bytes())
+            .map_err(|_| "Runtime variables could not be decrypted.".to_owned())?;
+        environment.push((variable.name, value));
+    }
     let running = depot_runtime::start_container(depot_runtime::StartContainerRequest {
         docker_binary: &worker_config.docker_binary,
         deployment_id: &deployment.id,
         image_id: &build.image_id,
         container_port,
         timeout: std::time::Duration::from_secs(30),
+        environment: &environment,
     })
     .await
     .map_err(|error| error.to_string())?;
+    for (_, value) in &mut environment {
+        value.zeroize();
+    }
+    drop(environment);
     let healthcheck_path = config.healthcheck_path.as_deref().unwrap_or("/");
     if let Err(error) = depot_runtime::wait_for_http_ready(
         running.host_port,
@@ -516,10 +570,11 @@ fn init_tracing() {
 /// Runs the initial combined API and embedded frontend HTTP listener.
 async fn serve(config: Config) -> Result<(), AppError> {
     let store = Store::connect(&config.database.url).await?;
+    let secrets = load_secret_cipher(&config)?;
     let gateway_store = store.clone();
     let app = Router::new()
         .route("/api/v1/system/health", get(system_health))
-        .merge(depot_api::router(store.clone()))
+        .merge(depot_api::router_with_secrets(store.clone(), Some(secrets)))
         .fallback(move |request| gateway_or_spa(gateway_store.clone(), request));
     let listener = TcpListener::bind(config.server.bind)
         .await

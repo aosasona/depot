@@ -92,6 +92,14 @@ const domainSchema = z.object({
   created_at: z.number(),
   updated_at: z.number(),
 });
+const variableSchema = z.object({
+  id: z.string(),
+  project_id: z.string(),
+  name: z.string(),
+  is_secret: z.boolean(),
+  created_at: z.number(),
+  updated_at: z.number(),
+});
 
 export type User = z.infer<typeof userSchema>;
 export type AdminUser = z.infer<typeof adminUserSchema>;
@@ -104,6 +112,7 @@ export type ServiceConfigInput = Omit<
 >;
 export type Deployment = z.infer<typeof deploymentSchema>;
 export type Domain = z.infer<typeof domainSchema>;
+export type ProjectVariable = z.infer<typeof variableSchema>;
 
 /** Represents a safe API failure suitable for inline UI feedback. */
 export class ApiError extends Error {
@@ -331,5 +340,43 @@ export async function deleteDomain(domainId: string) {
     throw parsed.success
       ? new ApiError(parsed.data.error.code, parsed.data.error.message)
       : new ApiError("delete_failed", "Depot could not remove this domain.");
+  }
+}
+
+/** Lists masked runtime-variable metadata without loading stored values. */
+export function listVariables(projectId: string) {
+  return request(
+    `/api/v1/projects/${projectId}/variables`,
+    z.array(variableSchema),
+  );
+}
+
+/** Encrypts and creates or replaces one write-only runtime value. */
+export function upsertVariable(
+  projectId: string,
+  input: { name: string; value: string; is_secret: boolean },
+) {
+  return request(`/api/v1/projects/${projectId}/variables`, variableSchema, {
+    method: "PUT",
+    headers: csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+/** Deletes one encrypted runtime value after CSRF validation. */
+export async function deleteVariable(projectId: string, variableId: string) {
+  const response = await fetch(
+    `/api/v1/projects/${projectId}/variables/${variableId}`,
+    { method: "DELETE", credentials: "same-origin", headers: csrfHeaders() },
+  );
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => undefined);
+    const parsed = errorSchema.safeParse(body);
+    throw parsed.success
+      ? new ApiError(parsed.data.error.code, parsed.data.error.message)
+      : new ApiError(
+          "variable_delete_failed",
+          "Depot could not delete the value.",
+        );
   }
 }

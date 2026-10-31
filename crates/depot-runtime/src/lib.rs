@@ -18,6 +18,7 @@ pub struct StartContainerRequest<'a> {
     pub image_id: &'a str,
     pub container_port: u16,
     pub timeout: Duration,
+    pub environment: &'a [(String, String)],
 }
 
 /// Runtime identity needed for persistence, readiness, routing, and later cleanup.
@@ -40,6 +41,8 @@ pub enum RuntimeError {
     InvalidRuntimeIdentity,
     #[error("release container did not become HTTP-ready before its deadline")]
     NotReady,
+    #[error("runtime environment contains an invalid name or value")]
+    InvalidEnvironment,
 }
 
 /// Starts an image with an ephemeral loopback-only port and resolves its runtime identity.
@@ -61,11 +64,19 @@ pub async fn start_container(
         &name,
         "--publish",
         &publish,
-        request.image_id,
-    ])
-    .stdin(Stdio::null())
-    .kill_on_drop(true);
-    let output = command_output(&mut run, request.timeout).await?;
+    ]);
+    if !request.environment.is_empty() {
+        run.args(["--env-file", "/dev/stdin"]);
+    }
+    run.arg(request.image_id)
+        .stdin(if request.environment.is_empty() {
+            Stdio::null()
+        } else {
+            Stdio::piped()
+        })
+        .kill_on_drop(true);
+    let environment = encode_environment(request.environment)?;
+    let output = command_output_with_input(&mut run, request.timeout, &environment).await?;
     if !output.status.success() {
         return Err(RuntimeError::StartFailed);
     }
@@ -100,6 +111,24 @@ pub async fn start_container(
         container_id,
         host_port: host_port.expect("validated host port is present"),
     })
+}
+
+/// Encodes already-validated names and newline-free values for Docker env-file stdin.
+fn encode_environment(environment: &[(String, String)]) -> Result<Vec<u8>, RuntimeError> {
+    let mut encoded = String::new();
+    for (name, value) in environment {
+        if name.is_empty()
+            || name.contains(['=', '\n', '\r', '\0'])
+            || value.contains(['\n', '\r', '\0'])
+        {
+            return Err(RuntimeError::InvalidEnvironment);
+        }
+        encoded.push_str(name);
+        encoded.push('=');
+        encoded.push_str(value);
+        encoded.push('\n');
+    }
+    Ok(encoded.into_bytes())
 }
 
 /// Polls a loopback HTTP endpoint until it returns a non-5xx response or times out.
@@ -146,6 +175,28 @@ async fn command_output(
         .await
         .map_err(|_| RuntimeError::Timeout)?
         .map_err(RuntimeError::Spawn)
+}
+
+/// Executes a bounded command while streaming a secret payload through stdin.
+async fn command_output_with_input(
+    command: &mut Command,
+    timeout: Duration,
+    input: &[u8],
+) -> Result<std::process::Output, RuntimeError> {
+    if input.is_empty() {
+        return command_output(command, timeout).await;
+    }
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    let mut child = command.spawn().map_err(RuntimeError::Spawn)?;
+    let mut stdin = child.stdin.take().ok_or(RuntimeError::StartFailed)?;
+    tokio::time::timeout(timeout, async move {
+        stdin.write_all(input).await?;
+        drop(stdin);
+        child.wait_with_output().await
+    })
+    .await
+    .map_err(|_| RuntimeError::Timeout)?
+    .map_err(RuntimeError::Spawn)
 }
 
 /// Performs one bounded HTTP/1.1 readiness probe against loopback only.
@@ -200,10 +251,46 @@ mod tests {
             image_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
             container_port: 3000,
             timeout: Duration::from_secs(5),
+            environment: &[],
         })
         .await
         .expect("container starts");
         assert_eq!(running.host_port, 43123);
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Proves runtime values travel over stdin rather than Docker command arguments.
+    #[tokio::test]
+    async fn docker_runtime_streams_environment_over_stdin() {
+        let root =
+            std::env::temp_dir().join(format!("depot-runtime-env-test-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        let captured = root.join("environment");
+        fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"run\" ]; then cat > '{}'; printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; else printf '43123'; fi\n",
+                captured.display()
+            ),
+        )
+        .expect("fake Docker writes");
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        let environment = vec![("DATABASE_URL".to_owned(), "secret-value".to_owned())];
+        start_container(StartContainerRequest {
+            docker_binary: fake.to_str().expect("path is UTF-8"),
+            deployment_id: "deployment",
+            image_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            container_port: 3000,
+            timeout: Duration::from_secs(5),
+            environment: &environment,
+        })
+        .await
+        .expect("container starts");
+        assert_eq!(
+            fs::read_to_string(captured).expect("stdin was captured"),
+            "DATABASE_URL=secret-value\n"
+        );
         fs::remove_dir_all(root).expect("test root is removed");
     }
 

@@ -26,7 +26,14 @@ The installer creates separate unprivileged `depot` and `depot-worker`
 accounts, shared persistent directories, two systemd units, and an example
 configuration when one does not already exist. If the Docker group exists, it
 adds only `depot-worker` to that group. Docker daemon access is effectively
-root-equivalent; use a dedicated VM.
+root-equivalent; use a dedicated VM. It also creates `/etc/depot/master.key`
+once with restricted permissions. Back up that key separately from SQLite;
+stored runtime values cannot be recovered without it.
+
+Never store `master.key` beside an unencrypted SQLite backup. A minimal backup
+set contains `/var/lib/depot/depot.db` (captured with SQLite's backup command)
+and `/etc/depot/master.key` in separate protected locations. Restore the key
+with owner `root`, group `depot`, and mode `0640` before starting either service.
 
 Edit `/etc/depot/config.toml`, then initialize and check storage:
 

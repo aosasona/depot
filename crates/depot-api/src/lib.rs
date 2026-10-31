@@ -20,9 +20,11 @@ use depot_core::{
     ProjectValidationError, validate_domain_hostname, validate_project_slug,
     validate_repository_url,
 };
+use depot_secrets::SecretCipher;
 use depot_store::{
     Deployment, Domain, JobEvent, JobStatus, NewDeployment, NewJob, NewProject, ProjectSummary,
-    ServiceConfig, SessionUser, Store, StoreError, UpdateServiceConfig, UserRole, UserSummary,
+    ProjectVariable, ServiceConfig, SessionUser, Store, StoreError, UpdateServiceConfig,
+    UpsertProjectVariable, UserRole, UserSummary,
 };
 use serde::{Deserialize, Serialize};
 use tracing::error;
@@ -36,6 +38,7 @@ const SESSION_HOURS: i64 = 12;
 #[derive(Clone, Debug)]
 struct ApiState {
     store: Store,
+    secrets: Option<SecretCipher>,
 }
 
 /// Request body accepted only while the Depot instance is uninitialized.
@@ -216,6 +219,8 @@ enum ApiError {
     InvalidProjectField(&'static str),
     ProjectNotInspected,
     InvalidDeployRequest,
+    InvalidVariable,
+    SecretsUnavailable,
 }
 
 /// Durable deployment history returned to authenticated workspace members.
@@ -276,8 +281,32 @@ struct HookDeployRequest {
     commit_sha: String,
 }
 
+/// Write-only value and classification for one runtime environment entry.
+#[derive(Debug, Deserialize)]
+struct UpsertVariableRequest {
+    name: String,
+    value: String,
+    is_secret: bool,
+}
+
+/// Masked runtime-variable metadata which never contains a stored value.
+#[derive(Debug, Serialize)]
+struct VariableResponse {
+    id: String,
+    project_id: String,
+    name: String,
+    is_secret: bool,
+    created_at: i64,
+    updated_at: i64,
+}
+
 /// Builds the versioned authentication routes backed by the supplied store.
 pub fn router(store: Store) -> Router {
+    router_with_secrets(store, None)
+}
+
+/// Builds API routes with project secret encryption enabled for production use.
+pub fn router_with_secrets(store: Store, secrets: Option<SecretCipher>) -> Router {
     Router::new()
         .route(
             "/api/v1/auth/bootstrap",
@@ -316,6 +345,14 @@ pub fn router(store: Store) -> Router {
             "/api/v1/projects/{project_id}/deploy-tokens/{token_id}",
             axum::routing::delete(revoke_deploy_token),
         )
+        .route(
+            "/api/v1/projects/{project_id}/variables",
+            get(list_variables).put(upsert_variable),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/variables/{variable_id}",
+            axum::routing::delete(delete_variable),
+        )
         .route("/api/v1/deploy", post(hook_deploy))
         .route("/api/v1/deployments/{deployment_id}", get(get_deployment))
         .route(
@@ -327,7 +364,90 @@ pub fn router(store: Store) -> Router {
             axum::routing::delete(delete_domain),
         )
         .route("/api/v1/jobs/{job_id}", get(get_job_status))
-        .with_state(ApiState { store })
+        .with_state(ApiState { store, secrets })
+}
+
+/// Lists masked variable metadata for one authenticated project.
+async fn list_variables(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<Json<Vec<VariableResponse>>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    let variables = state.store.list_project_variables(&project_id).await?;
+    Ok(Json(variables.into_iter().map(variable_response).collect()))
+}
+
+/// Encrypts and replaces one validated runtime value after CSRF verification.
+async fn upsert_variable(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(request): Json<UpsertVariableRequest>,
+) -> Result<Json<VariableResponse>, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let name = validate_variable_name(&request.name)?;
+    validate_variable_value(&request.value)?;
+    let existing = state.store.list_project_variables(&project_id).await?;
+    if existing.len() >= 128 && !existing.iter().any(|variable| variable.name == name) {
+        return Err(ApiError::InvalidVariable);
+    }
+    let cipher = state.secrets.as_ref().ok_or(ApiError::SecretsUnavailable)?;
+    let context = variable_context(&project_id, name);
+    let encrypted = cipher
+        .encrypt(&request.value, context.as_bytes())
+        .map_err(|_| ApiError::SecretsUnavailable)?;
+    let variable = state
+        .store
+        .upsert_project_variable(UpsertProjectVariable {
+            project_id: &project_id,
+            name,
+            ciphertext: &encrypted.ciphertext,
+            nonce: &encrypted.nonce,
+            is_secret: request.is_secret,
+            actor_user_id: &actor.id,
+            now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
+        })
+        .await?;
+    Ok(Json(variable_response(variable)))
+}
+
+/// Deletes one encrypted runtime value after session and CSRF verification.
+async fn delete_variable(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path((project_id, variable_id)): axum::extract::Path<(String, String)>,
+) -> Result<StatusCode, ApiError> {
+    require_mutation(&state.store, &jar, &headers).await?;
+    state
+        .store
+        .delete_project_variable(&project_id, &variable_id)
+        .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Accepts portable POSIX-style environment names with bounded length.
+fn validate_variable_name(value: &str) -> Result<&str, ApiError> {
+    let valid = !value.is_empty()
+        && value.len() <= 128
+        && value.bytes().enumerate().all(|(index, byte)| {
+            byte == b'_' || byte.is_ascii_uppercase() || (index > 0 && byte.is_ascii_digit())
+        });
+    valid.then_some(value).ok_or(ApiError::InvalidVariable)
+}
+
+/// Rejects values Docker env files cannot represent safely or reasonably bound.
+fn validate_variable_value(value: &str) -> Result<(), ApiError> {
+    (!value.contains(['\n', '\r', '\0']) && value.len() <= 32_768)
+        .then_some(())
+        .ok_or(ApiError::InvalidVariable)
+}
+
+/// Produces authenticated context which prevents ciphertext row substitution.
+fn variable_context(project_id: &str, name: &str) -> String {
+    format!("depot:v1:{project_id}:{name}")
 }
 
 /// Enqueues one inspection per current project revision using an active dedup key.
@@ -978,6 +1098,18 @@ fn deployment_response(deployment: Deployment) -> DeploymentResponse {
     }
 }
 
+/// Converts masked variable metadata without ever loading its encrypted value.
+fn variable_response(variable: ProjectVariable) -> VariableResponse {
+    VariableResponse {
+        id: variable.id,
+        project_id: variable.project_id,
+        name: variable.name,
+        is_secret: variable.is_secret,
+        created_at: variable.created_at,
+        updated_at: variable.updated_at,
+    }
+}
+
 /// Maps one desired hostname into the stable authenticated API contract.
 fn domain_response(domain: Domain) -> DomainResponse {
     DomainResponse {
@@ -1281,6 +1413,16 @@ impl IntoResponse for ApiError {
                 "invalid_deploy_request",
                 "Provide a 40-character Git commit SHA and a valid token label.",
             ),
+            Self::InvalidVariable => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_variable",
+                "Use an uppercase environment name and a value without line breaks.",
+            ),
+            Self::SecretsUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "secrets_unavailable",
+                "Project secret encryption is not configured.",
+            ),
             Self::Store(StoreError::InvalidRole(_))
             | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1320,6 +1462,8 @@ impl IntoResponse for ApiError {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
     use axum::{
         body::Body,
         http::{Request, StatusCode, header},
@@ -1327,13 +1471,17 @@ mod tests {
     use depot_auth::{
         create_first_admin, create_managed_user, issue_bootstrap_token, issue_deploy_token, login,
     };
+    use depot_secrets::SecretCipher;
     use depot_store::{NewProject, Store, UserRole};
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
     use time::Duration;
     use tower::ServiceExt;
 
-    use super::{UpdateServiceConfigRequest, router, validate_service_config};
+    use super::{
+        UpdateServiceConfigRequest, router, router_with_secrets, validate_service_config,
+        validate_variable_name, validate_variable_value,
+    };
 
     /// Parses a JSON response body for focused API assertions.
     async fn json_body(response: axum::response::Response) -> Value {
@@ -1448,6 +1596,116 @@ mod tests {
             healthcheck_path: None,
         };
         assert!(validate_service_config(&incomplete_static).is_err());
+    }
+
+    /// Proves environment syntax rejects shell-like names and multiline values.
+    #[test]
+    fn runtime_variables_use_bounded_portable_syntax() {
+        assert_eq!(
+            validate_variable_name("DATABASE_URL").expect("valid"),
+            "DATABASE_URL"
+        );
+        assert!(validate_variable_name("lowercase").is_err());
+        assert!(validate_variable_name("1INVALID").is_err());
+        assert!(validate_variable_name("NAME=value").is_err());
+        validate_variable_value("postgres://database/app").expect("ordinary value is valid");
+        assert!(validate_variable_value("first\nsecond").is_err());
+    }
+
+    /// Proves variable writes encrypt values and all API reads remain masked.
+    #[tokio::test]
+    async fn runtime_variable_api_never_returns_stored_values() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let bootstrap = issue_bootstrap_token(&store, Duration::minutes(5))
+            .await
+            .expect("bootstrap token issues");
+        let admin_id = create_first_admin(
+            &store,
+            &bootstrap.token,
+            "admin@example.com",
+            "a secure initial password".to_owned(),
+        )
+        .await
+        .expect("admin is created");
+        let session = login(
+            &store,
+            "admin@example.com",
+            "a secure initial password".to_owned(),
+            Duration::hours(1),
+        )
+        .await
+        .expect("login succeeds");
+        let project = store
+            .create_project(NewProject {
+                slug: "secret-api",
+                name: "Secret API",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/project.git",
+                branch: "main",
+                now_unix: 100,
+            })
+            .await
+            .expect("project is created");
+        let key_path = std::env::temp_dir().join(format!(
+            "depot-api-secret-key-{}",
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        fs::write(&key_path, "11".repeat(32)).expect("key writes");
+        let cipher = SecretCipher::load(&key_path).expect("key loads");
+        fs::remove_file(key_path).expect("temporary key is removed");
+        let app = router_with_secrets(store.clone(), Some(cipher.clone()));
+        let cookie = format!("depot_session={}", session.token);
+        let response = app
+            .clone()
+            .oneshot(
+                Request::put(format!("/api/v1/projects/{}/variables", project.id))
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", &session.csrf_token)
+                    .body(Body::from(
+                        json!({
+                            "name": "DATABASE_URL",
+                            "value": "super-secret-value",
+                            "is_secret": true
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::OK);
+        let body = json_body(response).await;
+        assert_eq!(body["name"], "DATABASE_URL");
+        assert!(body.get("value").is_none());
+
+        let response = app
+            .oneshot(
+                Request::get(format!("/api/v1/projects/{}/variables", project.id))
+                    .header(header::COOKIE, cookie)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        let body = json_body(response).await;
+        assert!(!body.to_string().contains("super-secret-value"));
+        let encrypted = store
+            .encrypted_project_variables(&project.id)
+            .await
+            .expect("encrypted value loads");
+        assert_ne!(encrypted[0].ciphertext, b"super-secret-value");
+        let context = format!("depot:v1:{}:DATABASE_URL", project.id);
+        assert_eq!(
+            cipher
+                .decrypt(
+                    &encrypted[0].ciphertext,
+                    &encrypted[0].nonce,
+                    context.as_bytes()
+                )
+                .expect("ciphertext decrypts"),
+            "super-secret-value"
+        );
     }
 
     /// Proves setup status flips only after valid first-admin creation.

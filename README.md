@@ -45,6 +45,8 @@ Set these values for the installation:
   wildcard listener unless a firewall restricts it.
 - `database.url`: the persistent SQLite location.
 - `security.public_origin`: the HTTPS dashboard origin.
+- `security.master_key_file`: the separately backed-up encryption key created
+  by the installer. For manual installs, run `depot generate-key --output PATH`.
 - `worker.workspace_root`: scratch storage with enough space for Git checkouts.
 - `worker.docker_binary`: the Docker CLI executable available to the worker.
 - `worker.caddy_agent`: the private agent address and shared reconciliation
@@ -85,6 +87,10 @@ Configure projects in the dashboard, inspect their repositories, select the
 Dockerfile builder, set the container port and readiness path, then deploy.
 Successful services are published on ephemeral loopback ports and selected by
 the internal gateway through exact project-domain matches.
+
+Project environment values are encrypted at rest and injected only into the
+runtime container. Values are write-only after saving; replacing a value uses
+the same environment name. Build jobs receive none of these runtime values.
 
 ### 5. Deploy with curl or GitHub Actions
 

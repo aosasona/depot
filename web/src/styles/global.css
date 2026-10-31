@@ -515,6 +515,37 @@ h1 {
   font-size: 0.72rem;
   text-transform: uppercase;
 }
+
+.environment-form {
+  display: grid;
+  grid-template-columns: minmax(8rem, 0.8fr) minmax(12rem, 1.4fr) auto auto;
+  gap: 0.6rem;
+  align-items: center;
+}
+
+.environment-form input:not([type="checkbox"]) {
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 0.7rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+}
+
+.environment-secret {
+  display: flex;
+  gap: 0.4rem;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.78rem;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .environment-form {
+    grid-template-columns: 1fr;
+  }
+}
 .domain-form {
   display: grid;
   grid-template-columns: 1fr auto;
@@ -545,6 +576,9 @@ h1 {
   align-items: center;
   padding: 0.7rem;
   background: var(--surface);
+}
+.environment-panel .domain-row {
+  grid-template-columns: 1fr auto auto auto;
 }
 .domain-row code {
   overflow: hidden;
