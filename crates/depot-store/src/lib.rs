@@ -283,6 +283,29 @@ pub struct UpsertProjectVariable<'a> {
     pub now_unix: i64,
 }
 
+/// Encrypted GitHub webhook configuration loaded only for signature validation.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GithubWebhook {
+    pub id: String,
+    pub project_id: String,
+    pub repository_full_name: String,
+    pub secret_ciphertext: Vec<u8>,
+    pub secret_nonce: Vec<u8>,
+    pub created_by_user_id: String,
+}
+
+/// Values needed to create or rotate one project's GitHub webhook.
+#[derive(Debug)]
+pub struct UpsertGithubWebhook<'a> {
+    pub project_id: &'a str,
+    pub repository_full_name: &'a str,
+    pub endpoint_token_hash: &'a [u8],
+    pub secret_ciphertext: &'a [u8],
+    pub secret_nonce: &'a [u8],
+    pub actor_user_id: &'a str,
+    pub now_unix: i64,
+}
+
 /// One project hostname and its routing reconciliation state.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct Domain {
@@ -355,6 +378,145 @@ pub enum StoreError {
 }
 
 impl Store {
+    /// Creates or rotates one encrypted project webhook and invalidates its old URL.
+    pub async fn upsert_github_webhook(
+        &self,
+        input: UpsertGithubWebhook<'_>,
+    ) -> Result<String, StoreError> {
+        self.project_by_id(input.project_id).await?;
+        let id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO github_webhooks
+             (id, project_id, endpoint_token_hash, secret_ciphertext, secret_nonce,
+              repository_full_name, created_by_user_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(project_id) DO UPDATE SET
+               endpoint_token_hash = excluded.endpoint_token_hash,
+               secret_ciphertext = excluded.secret_ciphertext,
+               secret_nonce = excluded.secret_nonce,
+               repository_full_name = excluded.repository_full_name,
+               created_by_user_id = excluded.created_by_user_id,
+               updated_at = excluded.updated_at",
+        )
+        .bind(&id)
+        .bind(input.project_id)
+        .bind(input.endpoint_token_hash)
+        .bind(input.secret_ciphertext)
+        .bind(input.secret_nonce)
+        .bind(input.repository_full_name)
+        .bind(input.actor_user_id)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&self.pool)
+        .await?;
+        Ok(
+            sqlx::query_scalar::<_, String>("SELECT id FROM github_webhooks WHERE project_id = ?")
+                .bind(input.project_id)
+                .fetch_one(&self.pool)
+                .await?,
+        )
+    }
+
+    /// Resolves an opaque webhook endpoint token to encrypted validation state.
+    pub async fn github_webhook_by_token_hash(
+        &self,
+        token_hash: &[u8],
+    ) -> Result<Option<GithubWebhook>, StoreError> {
+        let row = sqlx::query(
+            "SELECT github_webhooks.id, github_webhooks.project_id,
+                    github_webhooks.repository_full_name,
+                    github_webhooks.secret_ciphertext, github_webhooks.secret_nonce,
+                    github_webhooks.created_by_user_id
+             FROM github_webhooks
+             JOIN users ON users.id = github_webhooks.created_by_user_id
+             WHERE endpoint_token_hash = ? AND users.active = 1",
+        )
+        .bind(token_hash)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(GithubWebhook {
+                id: row.try_get("id")?,
+                project_id: row.try_get("project_id")?,
+                repository_full_name: row.try_get("repository_full_name")?,
+                secret_ciphertext: row.try_get("secret_ciphertext")?,
+                secret_nonce: row.try_get("secret_nonce")?,
+                created_by_user_id: row.try_get("created_by_user_id")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Deduplicates one verified delivery and atomically creates its deployment job.
+    pub async fn enqueue_github_delivery(
+        &self,
+        webhook: &GithubWebhook,
+        delivery_id: &str,
+        commit_sha: &str,
+        now_unix: i64,
+    ) -> Result<Option<Deployment>, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO github_webhook_deliveries
+             (webhook_id, delivery_id, commit_sha, received_at)
+             VALUES (?, ?, ?, ?)",
+        )
+        .bind(&webhook.id)
+        .bind(delivery_id)
+        .bind(commit_sha)
+        .bind(now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        if inserted.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let deployment_id = Uuid::now_v7().to_string();
+        let job_id = Uuid::now_v7().to_string();
+        let payload_json = format!(r#"{{"deployment_id":"{deployment_id}"}}"#);
+        sqlx::query(
+            "INSERT INTO jobs
+             (id, kind, project_id, payload_json, state, deduplication_key,
+              attempts, max_attempts, available_at, created_at, updated_at)
+             VALUES (?, 'deploy_project', ?, ?, 'queued', ?, 0, 3, ?, ?, ?)",
+        )
+        .bind(&job_id)
+        .bind(&webhook.project_id)
+        .bind(payload_json)
+        .bind(format!("deploy:{deployment_id}"))
+        .bind(now_unix)
+        .bind(now_unix)
+        .bind(now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO deployments
+             (id, project_id, job_id, commit_sha, trigger_kind, status,
+              created_by_user_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'webhook', 'queued', ?, ?, ?)",
+        )
+        .bind(&deployment_id)
+        .bind(&webhook.project_id)
+        .bind(&job_id)
+        .bind(commit_sha)
+        .bind(&webhook.created_by_user_id)
+        .bind(now_unix)
+        .bind(now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE github_webhook_deliveries SET deployment_id = ?
+             WHERE webhook_id = ? AND delivery_id = ?",
+        )
+        .bind(&deployment_id)
+        .bind(&webhook.id)
+        .bind(delivery_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        self.deployment_by_id(&deployment_id).await.map(Some)
+    }
+
     /// Inserts or replaces one encrypted runtime variable without exposing its value.
     pub async fn upsert_project_variable(
         &self,
@@ -1912,7 +2074,7 @@ async fn insert_project_audit(
 mod tests {
     use super::{
         BootstrapAdmin, NewDeployment, NewJob, NewProject, NewUser, Store, StoreError,
-        UpdateServiceConfig, UpsertProjectVariable, UserRole,
+        UpdateServiceConfig, UpsertGithubWebhook, UpsertProjectVariable, UserRole,
     };
 
     /// Creates one administrator in a fresh store for project-focused tests.
@@ -2451,6 +2613,63 @@ mod tests {
             .expect("worker payload loads");
         assert_eq!(encrypted[0].ciphertext, ciphertext);
         assert_eq!(encrypted[0].nonce, [7_u8; 24]);
+    }
+
+    /// Proves verified GitHub delivery IDs enqueue at most one deployment.
+    #[tokio::test]
+    async fn github_deliveries_are_atomically_deduplicated() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let project = store
+            .create_project(NewProject {
+                slug: "webhook-test",
+                name: "Webhook test",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/aosasona/depot.git",
+                branch: "main",
+                now_unix: 100,
+            })
+            .await
+            .expect("project is created");
+        store
+            .upsert_github_webhook(UpsertGithubWebhook {
+                project_id: &project.id,
+                repository_full_name: "aosasona/depot",
+                endpoint_token_hash: &[8_u8; 32],
+                secret_ciphertext: b"ciphertext",
+                secret_nonce: &[9_u8; 24],
+                actor_user_id: &admin_id,
+                now_unix: 110,
+            })
+            .await
+            .expect("webhook is created");
+        let webhook = store
+            .github_webhook_by_token_hash(&[8_u8; 32])
+            .await
+            .expect("lookup succeeds")
+            .expect("webhook exists");
+        let commit_sha = "0123456789abcdef0123456789abcdef01234567";
+        let deployment = store
+            .enqueue_github_delivery(&webhook, "delivery-1", commit_sha, 120)
+            .await
+            .expect("delivery enqueues")
+            .expect("deployment is new");
+        assert_eq!(deployment.trigger_kind, "webhook");
+        assert!(
+            store
+                .enqueue_github_delivery(&webhook, "delivery-1", commit_sha, 121)
+                .await
+                .expect("duplicate is accepted")
+                .is_none()
+        );
+        assert_eq!(
+            store
+                .list_deployments(&project.id)
+                .await
+                .expect("history loads")
+                .len(),
+            1
+        );
     }
 
     /// Proves active deduplication and expired-lease recovery survive worker restarts.

@@ -2,7 +2,8 @@
 
 use axum::{
     Json, Router,
-    extract::State,
+    body::Bytes,
+    extract::{DefaultBodyLimit, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -24,9 +25,11 @@ use depot_secrets::SecretCipher;
 use depot_store::{
     Deployment, Domain, JobEvent, JobStatus, NewDeployment, NewJob, NewProject, ProjectSummary,
     ProjectVariable, ServiceConfig, SessionUser, Store, StoreError, UpdateServiceConfig,
-    UpsertProjectVariable, UserRole, UserSummary,
+    UpsertGithubWebhook, UpsertProjectVariable, UserRole, UserSummary,
 };
+use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use tracing::error;
 
 const SESSION_COOKIE: &str = "depot_session";
@@ -221,6 +224,7 @@ enum ApiError {
     InvalidDeployRequest,
     InvalidVariable,
     SecretsUnavailable,
+    InvalidWebhook,
 }
 
 /// Durable deployment history returned to authenticated workspace members.
@@ -301,6 +305,43 @@ struct VariableResponse {
     updated_at: i64,
 }
 
+/// Authenticated request to create or rotate a GitHub push webhook.
+#[derive(Debug, Deserialize)]
+struct CreateGithubWebhookRequest {
+    repository_full_name: String,
+}
+
+/// One-time GitHub webhook URL token and signing secret.
+#[derive(Debug, Serialize)]
+struct GithubWebhookCredentialResponse {
+    endpoint_path: String,
+    secret: String,
+}
+
+/// Minimal trusted fields extracted only after signature verification.
+#[derive(Debug, Deserialize)]
+struct GithubPushPayload {
+    #[serde(rename = "ref")]
+    git_ref: String,
+    after: String,
+    deleted: bool,
+    repository: GithubRepositoryPayload,
+}
+
+/// Repository identity carried in a GitHub push delivery.
+#[derive(Debug, Deserialize)]
+struct GithubRepositoryPayload {
+    full_name: String,
+}
+
+/// Stable acknowledgment for accepted and duplicate deliveries.
+#[derive(Debug, Serialize)]
+struct GithubWebhookResponse {
+    accepted: bool,
+    duplicate: bool,
+    deployment_id: Option<String>,
+}
+
 /// Builds the versioned authentication routes backed by the supplied store.
 pub fn router(store: Store) -> Router {
     router_with_secrets(store, None)
@@ -354,6 +395,14 @@ pub fn router_with_secrets(store: Store, secrets: Option<SecretCipher>) -> Route
             "/api/v1/projects/{project_id}/variables/{variable_id}",
             axum::routing::delete(delete_variable),
         )
+        .route(
+            "/api/v1/projects/{project_id}/github-webhook",
+            axum::routing::put(create_github_webhook),
+        )
+        .route(
+            "/api/v1/webhooks/github/{endpoint_token}",
+            post(receive_github_webhook),
+        )
         .route("/api/v1/deploy", post(hook_deploy))
         .route("/api/v1/deployments/{deployment_id}", get(get_deployment))
         .route(
@@ -369,7 +418,168 @@ pub fn router_with_secrets(store: Store, secrets: Option<SecretCipher>) -> Route
             axum::routing::delete(delete_domain),
         )
         .route("/api/v1/jobs/{job_id}", get(get_job_status))
+        .layer(DefaultBodyLimit::max(1024 * 1024))
         .with_state(ApiState { store, secrets })
+}
+
+/// Creates or rotates a project webhook and returns its credentials once.
+async fn create_github_webhook(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(request): Json<CreateGithubWebhookRequest>,
+) -> Result<Json<GithubWebhookCredentialResponse>, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let repository_full_name = validate_repository_full_name(&request.repository_full_name)?;
+    let cipher = state.secrets.as_ref().ok_or(ApiError::SecretsUnavailable)?;
+    let endpoint_token = depot_secrets::generate_key_hex();
+    let secret = depot_secrets::generate_key_hex();
+    let context = format!("depot:webhook:v1:{project_id}");
+    let encrypted = cipher
+        .encrypt(&secret, context.as_bytes())
+        .map_err(|_| ApiError::SecretsUnavailable)?;
+    state
+        .store
+        .upsert_github_webhook(UpsertGithubWebhook {
+            project_id: &project_id,
+            repository_full_name,
+            endpoint_token_hash: &Sha256::digest(endpoint_token.as_bytes()),
+            secret_ciphertext: &encrypted.ciphertext,
+            secret_nonce: &encrypted.nonce,
+            actor_user_id: &actor.id,
+            now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
+        })
+        .await?;
+    Ok(Json(GithubWebhookCredentialResponse {
+        endpoint_path: format!("/api/v1/webhooks/github/{endpoint_token}"),
+        secret,
+    }))
+}
+
+/// Verifies, filters, deduplicates, and enqueues one GitHub push delivery.
+async fn receive_github_webhook(
+    State(state): State<ApiState>,
+    axum::extract::Path(endpoint_token): axum::extract::Path<String>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let webhook = state
+        .store
+        .github_webhook_by_token_hash(&Sha256::digest(endpoint_token.as_bytes()))
+        .await?
+        .ok_or(ApiError::InvalidWebhook)?;
+    let cipher = state.secrets.as_ref().ok_or(ApiError::SecretsUnavailable)?;
+    let context = format!("depot:webhook:v1:{}", webhook.project_id);
+    let secret = cipher
+        .decrypt(
+            &webhook.secret_ciphertext,
+            &webhook.secret_nonce,
+            context.as_bytes(),
+        )
+        .map_err(|_| ApiError::InvalidWebhook)?;
+    verify_github_signature(&headers, &body, secret.as_bytes())?;
+    let event = required_header(&headers, "x-github-event")?;
+    if event == "ping" {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    if event != "push" {
+        return Err(ApiError::InvalidWebhook);
+    }
+    let delivery_id = required_header(&headers, "x-github-delivery")?;
+    if delivery_id.len() > 128
+        || !delivery_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(ApiError::InvalidWebhook);
+    }
+    let payload: GithubPushPayload =
+        serde_json::from_slice(&body).map_err(|_| ApiError::InvalidWebhook)?;
+    let project = state.store.project_by_id(&webhook.project_id).await?;
+    if payload.deleted
+        || payload.repository.full_name != webhook.repository_full_name
+        || payload.git_ref != format!("refs/heads/{}", project.branch)
+        || payload.after.len() != 40
+        || !payload.after.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Err(ApiError::InvalidWebhook);
+    }
+    let deployment = state
+        .store
+        .enqueue_github_delivery(
+            &webhook,
+            delivery_id,
+            &payload.after.to_ascii_lowercase(),
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(GithubWebhookResponse {
+            accepted: true,
+            duplicate: deployment.is_none(),
+            deployment_id: deployment.map(|deployment| deployment.id),
+        }),
+    )
+        .into_response())
+}
+
+/// Validates an owner/repository identity without accepting URL syntax.
+fn validate_repository_full_name(value: &str) -> Result<&str, ApiError> {
+    let valid = value.len() <= 200
+        && value.split_once('/').is_some_and(|(owner, repository)| {
+            !owner.is_empty()
+                && !repository.is_empty()
+                && owner
+                    .bytes()
+                    .chain(repository.bytes())
+                    .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+        });
+    valid.then_some(value).ok_or(ApiError::InvalidWebhook)
+}
+
+/// Verifies GitHub's HMAC-SHA256 signature in constant time over the raw body.
+fn verify_github_signature(
+    headers: &HeaderMap,
+    body: &[u8],
+    secret: &[u8],
+) -> Result<(), ApiError> {
+    let encoded = required_header(headers, "x-hub-signature-256")?
+        .strip_prefix("sha256=")
+        .ok_or(ApiError::InvalidWebhook)?;
+    let signature = decode_hex_32(encoded).ok_or(ApiError::InvalidWebhook)?;
+    let mut mac =
+        <Hmac<Sha256> as KeyInit>::new_from_slice(secret).map_err(|_| ApiError::InvalidWebhook)?;
+    mac.update(body);
+    mac.verify_slice(&signature)
+        .map_err(|_| ApiError::InvalidWebhook)
+}
+
+/// Reads one required ASCII webhook header without lossy conversion.
+fn required_header<'a>(headers: &'a HeaderMap, name: &str) -> Result<&'a str, ApiError> {
+    headers
+        .get(name)
+        .and_then(|value| value.to_str().ok())
+        .filter(|value| !value.is_empty())
+        .ok_or(ApiError::InvalidWebhook)
+}
+
+/// Decodes an exact 32-byte hexadecimal signature without another dependency.
+fn decode_hex_32(encoded: &str) -> Option<[u8; 32]> {
+    if encoded.len() != 64 {
+        return None;
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+        let nibble = |byte| match byte {
+            b'0'..=b'9' => Some(byte - b'0'),
+            b'a'..=b'f' => Some(byte - b'a' + 10),
+            _ => None,
+        };
+        decoded[index] = (nibble(pair[0])? << 4) | nibble(pair[1])?;
+    }
+    Some(decoded)
 }
 
 /// Lists masked variable metadata for one authenticated project.
@@ -1454,6 +1664,11 @@ impl IntoResponse for ApiError {
                 "secrets_unavailable",
                 "Project secret encryption is not configured.",
             ),
+            Self::InvalidWebhook => (
+                StatusCode::UNAUTHORIZED,
+                "invalid_webhook",
+                "The webhook delivery could not be verified or accepted.",
+            ),
             Self::Store(StoreError::InvalidRole(_))
             | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -1510,8 +1725,9 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        UpdateServiceConfigRequest, router, router_with_secrets, validate_service_config,
-        validate_variable_name, validate_variable_value,
+        UpdateServiceConfigRequest, router, router_with_secrets, validate_repository_full_name,
+        validate_service_config, validate_variable_name, validate_variable_value,
+        verify_github_signature,
     };
 
     /// Parses a JSON response body for focused API assertions.
@@ -1641,6 +1857,29 @@ mod tests {
         assert!(validate_variable_name("NAME=value").is_err());
         validate_variable_value("postgres://database/app").expect("ordinary value is valid");
         assert!(validate_variable_value("first\nsecond").is_err());
+    }
+
+    /// Verifies GitHub's published HMAC test vector and rejects modified bodies.
+    #[test]
+    fn github_signature_verification_matches_official_vector() {
+        let mut headers = axum::http::HeaderMap::new();
+        headers.insert(
+            "x-hub-signature-256",
+            "sha256=757107ea0eb2509fc211221cce984b8a37570b6d7586c22c46f4379c8b043e17"
+                .parse()
+                .expect("header parses"),
+        );
+        verify_github_signature(&headers, b"Hello, World!", b"It's a Secret to Everybody")
+            .expect("official signature verifies");
+        assert!(
+            verify_github_signature(&headers, b"Hello, Modified!", b"It's a Secret to Everybody")
+                .is_err()
+        );
+        assert_eq!(
+            validate_repository_full_name("aosasona/depot").expect("repository is valid"),
+            "aosasona/depot"
+        );
+        assert!(validate_repository_full_name("https://github.com/aosasona/depot").is_err());
     }
 
     /// Proves variable writes encrypt values and all API reads remain masked.

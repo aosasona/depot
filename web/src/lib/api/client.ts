@@ -101,6 +101,10 @@ const variableSchema = z.object({
   created_at: z.number(),
   updated_at: z.number(),
 });
+const githubWebhookCredentialSchema = z.object({
+  endpoint_path: z.string(),
+  secret: z.string(),
+});
 
 export type User = z.infer<typeof userSchema>;
 export type AdminUser = z.infer<typeof adminUserSchema>;
@@ -307,6 +311,22 @@ export function createDeployment(projectId: string) {
     {
       method: "POST",
       headers: csrfHeaders(),
+    },
+  );
+}
+
+/** Creates or rotates one signed GitHub push webhook and returns credentials once. */
+export function createGithubWebhook(
+  projectId: string,
+  repositoryFullName: string,
+) {
+  return request(
+    `/api/v1/projects/${projectId}/github-webhook`,
+    githubWebhookCredentialSchema,
+    {
+      method: "PUT",
+      headers: csrfHeaders(),
+      body: JSON.stringify({ repository_full_name: repositoryFullName }),
     },
   );
 }

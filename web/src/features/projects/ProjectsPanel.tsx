@@ -14,6 +14,7 @@ import { DeploymentPanel } from "./DeploymentPanel";
 import { DomainPanel } from "./DomainPanel";
 import { EnvironmentPanel } from "./EnvironmentPanel";
 import { ServiceConfigForm } from "./ServiceConfigForm";
+import { WebhookPanel } from "./WebhookPanel";
 
 const projectSchema = z.object({
   slug: z
@@ -232,6 +233,7 @@ function ProjectCard({ project }: { project: Project }) {
       <DeploymentPanel projectId={project.id} />
       <DomainPanel projectId={project.id} />
       <EnvironmentPanel projectId={project.id} />
+      <WebhookPanel projectId={project.id} />
     </article>
   );
 }

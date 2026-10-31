@@ -5,11 +5,11 @@ executable supplies the control-plane API, embedded dashboard, private HTTP
 gateway, durable worker, and restricted host-side Caddy agent.
 
 Depot is under active development. Public Git inspection, Dockerfile builds,
-container readiness, project domains, and Host-based gateway routing are
-implemented. Railpack, static artifact releases, provider-signed webhooks,
-private Git credentials, secrets, and rollback are not complete yet. GitHub
-Actions and other CI systems can trigger exact-commit deployments with a
-project-scoped bearer token.
+container readiness, project domains, Host-based gateway routing, encrypted
+runtime variables, safe rollback, and signed GitHub push webhooks are
+implemented. Railpack, static artifact releases, private Git credentials, and
+runtime log streaming are not complete yet. GitHub Actions and other CI systems
+can also trigger exact-commit deployments with a project-scoped bearer token.
 
 ## Quick start: main Depot binary
 
@@ -134,6 +134,10 @@ Release is published, and a reusable curl deployment workflow under
 `.github/workflows/`. Copy `deploy.yml` into the application repository (so
 `github.sha` identifies that application), add `DEPOT_DEPLOY_TOKEN` as a GitHub
 Actions secret, and provide the Depot URL when dispatching it.
+
+For automatic deployments without a CI workflow, create the one-time GitHub
+webhook credentials in the project dashboard and follow the
+[signed webhook setup guide](docs/operations/github-webhooks.md).
 
 ### 6. Connect host Caddy
 

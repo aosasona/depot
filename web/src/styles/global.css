@@ -569,6 +569,26 @@ h1 {
   gap: 1px;
   background: var(--border);
 }
+.credential-result {
+  display: grid;
+  gap: 0.55rem;
+  padding: 0.8rem;
+  border: 1px solid #8edb91;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.45;
+  text-transform: none;
+}
+.credential-result strong {
+  color: #8edb91;
+}
+.credential-result code {
+  overflow-wrap: anywhere;
+  color: var(--text);
+  text-transform: none;
+  user-select: all;
+}
 .domain-row {
   display: grid;
   grid-template-columns: 1fr auto auto;
