@@ -11,6 +11,7 @@ import {
   type Project,
 } from "../../lib/api/client";
 import { DeploymentPanel } from "./DeploymentPanel";
+import { DomainPanel } from "./DomainPanel";
 import { ServiceConfigForm } from "./ServiceConfigForm";
 
 const projectSchema = z.object({
@@ -228,6 +229,7 @@ function ProjectCard({ project }: { project: Project }) {
       </div>
       <ServiceConfigForm projectId={project.id} />
       <DeploymentPanel projectId={project.id} />
+      <DomainPanel projectId={project.id} />
     </article>
   );
 }

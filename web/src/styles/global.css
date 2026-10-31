@@ -506,6 +506,63 @@ h1 {
   border-color: #f0bd65;
   color: #f0bd65;
 }
+.domain-panel {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 0.8rem;
+  border-top: 1px solid var(--border);
+  padding-top: 1rem;
+  font-size: 0.72rem;
+  text-transform: uppercase;
+}
+.domain-form {
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 1px;
+  background: var(--border);
+}
+.domain-form input {
+  min-width: 0;
+  min-height: 38px;
+  padding: 0 0.7rem;
+  border: 0;
+  background: var(--surface);
+  color: var(--text);
+}
+.domain-submit {
+  padding: 0 0.8rem;
+  background: var(--surface);
+}
+.domain-list {
+  display: grid;
+  gap: 1px;
+  background: var(--border);
+}
+.domain-row {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 0.8rem;
+  align-items: center;
+  padding: 0.7rem;
+  background: var(--surface);
+}
+.domain-row code {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  text-transform: lowercase;
+}
+.deployment-status.active {
+  border-color: #8edb91;
+  color: #8edb91;
+}
+.deployment-status.pending {
+  border-color: #f0bd65;
+  color: #f0bd65;
+}
+.deployment-status.error {
+  border-color: #f36c6c;
+  color: #f36c6c;
+}
 .section-heading {
   display: flex;
   align-items: flex-end;

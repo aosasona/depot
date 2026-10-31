@@ -83,6 +83,15 @@ const deploymentSchema = z.object({
   updated_at: z.number(),
   finished_at: z.number().nullable(),
 });
+const domainSchema = z.object({
+  id: z.string(),
+  project_id: z.string(),
+  hostname: z.string(),
+  routing_status: z.enum(["pending", "active", "error"]),
+  last_error: z.string().nullable(),
+  created_at: z.number(),
+  updated_at: z.number(),
+});
 
 export type User = z.infer<typeof userSchema>;
 export type AdminUser = z.infer<typeof adminUserSchema>;
@@ -94,6 +103,7 @@ export type ServiceConfigInput = Omit<
   "project_id" | "updated_at"
 >;
 export type Deployment = z.infer<typeof deploymentSchema>;
+export type Domain = z.infer<typeof domainSchema>;
 
 /** Represents a safe API failure suitable for inline UI feedback. */
 export class ApiError extends Error {
@@ -289,4 +299,37 @@ export function createDeployment(projectId: string) {
       headers: csrfHeaders(),
     },
   );
+}
+
+/** Lists hostnames attached to one project. */
+export function listDomains(projectId: string) {
+  return request(
+    `/api/v1/projects/${projectId}/domains`,
+    z.array(domainSchema),
+  );
+}
+
+/** Attaches one validated public hostname to a project. */
+export function createDomain(projectId: string, hostname: string) {
+  return request(`/api/v1/projects/${projectId}/domains`, domainSchema, {
+    method: "POST",
+    headers: csrfHeaders(),
+    body: JSON.stringify({ hostname }),
+  });
+}
+
+/** Removes one project hostname after CSRF validation. */
+export async function deleteDomain(domainId: string) {
+  const response = await fetch(`/api/v1/domains/${domainId}`, {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: csrfHeaders(),
+  });
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => undefined);
+    const parsed = errorSchema.safeParse(body);
+    throw parsed.success
+      ? new ApiError(parsed.data.error.code, parsed.data.error.message)
+      : new ApiError("delete_failed", "Depot could not remove this domain.");
+  }
 }
