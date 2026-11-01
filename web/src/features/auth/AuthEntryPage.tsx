@@ -367,7 +367,7 @@ function Dashboard({
               ? "Control plane ready"
               : "Checking control plane"}
           </span>
-          <span className="sidebar-version">Depot v0.4.1</span>
+          <span className="sidebar-version">Depot v0.4.2</span>
         </div>
       </aside>
       <div className="app-workspace">

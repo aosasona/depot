@@ -1,12 +1,18 @@
 import { type UseQueryResult, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   type Deployment,
   getJobStatus,
+  type JobStatus,
   listDeployments,
   requestRuntimeLogs,
 } from "../../lib/api/client";
+
+type RuntimeLogResult = Extract<
+  NonNullable<JobStatus["result"]>,
+  { status: string }
+>;
 
 /** Shows durable deployment events and bounded builder output beside deployment work. */
 export function DeploymentLogsPanel({
@@ -78,6 +84,7 @@ export function DeploymentLogsPanel({
 
 /** Polls recent output for the active service while the runtime view is open. */
 function RuntimeLogs({ projectId }: { projectId: string }) {
+  const [lastRuntime, setLastRuntime] = useState<RuntimeLogResult>();
   const request = useQuery({
     queryKey: ["projects", projectId, "runtime-log-request"],
     queryFn: () => requestRuntimeLogs(projectId),
@@ -94,29 +101,48 @@ function RuntimeLogs({ projectId }: { projectId: string }) {
   });
   const runtime =
     job.data?.result && "status" in job.data.result ? job.data.result : null;
-  if (request.isPending || job.isPending)
+  useEffect(() => {
+    if (runtime) setLastRuntime(runtime);
+  }, [runtime]);
+  const visibleRuntime = runtime ?? lastRuntime;
+  if ((request.isPending || job.isPending) && !visibleRuntime)
     return <p className="surface-empty">Connecting to the active service…</p>;
-  if (request.isError || job.isError || job.data?.state === "failed")
+  if (
+    (request.isError || job.isError || job.data?.state === "failed") &&
+    !visibleRuntime
+  )
     return (
       <p className="inspection-error">
         Runtime logs are unavailable. Check the Depot worker service.
       </p>
     );
-  if (!runtime)
+  if (!visibleRuntime)
     return <p className="surface-empty">Collecting runtime output…</p>;
-  if (runtime.status === "static")
+  if (visibleRuntime.status === "static")
     return (
       <p className="surface-empty">
         Static sites have no running process. Build output is available under
         Build.
       </p>
     );
-  if (runtime.status === "not_deployed")
+  if (visibleRuntime.status === "not_deployed")
     return (
       <p className="surface-empty">
         Deploy this project to start collecting runtime output.
       </p>
     );
+  return <RuntimeConsole runtime={visibleRuntime} />;
+}
+
+/** Tails the newest output unless the operator has deliberately scrolled upward. */
+function RuntimeConsole({ runtime }: { runtime: RuntimeLogResult }) {
+  const output = useRef<HTMLPreElement>(null);
+  const following = useRef(true);
+  useEffect(() => {
+    const consoleOutput = output.current;
+    if (!consoleOutput || !following.current) return;
+    consoleOutput.scrollTop = consoleOutput.scrollHeight;
+  }, [runtime.logs]);
   return (
     <div className="runtime-console">
       <div>
@@ -126,7 +152,19 @@ function RuntimeLogs({ projectId }: { projectId: string }) {
           Updated {new Date(runtime.fetched_at * 1_000).toLocaleString()}
         </time>
       </div>
-      <pre>{runtime.logs || "The service has not written any output yet."}</pre>
+      <pre
+        ref={output}
+        onScroll={(event) => {
+          const consoleOutput = event.currentTarget;
+          following.current =
+            consoleOutput.scrollHeight -
+              consoleOutput.scrollTop -
+              consoleOutput.clientHeight <
+            48;
+        }}
+      >
+        {runtime.logs || "The service has not written any output yet."}
+      </pre>
     </div>
   );
 }
