@@ -150,6 +150,7 @@ pub async fn build_static(
         &checkout,
         &context,
         request.dockerfile_path,
+        request.output_directory,
     )?;
     let project_root = request.static_root.join(request.project_id);
     let releases_root = project_root.join("releases");
@@ -180,6 +181,13 @@ pub async fn build_static(
             build_and_extract_dockerfile_static(&request, &context, &staging).await
         }
         StaticBuilder::Railpack => build_and_extract_railpack(&request, &context, &staging).await,
+        StaticBuilder::Passthrough(source) => {
+            copy_static_directory(&source, &staging)?;
+            Ok(format!(
+                "No build step required; published committed static files from {}.",
+                source.strip_prefix(&context).unwrap_or(&source).display()
+            ))
+        }
     };
     let logs = match result {
         Ok(logs) => logs,
@@ -202,6 +210,7 @@ enum StaticBuilder {
     Node(&'static str),
     Dockerfile,
     Railpack,
+    Passthrough(PathBuf),
 }
 
 /// Resolves auto to a Dockerfile first and then the deterministic Node builder.
@@ -210,14 +219,66 @@ fn resolve_static_builder(
     checkout: &Path,
     context: &Path,
     dockerfile_path: &str,
+    output_directory: &str,
 ) -> Result<StaticBuilder, BuildError> {
     match configured {
         "dockerfile" => Ok(StaticBuilder::Dockerfile),
         "railpack" => Ok(StaticBuilder::Railpack),
         "auto" if checkout.join(dockerfile_path).is_file() => Ok(StaticBuilder::Dockerfile),
-        "auto" => static_package_command(context).map(StaticBuilder::Node),
+        "auto" => match static_package_command(context) {
+            Ok(command) => Ok(StaticBuilder::Node(command)),
+            Err(_) => resolve_passthrough_root(context, output_directory)
+                .map(StaticBuilder::Passthrough)
+                .ok_or(BuildError::UnsupportedStaticProject),
+        },
         _ => Err(BuildError::UnsupportedStaticProject),
     }
+}
+
+/// Chooses committed static output, preferring the configured directory then the context root.
+fn resolve_passthrough_root(context: &Path, output_directory: &str) -> Option<PathBuf> {
+    let configured = context.join(output_directory);
+    let configured_is_safe = fs::symlink_metadata(&configured)
+        .is_ok_and(|metadata| metadata.is_dir() && !metadata.file_type().is_symlink())
+        && configured
+            .canonicalize()
+            .is_ok_and(|path| path.starts_with(context));
+    if configured_is_safe && configured.join("index.html").is_file() {
+        return Some(configured);
+    }
+    context
+        .join("index.html")
+        .is_file()
+        .then(|| context.to_owned())
+}
+
+/// Copies a committed static tree without following links or publishing Git metadata.
+fn copy_static_directory(source: &Path, destination: &Path) -> Result<(), BuildError> {
+    for entry in
+        fs::read_dir(source).map_err(|error| BuildError::StaticArtifact(error.to_string()))?
+    {
+        let entry = entry.map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
+        if entry.file_name() == ".git" {
+            continue;
+        }
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
+        if metadata.file_type().is_symlink() || (!metadata.is_dir() && !metadata.is_file()) {
+            return Err(BuildError::StaticArtifact(
+                "plain static output contains a link or special file".to_owned(),
+            ));
+        }
+        let target = destination.join(entry.file_name());
+        if metadata.is_dir() {
+            fs::create_dir(&target)
+                .map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
+            copy_static_directory(&entry.path(), &target)?;
+        } else {
+            fs::copy(entry.path(), target)
+                .map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
+        }
+    }
+    Ok(())
 }
 
 /// Selects a deterministic install/build command from a committed Node lockfile.
@@ -490,6 +551,9 @@ async fn build_and_extract_static_image(
 
 /// Rejects absolute paths, parent traversal, and empty static output paths.
 fn safe_relative_path(value: &str) -> bool {
+    if value.trim() == "." {
+        return true;
+    }
     let path = Path::new(value);
     !value.trim().is_empty()
         && !path.is_absolute()
@@ -566,8 +630,8 @@ mod tests {
 
     use super::{
         BuildError, DockerBuildRequest, StaticBuildRequest, build_and_extract_railpack,
-        build_dockerfile, dockerfile_artifact_path, safe_relative_path, static_package_command,
-        validate_artifact_tree,
+        build_dockerfile, build_static, dockerfile_artifact_path, safe_relative_path,
+        static_package_command, validate_artifact_tree,
     };
 
     /// Proves the adapter passes paths as arguments and accepts canonical image IDs.
@@ -655,12 +719,51 @@ mod tests {
     /// Prevents configured artifact paths from escaping the verified build context.
     #[test]
     fn static_output_paths_must_be_normal_relative_paths() {
+        assert!(safe_relative_path("."));
         assert!(safe_relative_path("dist"));
         assert!(safe_relative_path("apps/site/dist"));
         assert!(!safe_relative_path(""));
         assert!(!safe_relative_path("/tmp/dist"));
         assert!(!safe_relative_path("../dist"));
         assert!(!safe_relative_path("dist/../public"));
+    }
+
+    /// Publishes committed HTML directly when no build manifest or Dockerfile exists.
+    #[tokio::test]
+    async fn plain_html_static_site_requires_no_builder() {
+        let root =
+            std::env::temp_dir().join(format!("depot-plain-static-{}", uuid::Uuid::now_v7()));
+        let checkout = root.join("checkout");
+        let static_root = root.join("static");
+        fs::create_dir_all(checkout.join("assets")).expect("checkout is created");
+        fs::create_dir(checkout.join(".git")).expect("Git metadata is created");
+        fs::write(checkout.join("index.html"), "<h1>plain</h1>").expect("index writes");
+        fs::write(checkout.join("assets/site.css"), "body{}").expect("asset writes");
+
+        let result = build_static(StaticBuildRequest {
+            docker_binary: "docker-is-not-needed",
+            railpack_binary: "railpack-is-not-needed",
+            checkout_path: &checkout,
+            context_path: ".",
+            dockerfile_path: "Dockerfile",
+            builder: "auto",
+            output_directory: "dist",
+            static_root: &static_root,
+            project_id: "plain",
+            release_id: "release",
+            timeout: Duration::from_secs(5),
+        })
+        .await
+        .expect("plain site publishes");
+
+        assert_eq!(
+            fs::read_to_string(result.release_path.join("index.html"))
+                .expect("published index reads"),
+            "<h1>plain</h1>"
+        );
+        assert!(!result.release_path.join(".git").exists());
+        assert!(result.logs.contains("No build step required"));
+        fs::remove_dir_all(root).expect("test root removes");
     }
 
     /// Proves a conventional package.json can build without a committed lockfile.

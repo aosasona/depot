@@ -326,6 +326,15 @@ struct GithubContentsQuery {
     reference: String,
 }
 
+/// GitHub source identity required by authenticated repository path browsers.
+#[derive(Debug, Serialize)]
+struct ProjectGithubSourceResponse {
+    installation_id: i64,
+    repository_id: i64,
+    repository_full_name: String,
+    branch: String,
+}
+
 /// Durable deployment history returned to authenticated workspace members.
 #[derive(Debug, Serialize)]
 struct DeploymentResponse {
@@ -579,6 +588,10 @@ pub fn router_with_shell_and_domains(
         .route(
             "/api/v1/projects/{project_id}/launch",
             post(enqueue_project_launch),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/github-source",
+            get(project_github_source),
         )
         .route(
             "/api/v1/projects/{project_id}/config",
@@ -978,6 +991,27 @@ async fn import_github_project(
         state.store.enqueue_domain_reconciliation(now).await?;
     }
     Ok((StatusCode::CREATED, Json(project_response(project))))
+}
+
+/// Returns provider metadata only for projects imported through the linked GitHub App.
+async fn project_github_source(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<Json<Option<ProjectGithubSourceResponse>>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    let project = state.store.project_by_id(&project_id).await?;
+    let source = state
+        .store
+        .github_repository_for_project(&project_id)
+        .await?
+        .map(|repository| ProjectGithubSourceResponse {
+            installation_id: repository.installation_id,
+            repository_id: repository.repository_id,
+            repository_full_name: repository.repository_full_name,
+            branch: project.branch,
+        });
+    Ok(Json(source))
 }
 
 fn github_installation_response(installation: GithubInstallation) -> GithubInstallationResponse {

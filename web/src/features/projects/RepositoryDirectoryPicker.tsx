@@ -7,6 +7,8 @@ type RepositoryDirectoryPickerProps = {
   repositoryId: number;
   reference: string;
   value: string;
+  selectionMode?: "directory" | "file";
+  title?: string;
   onChange: (path: string) => void;
 };
 
@@ -16,10 +18,15 @@ export function RepositoryDirectoryPicker({
   repositoryId,
   reference,
   value,
+  selectionMode = "directory",
+  title,
   onChange,
 }: RepositoryDirectoryPickerProps) {
-  const [path, setPath] = useState(value === "." ? "" : value);
-  useEffect(() => setPath(value === "." ? "" : value), [value]);
+  const [path, setPath] = useState(browserStartPath(value, selectionMode));
+  useEffect(
+    () => setPath(browserStartPath(value, selectionMode)),
+    [selectionMode, value],
+  );
   const entries = useQuery({
     queryKey: [
       "github-repository-directory",
@@ -42,16 +49,21 @@ export function RepositoryDirectoryPicker({
     <section className="repository-browser" aria-label="Repository files">
       <header>
         <div>
-          <span className="eyebrow">SOURCE DIRECTORY</span>
-          <strong>Choose the app folder</strong>
+          <span className="eyebrow">REPOSITORY BROWSER</span>
+          <strong>
+            {title ??
+              (selectionMode === "file" ? "Choose a file" : "Choose a folder")}
+          </strong>
         </div>
-        <button
-          className="table-action"
-          type="button"
-          onClick={() => onChange(path || ".")}
-        >
-          Use this folder
-        </button>
+        {selectionMode === "directory" && (
+          <button
+            className="table-action"
+            type="button"
+            onClick={() => onChange(path || ".")}
+          >
+            Use this folder
+          </button>
+        )}
       </header>
       <nav aria-label="Current repository directory">
         <button type="button" onClick={() => setPath("")}>
@@ -91,6 +103,19 @@ export function RepositoryDirectoryPicker({
               <span>{entry.name}</span>
               <small>Folder</small>
             </button>
+          ) : selectionMode === "file" ? (
+            <button
+              className="repository-file"
+              type="button"
+              key={entry.path}
+              onClick={() => onChange(entry.path)}
+            >
+              <span className="repository-entry-icon" aria-hidden="true">
+                ·
+              </span>
+              <span>{entry.name}</span>
+              <small>Select file</small>
+            </button>
           ) : (
             <div className="repository-file" key={entry.path}>
               <span className="repository-entry-icon" aria-hidden="true">
@@ -106,11 +131,20 @@ export function RepositoryDirectoryPicker({
         )}
       </div>
       <footer>
-        <span>Selected build context</span>
+        <span>Selected {selectionMode === "file" ? "file" : "directory"}</span>
         <code>{value}</code>
       </footer>
     </section>
   );
+}
+
+/** Opens file selections at their parent directory and directory selections at themselves. */
+function browserStartPath(value: string, selectionMode: "directory" | "file") {
+  if (value === "." || !value) return "";
+  if (selectionMode === "directory") return value;
+  const segments = value.split("/");
+  segments.pop();
+  return segments.join("/");
 }
 
 /** Keeps safe API diagnostics while retaining a useful fallback for network failures. */

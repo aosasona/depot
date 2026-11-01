@@ -509,6 +509,39 @@ h1 {
   letter-spacing: normal;
   text-transform: none;
 }
+.config-path-field {
+  display: grid;
+  grid-column: 1 / -1;
+  gap: 0.6rem;
+}
+.config-path-control {
+  display: grid;
+  gap: 0.4rem;
+}
+.config-path-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+}
+.config-path-input .table-action {
+  min-width: 5.5rem;
+  border-left: 0;
+}
+.config-path-input .table-action:disabled {
+  color: #666;
+  cursor: not-allowed;
+}
+.config-path-field .repository-browser {
+  text-transform: none;
+}
+.config-browser-note {
+  grid-column: 1 / -1;
+  margin: 0;
+  padding: 0.65rem 0.75rem;
+  border-left: 2px solid var(--border);
+  color: var(--muted);
+  font-size: 0.68rem;
+  line-height: 1.5;
+}
 .config-form .primary-action,
 .config-form .notice {
   grid-column: 1 / -1;

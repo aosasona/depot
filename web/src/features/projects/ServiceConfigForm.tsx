@@ -4,11 +4,14 @@ import { useState } from "react";
 import { z } from "zod";
 import {
   ApiError,
+  getProjectGithubSource,
   getServiceConfig,
+  type ProjectGithubSource,
   type ServiceConfig,
   type ServiceConfigInput,
   updateServiceConfig,
 } from "../../lib/api/client";
+import { RepositoryDirectoryPicker } from "./RepositoryDirectoryPicker";
 
 const configFormSchema = z
   .object({
@@ -57,6 +60,11 @@ export function ServiceConfigForm({ projectId }: { projectId: string }) {
     queryFn: () => getServiceConfig(projectId),
     enabled: expanded,
   });
+  const githubSource = useQuery({
+    queryKey: ["projects", projectId, "github-source"],
+    queryFn: () => getProjectGithubSource(projectId),
+    enabled: expanded,
+  });
   return (
     <div className="service-config">
       <button
@@ -67,24 +75,37 @@ export function ServiceConfigForm({ projectId }: { projectId: string }) {
       >
         {expanded ? "Close configuration" : "Configure build"}
       </button>
-      {expanded && config.isPending && (
+      {expanded && (config.isPending || githubSource.isPending) && (
         <p className="config-message">Loading configuration…</p>
       )}
       {expanded && config.isError && (
         <p className="inspection-error">Configuration is unavailable.</p>
       )}
-      {expanded && config.data && (
-        <LoadedConfigForm key={config.data.updated_at} config={config.data} />
+      {expanded && config.data && !githubSource.isPending && (
+        <LoadedConfigForm
+          key={config.data.updated_at}
+          config={config.data}
+          githubSource={githubSource.data ?? null}
+        />
       )}
     </div>
   );
 }
 
 /** Edits a loaded service configuration and persists the complete replacement. */
-function LoadedConfigForm({ config }: { config: ServiceConfig }) {
+function LoadedConfigForm({
+  config,
+  githubSource,
+}: {
+  config: ServiceConfig;
+  githubSource: ProjectGithubSource | null;
+}) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<string>();
   const [error, setError] = useState<string>();
+  const [pathBrowser, setPathBrowser] = useState<
+    "context" | "dockerfile" | "output"
+  >();
   const mutation = useMutation({
     mutationFn: (input: ServiceConfigInput) =>
       updateServiceConfig(config.project_id, input),
@@ -175,41 +196,142 @@ function LoadedConfigForm({ config }: { config: ServiceConfig }) {
       </form.Field>
       <form.Field name="context_path">
         {(field) => (
-          <label>
-            Build context
-            <input
-              value={field.state.value}
-              onChange={(event) => field.handleChange(event.target.value)}
-            />
-          </label>
+          <div className="config-path-field">
+            <div className="config-path-control">
+              <label htmlFor="build-context">Build context</label>
+              <span className="config-path-input">
+                <input
+                  id="build-context"
+                  value={field.state.value}
+                  onChange={(event) => field.handleChange(event.target.value)}
+                />
+                <button
+                  className="table-action"
+                  type="button"
+                  disabled={!githubSource}
+                  onClick={() =>
+                    setPathBrowser((value) =>
+                      value === "context" ? undefined : "context",
+                    )
+                  }
+                >
+                  Browse
+                </button>
+              </span>
+            </div>
+            {pathBrowser === "context" && githubSource && (
+              <RepositoryDirectoryPicker
+                installationId={githubSource.installation_id}
+                repositoryId={githubSource.repository_id}
+                reference={githubSource.branch}
+                value={field.state.value}
+                title="Choose the build context"
+                onChange={(path) => {
+                  field.handleChange(path);
+                  setPathBrowser(undefined);
+                }}
+              />
+            )}
+          </div>
         )}
       </form.Field>
       <form.Field name="dockerfile_path">
         {(field) => (
-          <label>
-            Dockerfile
-            <input
-              value={field.state.value}
-              onChange={(event) => field.handleChange(event.target.value)}
-            />
-          </label>
+          <div className="config-path-field">
+            <div className="config-path-control">
+              <label htmlFor="dockerfile-path">Dockerfile</label>
+              <span className="config-path-input">
+                <input
+                  id="dockerfile-path"
+                  value={field.state.value}
+                  onChange={(event) => field.handleChange(event.target.value)}
+                />
+                <button
+                  className="table-action"
+                  type="button"
+                  disabled={!githubSource}
+                  onClick={() =>
+                    setPathBrowser((value) =>
+                      value === "dockerfile" ? undefined : "dockerfile",
+                    )
+                  }
+                >
+                  Browse
+                </button>
+              </span>
+            </div>
+            {pathBrowser === "dockerfile" && githubSource && (
+              <RepositoryDirectoryPicker
+                installationId={githubSource.installation_id}
+                repositoryId={githubSource.repository_id}
+                reference={githubSource.branch}
+                value={field.state.value}
+                selectionMode="file"
+                title="Choose the Dockerfile"
+                onChange={(path) => {
+                  field.handleChange(path);
+                  setPathBrowser(undefined);
+                }}
+              />
+            )}
+          </div>
         )}
       </form.Field>
       <form.Field name="static_output_dir">
         {(field) => (
-          <label>
-            Static output{" "}
-            {config.builder === "dockerfile"
-              ? "(path inside final image)"
-              : "directory"}
-            <input
-              placeholder={
-                config.builder === "dockerfile" ? "var/www/html/site" : "dist"
-              }
-              value={field.state.value}
-              onChange={(event) => field.handleChange(event.target.value)}
-            />
-          </label>
+          <div className="config-path-field">
+            <div className="config-path-control">
+              <label htmlFor="static-output-path">
+                Static output{" "}
+                {config.builder === "dockerfile"
+                  ? "(path inside final image)"
+                  : "directory"}
+              </label>
+              <span className="config-path-input">
+                <input
+                  id="static-output-path"
+                  placeholder={
+                    config.builder === "dockerfile"
+                      ? "var/www/html/site"
+                      : "dist or . for plain HTML"
+                  }
+                  value={field.state.value}
+                  onChange={(event) => field.handleChange(event.target.value)}
+                />
+                <button
+                  className="table-action"
+                  type="button"
+                  disabled={!githubSource || config.builder === "dockerfile"}
+                  onClick={() =>
+                    setPathBrowser((value) =>
+                      value === "output" ? undefined : "output",
+                    )
+                  }
+                >
+                  Browse
+                </button>
+              </span>
+            </div>
+            {pathBrowser === "output" && githubSource && (
+              <form.Subscribe selector={(state) => state.values.context_path}>
+                {(contextPath) => (
+                  <RepositoryDirectoryPicker
+                    installationId={githubSource.installation_id}
+                    repositoryId={githubSource.repository_id}
+                    reference={githubSource.branch}
+                    value={joinRepositoryPath(contextPath, field.state.value)}
+                    title="Choose committed static output"
+                    onChange={(path) => {
+                      field.handleChange(
+                        relativeRepositoryPath(contextPath, path),
+                      );
+                      setPathBrowser(undefined);
+                    }}
+                  />
+                )}
+              </form.Subscribe>
+            )}
+          </div>
         )}
       </form.Field>
       <form.Field name="exposed_port">
@@ -239,6 +361,12 @@ function LoadedConfigForm({ config }: { config: ServiceConfig }) {
           </label>
         )}
       </form.Field>
+      {!githubSource && (
+        <p className="config-browser-note">
+          Visual repository browsing is available for projects imported through
+          the GitHub App. Typed paths remain available for every Git source.
+        </p>
+      )}
       <button
         className="primary-action"
         type="submit"
@@ -250,4 +378,22 @@ function LoadedConfigForm({ config }: { config: ServiceConfig }) {
       {message && <p className="notice success">{message}</p>}
     </form>
   );
+}
+
+/** Joins a build context and relative output path for repository-root browsing. */
+function joinRepositoryPath(contextPath: string, outputPath: string) {
+  const parts = [contextPath, outputPath]
+    .filter((part) => part && part !== ".")
+    .join("/");
+  return parts || ".";
+}
+
+/** Converts a repository-root selection back to a path relative to build context. */
+function relativeRepositoryPath(contextPath: string, selectedPath: string) {
+  if (!contextPath || contextPath === ".") return selectedPath;
+  if (selectedPath === contextPath) return ".";
+  const prefix = `${contextPath.replace(/\/$/, "")}/`;
+  return selectedPath.startsWith(prefix)
+    ? selectedPath.slice(prefix.length)
+    : selectedPath;
 }

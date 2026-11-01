@@ -160,6 +160,12 @@ const githubRepositoryEntrySchema = z.object({
   path: z.string(),
   kind: z.string(),
 });
+const projectGithubSourceSchema = z.object({
+  installation_id: z.number().int().positive(),
+  repository_id: z.number().int().positive(),
+  repository_full_name: z.string(),
+  branch: z.string(),
+});
 const sshCredentialResponseSchema = z.object({ configured: z.literal(true) });
 
 export type User = z.infer<typeof userSchema>;
@@ -177,6 +183,7 @@ export type ProjectVariable = z.infer<typeof variableSchema>;
 export type GithubIntegration = z.infer<typeof githubIntegrationSchema>;
 export type GithubRepository = z.infer<typeof githubRepositorySchema>;
 export type GithubRepositoryEntry = z.infer<typeof githubRepositoryEntrySchema>;
+export type ProjectGithubSource = z.infer<typeof projectGithubSourceSchema>;
 
 /** Represents a safe API failure suitable for inline UI feedback. */
 export class ApiError extends Error {
@@ -454,6 +461,14 @@ export function launchProject(projectId: string) {
     `/api/v1/projects/${projectId}/launch`,
     z.object({ job_id: z.string() }),
     { method: "POST", headers: csrfHeaders() },
+  );
+}
+
+/** Returns GitHub source metadata when Depot can browse a project's repository. */
+export function getProjectGithubSource(projectId: string) {
+  return request(
+    `/api/v1/projects/${projectId}/github-source`,
+    projectGithubSourceSchema.nullable(),
   );
 }
 
