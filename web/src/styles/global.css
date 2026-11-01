@@ -2578,6 +2578,12 @@ td {
   height: 6px;
   background: var(--accent);
 }
+.template-support.external {
+  color: var(--warning);
+}
+.template-support.external i {
+  background: var(--warning);
+}
 .template-card-copy {
   padding: 1.25rem 1.25rem 1rem;
 }
@@ -2614,6 +2620,25 @@ td {
   width: 5px;
   height: 5px;
   border: 1px solid #71717a;
+}
+.dependency-template-target {
+  display: grid;
+  gap: 0.4rem;
+  padding: 0 1.25rem 1.25rem;
+}
+.dependency-template-target label {
+  color: #71717a;
+  font: 0.56rem var(--mono-font);
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.dependency-template-target select {
+  min-height: 38px;
+  padding: 0 0.65rem;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 0.72rem;
 }
 .template-action {
   display: flex;

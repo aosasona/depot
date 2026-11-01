@@ -75,6 +75,19 @@ export function ProjectCanvas({ project }: { project: Project }) {
     return () => document.removeEventListener("click", closeMenu);
   }, []);
 
+  useEffect(() => {
+    const parameters = new URLSearchParams(window.location.search);
+    const preset = resourceConnection(parameters.get("resource"));
+    if (!preset) return;
+    setConnection(preset);
+    parameters.delete("resource");
+    window.history.replaceState(
+      {},
+      "",
+      `${window.location.pathname}${parameters.size ? `?${parameters}` : ""}`,
+    );
+  }, []);
+
   /** Opens the node menu at a pointer or keyboard-selected position. */
   function openMenu(event: React.MouseEvent, node: CanvasNode) {
     event.preventDefault();
@@ -457,6 +470,7 @@ function ConnectionDialog({
           Connection URL / secret
           <input
             type="password"
+            placeholder={connectionPlaceholder(name)}
             value={value}
             onChange={(event) => setValue(event.target.value)}
           />
@@ -637,6 +651,27 @@ function defaultVariable(kind: NodeKind) {
       domain: "DOMAIN",
     } as const
   )[kind];
+}
+
+/** Maps a catalog dependency template to the canvas's encrypted connection form. */
+function resourceConnection(resource: string | null) {
+  const presets: Record<string, { kind: NodeKind; suggestedName: string }> = {
+    postgres: { kind: "database", suggestedName: "DATABASE_URL" },
+    redis: { kind: "redis", suggestedName: "REDIS_URL" },
+    mysql: { kind: "database", suggestedName: "MYSQL_URL" },
+    s3: { kind: "storage", suggestedName: "S3_URL" },
+  };
+  return resource ? presets[resource] : undefined;
+}
+/** Shows the expected secret shape without supplying unsafe default credentials. */
+function connectionPlaceholder(name: string) {
+  const placeholders: Record<string, string> = {
+    DATABASE_URL: "postgres://user:password@host:5432/database",
+    REDIS_URL: "rediss://user:password@host:6379/0",
+    MYSQL_URL: "mysql://user:password@host:3306/database",
+    S3_URL: "https://access-key:secret@endpoint/bucket",
+  };
+  return placeholders[name] ?? "Service connection URL or secret";
 }
 /** Converts an entered project name into a safe slug prefix. */
 function slugify(value: string) {
