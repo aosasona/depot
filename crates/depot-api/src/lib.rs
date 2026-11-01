@@ -22,7 +22,6 @@ use depot_core::{
     validate_repository_url,
 };
 use depot_github::{GithubAppClient, GithubError, Repository};
-use depot_runtime::RuntimeError;
 use depot_secrets::SecretCipher;
 use depot_store::{
     Deployment, Domain, GithubInstallation, GithubProjectRepository, JobEvent, JobStatus,
@@ -46,7 +45,6 @@ struct ApiState {
     store: Store,
     secrets: Option<SecretCipher>,
     github: Option<GithubIntegration>,
-    docker_binary: Option<std::sync::Arc<str>>,
 }
 
 /// GitHub App dependencies loaded once at process startup.
@@ -248,8 +246,6 @@ enum ApiError {
     InvalidSshCredential,
     GithubUnavailable,
     Github(GithubError),
-    RuntimeUnavailable,
-    Runtime(RuntimeError),
 }
 
 #[derive(Debug, Deserialize)]
@@ -298,15 +294,6 @@ struct DeploymentResponse {
     updated_at: i64,
     finished_at: Option<i64>,
     active: bool,
-}
-
-/// Bounded runtime output for the active service release.
-#[derive(Debug, Serialize)]
-struct RuntimeLogsResponse {
-    status: &'static str,
-    deployment_id: Option<String>,
-    logs: String,
-    fetched_at: i64,
 }
 
 /// Desired project hostname and its current routing reconciliation state.
@@ -441,16 +428,6 @@ pub fn router_with_integrations(
     secrets: Option<SecretCipher>,
     github: Option<GithubIntegration>,
 ) -> Router {
-    router_with_runtime(store, secrets, github, None)
-}
-
-/// Builds API routes with integrations and a bounded Docker log reader.
-pub fn router_with_runtime(
-    store: Store,
-    secrets: Option<SecretCipher>,
-    github: Option<GithubIntegration>,
-    docker_binary: Option<String>,
-) -> Router {
     Router::new()
         .route(
             "/api/v1/auth/bootstrap",
@@ -496,7 +473,7 @@ pub fn router_with_runtime(
         )
         .route(
             "/api/v1/projects/{project_id}/runtime-logs",
-            get(runtime_logs),
+            post(enqueue_runtime_logs),
         )
         .route(
             "/api/v1/projects/{project_id}/deploy-tokens",
@@ -550,7 +527,6 @@ pub fn router_with_runtime(
             store,
             secrets,
             github,
-            docker_binary: docker_binary.map(std::sync::Arc::from),
         })
 }
 
@@ -1169,54 +1145,32 @@ async fn list_deployments(
     ))
 }
 
-/// Reads recent output from the active container selected by persisted deployment state.
-async fn runtime_logs(
+/// Enqueues bounded runtime output collection in the Docker-enabled worker.
+async fn enqueue_runtime_logs(
     State(state): State<ApiState>,
     jar: CookieJar,
+    headers: HeaderMap,
     axum::extract::Path(project_id): axum::extract::Path<String>,
-) -> Result<Json<RuntimeLogsResponse>, ApiError> {
-    require_user(&state.store, &jar).await?;
+) -> Result<(StatusCode, Json<EnqueuedJobResponse>), ApiError> {
+    require_mutation(&state.store, &jar, &headers).await?;
+    let project = state.store.project_by_id(&project_id).await?;
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
-    let config = state.store.service_config(&project_id).await?;
-    if config.project_kind == "static" {
-        return Ok(Json(RuntimeLogsResponse {
-            status: "static",
-            deployment_id: None,
-            logs: String::new(),
-            fetched_at: now,
-        }));
-    }
-    let deployments = state.store.list_deployments(&project_id).await?;
-    let Some(active) = deployments.into_iter().find(|deployment| deployment.active) else {
-        return Ok(Json(RuntimeLogsResponse {
-            status: "not_deployed",
-            deployment_id: None,
-            logs: String::new(),
-            fetched_at: now,
-        }));
-    };
-    let container_id = active
-        .container_id
-        .as_deref()
-        .ok_or(ApiError::RuntimeUnavailable)?;
-    let docker_binary = state
-        .docker_binary
-        .as_deref()
-        .ok_or(ApiError::RuntimeUnavailable)?;
-    let logs = depot_runtime::container_logs(
-        docker_binary,
-        container_id,
-        1_000,
-        std::time::Duration::from_secs(10),
-    )
-    .await
-    .map_err(ApiError::Runtime)?;
-    Ok(Json(RuntimeLogsResponse {
-        status: "available",
-        deployment_id: Some(active.id),
-        logs,
-        fetched_at: now,
-    }))
+    let deduplication_key = format!("runtime-logs:{}:{}", project.id, now / 3);
+    let job = state
+        .store
+        .enqueue_job(NewJob {
+            kind: "runtime_logs",
+            project_id: Some(&project.id),
+            payload_json: "{}",
+            deduplication_key: &deduplication_key,
+            max_attempts: 1,
+            now_unix: now,
+        })
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(EnqueuedJobResponse { job_id: job.id }),
+    ))
 }
 
 /// Creates a manual deployment from the latest successfully inspected commit.
@@ -2152,19 +2106,6 @@ impl IntoResponse for ApiError {
                     StatusCode::BAD_GATEWAY,
                     "github_request_failed",
                     "GitHub could not complete the repository request.",
-                )
-            }
-            Self::RuntimeUnavailable => (
-                StatusCode::SERVICE_UNAVAILABLE,
-                "runtime_unavailable",
-                "Runtime logs are not available from this Depot process.",
-            ),
-            Self::Runtime(error) => {
-                error!(?error, "runtime log request failed");
-                (
-                    StatusCode::BAD_GATEWAY,
-                    "runtime_logs_failed",
-                    "Depot could not read logs from the active service.",
                 )
             }
             Self::Store(StoreError::InvalidRole(_))

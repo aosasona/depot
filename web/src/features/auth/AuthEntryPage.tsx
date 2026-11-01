@@ -10,7 +10,6 @@ import {
   logout,
   type User,
 } from "../../lib/api/client";
-import { ServiceCanvas } from "../canvas/ServiceCanvas";
 import { ProjectsPanel, type ProjectTab } from "../projects/ProjectsPanel";
 import { TemplatesPanel } from "../templates/TemplatesPanel";
 import { UsersPanel } from "../users/UsersPanel";
@@ -31,7 +30,6 @@ const loginSchema = z.object({
 export type DashboardLocation =
   | { kind: "projects" }
   | { kind: "project"; projectId: string; tab: ProjectTab }
-  | { kind: "canvas" }
   | { kind: "templates" }
   | { kind: "team" };
 
@@ -332,13 +330,6 @@ function Dashboard({
             Projects
           </Link>
           <Link
-            className={location.kind === "canvas" ? "active" : undefined}
-            to="/canvas"
-          >
-            <NavigationIcon name="canvas" />
-            Canvas
-          </Link>
-          <Link
             className={location.kind === "templates" ? "active" : undefined}
             to="/templates"
           >
@@ -414,9 +405,7 @@ function Dashboard({
               </span>
             </section>
           )}
-          {location.kind === "canvas" ? (
-            <ServiceCanvas />
-          ) : location.kind === "templates" ? (
+          {location.kind === "templates" ? (
             <TemplatesPanel />
           ) : location.kind === "team" ? (
             user.role === "admin" ? (
@@ -444,21 +433,11 @@ function Dashboard({
 }
 
 /** Small dependency-free navigation glyphs with currentColor styling. */
-function NavigationIcon({
-  name,
-}: {
-  name: "projects" | "team" | "canvas" | "templates";
-}) {
+function NavigationIcon({ name }: { name: "projects" | "team" | "templates" }) {
   if (name === "projects")
     return (
       <svg aria-hidden="true" viewBox="0 0 20 20">
         <path d="M3.5 4.5h5v5h-5zM11.5 4.5h5v5h-5zM3.5 12.5h5v3h-5zM11.5 12.5h5v3h-5z" />
-      </svg>
-    );
-  if (name === "canvas")
-    return (
-      <svg aria-hidden="true" viewBox="0 0 20 20">
-        <path d="M3 3.5h5v4H3zM12 3.5h5v4h-5zM7.5 14.5h5v-4h-5zM5.5 7.5v2h4.5M14.5 7.5v2H10v1" />
       </svg>
     );
   if (name === "templates")
@@ -477,7 +456,6 @@ function NavigationIcon({
 /** Returns a stable heading for every URL-backed workspace page. */
 function pageTitle(location: DashboardLocation) {
   if (location.kind === "team") return "Team";
-  if (location.kind === "canvas") return "Service canvas";
   if (location.kind === "templates") return "Templates";
   return "Projects";
 }
@@ -486,8 +464,6 @@ function pageTitle(location: DashboardLocation) {
 function pageDescription(location: DashboardLocation) {
   if (location.kind === "team")
     return "Manage the people who can access this Depot instance.";
-  if (location.kind === "canvas")
-    return "See how public routes connect to the services running on this instance.";
   if (location.kind === "templates")
     return "Start with safe defaults or follow a dependency-aware application blueprint.";
   return "Connect source, configure builds, and promote releases from one place.";

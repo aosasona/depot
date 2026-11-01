@@ -52,6 +52,12 @@ const staticBuildResultSchema = z.object({
   static_release: z.string(),
   logs: z.string(),
 });
+const runtimeLogsSchema = z.object({
+  status: z.enum(["available", "not_deployed", "static"]),
+  deployment_id: z.string().nullable(),
+  logs: z.string(),
+  fetched_at: z.number(),
+});
 const jobStatusSchema = z.object({
   id: z.string(),
   kind: z.string(),
@@ -64,6 +70,7 @@ const jobStatusSchema = z.object({
       inspectionResultSchema,
       dockerBuildResultSchema,
       staticBuildResultSchema,
+      runtimeLogsSchema,
     ])
     .nullable(),
   last_error: z.string().nullable(),
@@ -93,12 +100,6 @@ const deploymentSchema = z.object({
   updated_at: z.number(),
   finished_at: z.number().nullable(),
   active: z.boolean(),
-});
-const runtimeLogsSchema = z.object({
-  status: z.enum(["available", "not_deployed", "static"]),
-  deployment_id: z.string().nullable(),
-  logs: z.string(),
-  fetched_at: z.number(),
 });
 const domainSchema = z.object({
   id: z.string(),
@@ -414,11 +415,12 @@ export function listDeployments(projectId: string) {
   );
 }
 
-/** Reads the bounded recent output of a project's active service container. */
-export function getRuntimeLogs(projectId: string) {
+/** Enqueues bounded active-container output collection in the worker. */
+export function requestRuntimeLogs(projectId: string) {
   return request(
     `/api/v1/projects/${projectId}/runtime-logs`,
-    runtimeLogsSchema,
+    z.object({ job_id: z.string() }),
+    { method: "POST", headers: csrfHeaders() },
   );
 }
 

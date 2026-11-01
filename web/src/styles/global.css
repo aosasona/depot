@@ -1251,6 +1251,275 @@ td {
   }
 }
 
+/* Per-project service topology and node actions. */
+.project-canvas-layout {
+  position: relative;
+  display: grid;
+  gap: 1rem;
+}
+.canvas-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.canvas-toolbar > div {
+  display: grid;
+  gap: 0.25rem;
+}
+.canvas-toolbar span {
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.project-topology {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(14rem, 0.8fr) 5rem minmax(17rem, 1.2fr);
+  align-items: center;
+  min-height: 32rem;
+  padding: 2rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background-color: #09090b;
+  background-image:
+    linear-gradient(rgb(52 52 52 / 32%) 1px, transparent 1px),
+    linear-gradient(90deg, rgb(52 52 52 / 32%) 1px, transparent 1px);
+  background-size: 28px 28px;
+}
+.topology-app-column,
+.topology-resource-column {
+  z-index: 1;
+  display: grid;
+  gap: 0.75rem;
+}
+.topology-lines {
+  height: 1px;
+  background: var(--accent);
+}
+.topology-resource-column {
+  position: relative;
+}
+.topology-resource-column::before {
+  position: absolute;
+  top: 1.5rem;
+  bottom: 1.5rem;
+  left: -2.5rem;
+  width: 1px;
+  background: var(--accent);
+  content: "";
+}
+.topology-node {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.75rem;
+  align-items: center;
+  min-height: 4.5rem;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--text);
+  text-align: left;
+}
+.topology-node:hover,
+.topology-node:focus-visible {
+  border-color: var(--accent);
+  background: var(--surface-hover);
+}
+.topology-node > span:nth-child(2) {
+  display: grid;
+  gap: 0.25rem;
+  min-width: 0;
+}
+.topology-node strong {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topology-node small {
+  overflow: hidden;
+  color: var(--muted);
+  font: 0.65rem var(--mono-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.topology-node > i {
+  width: 8px;
+  height: 8px;
+  background: #52525b;
+}
+.topology-node.active > i {
+  background: var(--accent);
+}
+.topology-icon {
+  display: grid;
+  place-items: center;
+  width: 2.3rem;
+  height: 2.3rem;
+  border: 1px solid var(--border);
+  color: var(--accent);
+  font: 0.6rem var(--mono-font);
+}
+.topology-node.app {
+  min-height: 6rem;
+  border-color: var(--accent);
+}
+.canvas-add-node {
+  min-height: 4rem;
+  border: 1px dashed var(--border);
+  background: rgb(9 9 11 / 85%);
+  color: var(--muted);
+}
+.canvas-add-node:hover {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.node-context-menu {
+  position: fixed;
+  z-index: 80;
+  display: grid;
+  width: 180px;
+  padding: 0.35rem;
+  border: 1px solid var(--border);
+  background: #111114;
+}
+.node-context-menu strong {
+  padding: 0.55rem 0.65rem;
+  overflow: hidden;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.node-context-menu button {
+  padding: 0.55rem 0.65rem;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+.node-context-menu button:hover {
+  background: var(--accent);
+  color: var(--accent-foreground);
+}
+.canvas-inspector {
+  position: absolute;
+  z-index: 50;
+  top: 3.5rem;
+  right: 0;
+  display: grid;
+  width: min(24rem, 100%);
+  min-height: 28rem;
+  padding: 1.25rem;
+  border: 1px solid var(--accent);
+  background: #111114;
+}
+.canvas-inspector header,
+.canvas-dialog header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.canvas-inspector h3,
+.canvas-dialog h3 {
+  margin: 0.2rem 0 0;
+  font: 1.5rem var(--display-font);
+}
+.canvas-inspector dl {
+  display: grid;
+  align-content: start;
+  gap: 0;
+  margin: 1.5rem 0 0;
+}
+.canvas-inspector dl > div {
+  display: grid;
+  gap: 0.35rem;
+  padding: 0.8rem 0;
+  border-top: 1px solid var(--border);
+}
+.canvas-inspector dt {
+  color: var(--muted);
+  font: 0.62rem var(--mono-font);
+  text-transform: uppercase;
+}
+.canvas-inspector dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.canvas-dialog-backdrop {
+  position: fixed;
+  z-index: 90;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 1rem;
+  background: rgb(0 0 0 / 78%);
+}
+.canvas-dialog {
+  display: grid;
+  gap: 1rem;
+  width: min(31rem, 100%);
+  padding: 1.25rem;
+  border: 1px solid var(--accent);
+  background: #111114;
+}
+.canvas-dialog label {
+  display: grid;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.canvas-dialog > p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.75rem;
+  line-height: 1.5;
+}
+.canvas-dialog footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.6rem;
+  padding-top: 0.5rem;
+  border-top: 1px solid var(--border);
+}
+.shell-dialog pre {
+  overflow: auto;
+  margin: 0;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  background: #070709;
+  color: var(--accent);
+  font: 0.72rem / 1.5 var(--mono-font);
+  white-space: pre-wrap;
+}
+
+@media (max-width: 760px) {
+  .canvas-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .project-topology {
+    grid-template-columns: 1fr;
+    gap: 2rem;
+    padding: 1rem;
+  }
+  .topology-lines {
+    width: 1px;
+    height: 2rem;
+    justify-self: center;
+  }
+  .topology-resource-column::before {
+    display: none;
+  }
+  .canvas-inspector {
+    position: fixed;
+    inset: auto 0.5rem 0.5rem;
+    width: auto;
+    max-height: calc(100vh - 1rem);
+    overflow: auto;
+  }
+}
+
 /* Project workspace */
 .project-list-card {
   display: grid;
@@ -1943,145 +2212,6 @@ td {
   overflow-wrap: anywhere;
 }
 
-/* Live service topology and dependency-aware templates. */
-.service-canvas {
-  position: relative;
-  display: grid;
-  gap: 2rem;
-  min-height: 34rem;
-  padding: 2rem;
-  overflow: hidden;
-  border: 1px solid var(--border);
-  background-color: #09090b;
-  background-image:
-    linear-gradient(var(--border) 1px, transparent 1px),
-    linear-gradient(90deg, var(--border) 1px, transparent 1px);
-  background-size: 32px 32px;
-}
-.canvas-internet {
-  justify-self: center;
-  z-index: 1;
-  display: grid;
-  min-width: 13rem;
-  padding: 1rem;
-  border: 1px solid var(--accent);
-  background: var(--surface);
-  text-align: center;
-}
-.canvas-internet span,
-.canvas-internet small {
-  color: var(--muted);
-  font: 0.62rem var(--mono-font);
-}
-.canvas-internet strong {
-  margin: 0.25rem 0;
-  font: 1.3rem var(--display-font);
-}
-.canvas-spine {
-  position: absolute;
-  top: 7rem;
-  left: 50%;
-  width: 1px;
-  height: 5rem;
-  background: var(--accent);
-}
-.canvas-projects {
-  z-index: 1;
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
-  gap: 1rem;
-  align-items: start;
-}
-.canvas-node {
-  display: grid;
-  gap: 1rem;
-  padding: 1rem;
-  border: 1px solid var(--border);
-  background: var(--surface);
-}
-.canvas-node.live {
-  border-top-color: var(--accent);
-}
-.canvas-node > div {
-  display: flex;
-  align-items: center;
-  gap: 0.7rem;
-}
-.canvas-node > div > span:nth-child(2) {
-  display: grid;
-  gap: 0.15rem;
-}
-.canvas-node > div small {
-  color: var(--muted);
-  font: 0.65rem var(--mono-font);
-}
-.canvas-node > div > i {
-  width: 8px;
-  height: 8px;
-  margin-left: auto;
-  background: #52525b;
-}
-.canvas-node.live > div > i {
-  background: var(--accent);
-  box-shadow: none;
-}
-.canvas-node ul {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  border-top: 1px solid var(--border);
-}
-.canvas-node li {
-  display: flex;
-  justify-content: space-between;
-  gap: 0.5rem;
-  padding: 0.55rem 0;
-  border-bottom: 1px solid var(--border);
-  font-size: 0.72rem;
-}
-.canvas-node li small {
-  color: var(--muted);
-  text-transform: uppercase;
-}
-.canvas-node > a {
-  color: var(--accent);
-  font-size: 0.72rem;
-}
-.service-canvas > footer {
-  display: flex;
-  gap: 1.2rem;
-  align-items: center;
-  margin-top: auto;
-  padding-top: 1rem;
-  border-top: 1px solid var(--border);
-  color: var(--muted);
-  font: 0.65rem var(--mono-font);
-}
-.service-canvas > footer span {
-  display: inline-flex;
-  gap: 0.35rem;
-  align-items: center;
-}
-.service-canvas > footer i {
-  width: 7px;
-  height: 7px;
-  background: #52525b;
-}
-.service-canvas > footer i.active {
-  background: var(--accent);
-}
-.service-canvas > footer strong {
-  margin-left: auto;
-  color: var(--text);
-}
-.canvas-loading {
-  min-height: 30rem;
-  display: grid;
-  place-items: center;
-  border: 1px solid var(--border);
-  color: var(--muted);
-  font: 0.75rem var(--mono-font);
-}
 .visually-hidden {
   position: absolute;
   width: 1px;

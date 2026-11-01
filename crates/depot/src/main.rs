@@ -381,10 +381,10 @@ async fn process_job(
     match execute_job(store, worker_config, secrets, github, &job).await {
         Ok(result_json) => {
             let completed_at = time::OffsetDateTime::now_utc().unix_timestamp();
-            let completion_message = if job.kind == "inspect_repository" {
-                "Repository inspection completed."
-            } else {
-                "Deployment work completed."
+            let completion_message = match job.kind.as_str() {
+                "inspect_repository" => "Repository inspection completed.",
+                "runtime_logs" => "Runtime logs collected.",
+                _ => "Deployment work completed.",
             };
             store
                 .append_job_event(&job.id, "info", completion_message, completed_at)
@@ -493,9 +493,68 @@ async fn execute_job(
             execute_inspection(store, worker_config, secrets, github, job).await
         }
         "deploy_project" => execute_deployment(store, worker_config, secrets, github, job).await,
+        "runtime_logs" => execute_runtime_logs(store, worker_config, job).await,
         "reconcile_domains" => execute_domain_reconciliation(store, worker_config).await,
         _ => Err(format!("Unsupported job kind: {}", job.kind)),
     }
+}
+
+/// Reads bounded active-container output without granting Docker access to the API process.
+async fn execute_runtime_logs(
+    store: &Store,
+    worker_config: &depot_core::WorkerConfig,
+    job: &depot_store::Job,
+) -> Result<String, String> {
+    let project_id = job
+        .project_id
+        .as_deref()
+        .ok_or_else(|| "Runtime log job is missing its project.".to_owned())?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let config = store
+        .service_config(project_id)
+        .await
+        .map_err(|_| "Project runtime configuration could not be loaded.".to_owned())?;
+    if config.project_kind == "static" {
+        return serde_json::to_string(&serde_json::json!({
+            "status": "static",
+            "deployment_id": null,
+            "logs": "",
+            "fetched_at": now,
+        }))
+        .map_err(|_| "Runtime log result could not be encoded.".to_owned());
+    }
+    let deployments = store
+        .list_deployments(project_id)
+        .await
+        .map_err(|_| "Project deployments could not be loaded.".to_owned())?;
+    let Some(active) = deployments.into_iter().find(|deployment| deployment.active) else {
+        return serde_json::to_string(&serde_json::json!({
+            "status": "not_deployed",
+            "deployment_id": null,
+            "logs": "",
+            "fetched_at": now,
+        }))
+        .map_err(|_| "Runtime log result could not be encoded.".to_owned());
+    };
+    let container_id = active
+        .container_id
+        .as_deref()
+        .ok_or_else(|| "The active deployment has no runtime container.".to_owned())?;
+    let logs = depot_runtime::container_logs(
+        &worker_config.docker_binary,
+        container_id,
+        1_000,
+        std::time::Duration::from_secs(10),
+    )
+    .await
+    .map_err(|_| "Depot could not read logs from the active service.".to_owned())?;
+    serde_json::to_string(&serde_json::json!({
+        "status": "available",
+        "deployment_id": active.id,
+        "logs": logs,
+        "fetched_at": now,
+    }))
+    .map_err(|_| "Runtime log result could not be encoded.".to_owned())
 }
 
 /// Sends the complete desired hostname snapshot and persists the agent acknowledgment.
@@ -836,11 +895,10 @@ async fn serve(config: Config) -> Result<(), AppError> {
     let gateway_store = store.clone();
     let app = Router::new()
         .route("/api/v1/system/health", get(system_health))
-        .merge(depot_api::router_with_runtime(
+        .merge(depot_api::router_with_integrations(
             store.clone(),
             Some(secrets),
             github,
-            Some(config.worker.docker_binary.clone()),
         ))
         .fallback(move |request| gateway_or_spa(gateway_store.clone(), request));
     let listener = TcpListener::bind(config.server.bind)

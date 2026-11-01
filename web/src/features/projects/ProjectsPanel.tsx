@@ -13,6 +13,7 @@ import { DeploymentPanel } from "./DeploymentPanel";
 import { DomainPanel } from "./DomainPanel";
 import { EnvironmentPanel } from "./EnvironmentPanel";
 import { GithubImportPanel } from "./GithubImportPanel";
+import { ProjectCanvas } from "./ProjectCanvas";
 import { ProjectIdentityForm } from "./ProjectIdentityForm";
 import { ProjectOverview } from "./ProjectOverview";
 import { ServiceConfigForm } from "./ServiceConfigForm";
@@ -121,6 +122,7 @@ function ProjectListCard({
 
 export type ProjectTab =
   | "overview"
+  | "canvas"
   | "deployments"
   | "logs"
   | "environment"
@@ -129,6 +131,7 @@ export type ProjectTab =
 
 const projectTabs: Array<{ id: ProjectTab; label: string }> = [
   { id: "overview", label: "Overview" },
+  { id: "canvas", label: "Canvas" },
   { id: "deployments", label: "Deployments" },
   { id: "logs", label: "Logs" },
   { id: "environment", label: "Environment" },
@@ -250,6 +253,7 @@ function ProjectWorkspace({
             <DeploymentPanel projectId={project.id} />
           </section>
         )}
+        {tab === "canvas" && <ProjectCanvas project={project} />}
         {tab === "logs" && (
           <section className="project-surface">
             <DeploymentLogsPanel projectId={project.id} />

@@ -569,7 +569,6 @@ dependencies = [
  "depot-auth",
  "depot-core",
  "depot-github",
- "depot-runtime",
  "depot-secrets",
  "depot-store",
  "hmac 0.13.0",

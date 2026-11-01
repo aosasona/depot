@@ -3,8 +3,8 @@ import { useState } from "react";
 import {
   type Deployment,
   getJobStatus,
-  getRuntimeLogs,
   listDeployments,
+  requestRuntimeLogs,
 } from "../../lib/api/client";
 
 /** Shows durable deployment events and bounded builder output beside deployment work. */
@@ -53,28 +53,40 @@ export function DeploymentLogsPanel({ projectId }: { projectId: string }) {
 
 /** Polls recent output for the active service while the runtime view is open. */
 function RuntimeLogs({ projectId }: { projectId: string }) {
-  const runtime = useQuery({
-    queryKey: ["projects", projectId, "runtime-logs"],
-    queryFn: () => getRuntimeLogs(projectId),
+  const request = useQuery({
+    queryKey: ["projects", projectId, "runtime-log-request"],
+    queryFn: () => requestRuntimeLogs(projectId),
     refetchInterval: 5_000,
   });
-  if (runtime.isPending)
+  const job = useQuery({
+    queryKey: ["jobs", request.data?.job_id],
+    queryFn: () => getJobStatus(request.data?.job_id ?? ""),
+    enabled: Boolean(request.data?.job_id),
+    refetchInterval: (query) =>
+      ["queued", "running"].includes(query.state.data?.state ?? "")
+        ? 750
+        : false,
+  });
+  const runtime =
+    job.data?.result && "status" in job.data.result ? job.data.result : null;
+  if (request.isPending || job.isPending)
     return <p className="surface-empty">Connecting to the active service…</p>;
-  if (runtime.isError)
+  if (request.isError || job.isError || job.data?.state === "failed")
     return (
       <p className="inspection-error">
-        Runtime logs are unavailable. Check that the Depot API can access
-        Docker.
+        Runtime logs are unavailable. Check the Depot worker service.
       </p>
     );
-  if (runtime.data.status === "static")
+  if (!runtime)
+    return <p className="surface-empty">Collecting runtime output…</p>;
+  if (runtime.status === "static")
     return (
       <p className="surface-empty">
         Static sites have no running process. Build output is available under
         Build.
       </p>
     );
-  if (runtime.data.status === "not_deployed")
+  if (runtime.status === "not_deployed")
     return (
       <p className="surface-empty">
         Deploy this project to start collecting runtime output.
@@ -84,14 +96,12 @@ function RuntimeLogs({ projectId }: { projectId: string }) {
     <div className="runtime-console">
       <div>
         <span>ACTIVE RELEASE</span>
-        <code>{runtime.data.deployment_id?.slice(0, 12)}</code>
+        <code>{runtime.deployment_id?.slice(0, 12)}</code>
         <time>
-          Updated {new Date(runtime.data.fetched_at * 1_000).toLocaleString()}
+          Updated {new Date(runtime.fetched_at * 1_000).toLocaleString()}
         </time>
       </div>
-      <pre>
-        {runtime.data.logs || "The service has not written any output yet."}
-      </pre>
+      <pre>{runtime.logs || "The service has not written any output yet."}</pre>
     </div>
   );
 }

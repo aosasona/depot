@@ -13,6 +13,7 @@ import type { ProjectTab } from "../features/projects/ProjectsPanel";
 
 const validProjectTabs = new Set<ProjectTab>([
   "overview",
+  "canvas",
   "deployments",
   "logs",
   "environment",
@@ -86,12 +87,6 @@ const teamRoute = createRoute({
   component: () => <DashboardPage location={{ kind: "team" }} />,
 });
 
-const canvasRoute = createRoute({
-  getParentRoute: () => rootRoute,
-  path: "/canvas",
-  component: () => <DashboardPage location={{ kind: "canvas" }} />,
-});
-
 const templatesRoute = createRoute({
   getParentRoute: () => rootRoute,
   path: "/templates",
@@ -103,7 +98,6 @@ const routeTree = rootRoute.addChildren([
   projectsRoute,
   projectOverviewRoute,
   projectRoute,
-  canvasRoute,
   templatesRoute,
   teamRoute,
 ]);
