@@ -299,18 +299,19 @@ fn dockerfile_artifact_path(checkout: &Path, dockerfile_path: &str, output: &str
     output.to_owned()
 }
 
-/// Exports a Railpack final filesystem and copies the configured artifact directory.
+/// Loads a Railpack image into Docker and copies only the configured static artifact.
 async fn build_and_extract_railpack(
     request: &StaticBuildRequest<'_>,
     context: &Path,
     staging: &Path,
 ) -> Result<String, BuildError> {
-    let export = staging.with_extension("railpack-rootfs");
-    fs::create_dir_all(&export).map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
+    let image_tag = format!(
+        "depot/{}:railpack-static-{}",
+        request.project_id, request.release_id
+    );
     let mut command = Command::new(request.railpack_binary);
     command
-        .args(["build", "--progress", "plain", "--output"])
-        .arg(&export)
+        .args(["build", "--progress", "plain", "--name", &image_tag])
         .arg(context)
         .env("BUILDKIT_HOST", "docker-container://depot-buildkit")
         .stdin(Stdio::null())
@@ -321,56 +322,49 @@ async fn build_and_extract_railpack(
         .map_err(BuildError::Spawn)?;
     let logs = bounded_logs(&output.stdout, &output.stderr);
     if !output.status.success() {
-        let _ = fs::remove_dir_all(&export);
         return Err(BuildError::Failed(logs));
     }
-    let artifact_result = locate_exported_artifact(&export, request.output_directory)
-        .and_then(|artifact| copy_artifact_tree(&artifact, staging));
-    let _ = fs::remove_dir_all(&export);
+    let artifact_result = extract_railpack_image_directory(
+        request.docker_binary,
+        &image_tag,
+        request.output_directory,
+        staging,
+        request.timeout,
+    )
+    .await;
+    let mut remove_image = Command::new(request.docker_binary);
+    let _ = remove_image
+        .args(["image", "rm", "--force", &image_tag])
+        .output()
+        .await;
     artifact_result?;
     Ok(logs)
 }
 
-/// Finds the configured path in common Railpack application roots without ambiguity.
-fn locate_exported_artifact(root: &Path, output_directory: &str) -> Result<PathBuf, BuildError> {
+/// Tries Railpack's conventional application roots without exporting its full filesystem.
+async fn extract_railpack_image_directory(
+    docker_binary: &str,
+    image: &str,
+    output_directory: &str,
+    staging: &Path,
+    timeout: Duration,
+) -> Result<(), BuildError> {
     for prefix in ["", "app", "workspace"] {
         let candidate = if prefix.is_empty() {
-            root.join(output_directory)
+            output_directory.to_owned()
         } else {
-            root.join(prefix).join(output_directory)
+            format!("{prefix}/{output_directory}")
         };
-        if candidate.is_dir() {
-            return Ok(candidate);
+        if extract_image_directory(docker_binary, image, &candidate, staging, timeout)
+            .await
+            .is_ok()
+        {
+            return Ok(());
         }
     }
     Err(BuildError::StaticArtifact(format!(
-        "configured output directory '{output_directory}' was not present in the Railpack filesystem"
+        "configured output directory '{output_directory}' was not present in the Railpack image"
     )))
-}
-
-/// Copies a verified regular-file directory tree without following symbolic links.
-fn copy_artifact_tree(source: &Path, destination: &Path) -> Result<(), BuildError> {
-    for entry in
-        fs::read_dir(source).map_err(|error| BuildError::StaticArtifact(error.to_string()))?
-    {
-        let entry = entry.map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
-        let metadata = fs::symlink_metadata(entry.path())
-            .map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
-        let target = destination.join(entry.file_name());
-        if metadata.is_dir() {
-            fs::create_dir_all(&target)
-                .map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
-            copy_artifact_tree(&entry.path(), &target)?;
-        } else if metadata.is_file() {
-            fs::copy(entry.path(), target)
-                .map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
-        } else {
-            return Err(BuildError::StaticArtifact(
-                "static output contains a symbolic link or special file".to_owned(),
-            ));
-        }
-    }
-    Ok(())
 }
 
 /// Copies one directory from an immutable image into the release staging tree.
@@ -571,8 +565,9 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
     use super::{
-        BuildError, DockerBuildRequest, build_dockerfile, dockerfile_artifact_path,
-        safe_relative_path, static_package_command, validate_artifact_tree,
+        BuildError, DockerBuildRequest, StaticBuildRequest, build_and_extract_railpack,
+        build_dockerfile, dockerfile_artifact_path, safe_relative_path, static_package_command,
+        validate_artifact_tree,
     };
 
     /// Proves the adapter passes paths as arguments and accepts canonical image IDs.
@@ -600,6 +595,60 @@ mod tests {
         .expect("build succeeds");
         assert_eq!(result.image_id.len(), 71);
         assert_eq!(result.logs, "build complete");
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Proves static Railpack builds load an image instead of exporting privileged metadata.
+    #[tokio::test]
+    async fn railpack_static_build_extracts_only_the_artifact() {
+        let root =
+            std::env::temp_dir().join(format!("depot-railpack-test-{}", uuid::Uuid::now_v7()));
+        let staging = root.join("staging");
+        fs::create_dir_all(&staging).expect("staging directory is created");
+        let arguments = root.join("railpack-arguments");
+        let fake_railpack = root.join("fake-railpack");
+        fs::write(
+            &fake_railpack,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'railpack complete'\n",
+                arguments.display()
+            ),
+        )
+        .expect("fake Railpack writes");
+        let fake_docker = root.join("fake-docker");
+        fs::write(
+            &fake_docker,
+            "#!/bin/sh\ncase \"$1\" in\ncreate) printf 'container\\n' ;;\ncp) mkdir -p \"$3\"; printf 'ok' > \"$3/index.html\" ;;\nrm|image) ;;\n*) exit 1 ;;\nesac\n",
+        )
+        .expect("fake Docker writes");
+        fs::set_permissions(&fake_railpack, fs::Permissions::from_mode(0o700))
+            .expect("fake Railpack is executable");
+        fs::set_permissions(&fake_docker, fs::Permissions::from_mode(0o700))
+            .expect("fake Docker is executable");
+        let request = StaticBuildRequest {
+            docker_binary: fake_docker.to_str().expect("Docker path is UTF-8"),
+            railpack_binary: fake_railpack.to_str().expect("Railpack path is UTF-8"),
+            checkout_path: &root,
+            context_path: ".",
+            dockerfile_path: "Dockerfile",
+            builder: "railpack",
+            output_directory: "dist",
+            static_root: &root,
+            project_id: "project",
+            release_id: "release",
+            timeout: Duration::from_secs(5),
+        };
+        let logs = build_and_extract_railpack(&request, &root, &staging)
+            .await
+            .expect("Railpack artifact extracts");
+        let invoked = fs::read_to_string(arguments).expect("Railpack arguments read");
+        assert!(invoked.contains("--name"));
+        assert!(!invoked.contains("--output"));
+        assert_eq!(logs, "railpack complete");
+        assert_eq!(
+            fs::read_to_string(staging.join("index.html")).expect("artifact reads"),
+            "ok"
+        );
         fs::remove_dir_all(root).expect("test root is removed");
     }
 

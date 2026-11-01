@@ -20,9 +20,9 @@ Static deployments resolve their engine as follows:
 - `dockerfile` builds the configured Dockerfile and extracts the configured
   output path from the final image. The path is written without a leading slash,
   for example `var/www/html/site` for a Chimney image.
-- `railpack` calls the official Railpack CLI with its filesystem `--output`
-  mode and copies the configured output directory from the exported `/`, `/app`,
-  or `/workspace` root.
+- `railpack` asks the official Railpack CLI to load a uniquely tagged image into
+  Docker, then copies only the configured output directory from the image's `/`,
+  `/app`, or `/workspace` root. Depot removes the temporary image afterward.
 - `auto` prefers a configured Dockerfile that exists, then uses the contained
   Node builder. Node projects with a lockfile use frozen installs; a
   `package.json` without a lockfile uses `npm install` as a compatibility
@@ -32,6 +32,12 @@ All paths still validate the extracted tree, reject links and special files,
 apply file/size bounds, and promote through immutable release directories.
 Railpack uses the operator-installed `railpack` binary and a dedicated
 `depot-buildkit` container created by guided setup.
+
+Filesystem `--output` mode is deliberately avoided. It exports the entire
+runtime root and asks BuildKit to recreate ownership and mode metadata that an
+unprivileged Depot worker cannot safely apply. Image loading keeps those
+operations inside Docker and exposes only the validated static artifact tree to
+Depot's filesystem.
 
 ## Consequences
 

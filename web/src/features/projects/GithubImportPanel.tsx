@@ -615,7 +615,10 @@ function validRepositoryPath(path: string) {
     value.length <= 255 &&
     !value.startsWith("/") &&
     !value.startsWith("\\") &&
-    ![...value].some((character) => /[\u0000-\u001f\u007f]/.test(character)) &&
+    ![...value].some((character) => {
+      const code = character.charCodeAt(0);
+      return code <= 31 || code === 127;
+    }) &&
     !value.split(/[\\/]/).some((segment) => segment === "..")
   );
 }
