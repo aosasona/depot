@@ -88,7 +88,9 @@ export function GithubImportPanel() {
     void completeGithubManifest(code).then(
       async () => {
         clearCallback();
-        setSetupMessage("GitHub App created. Install it on an account to browse repositories.");
+        setSetupMessage(
+          "GitHub App created. Install it on an account to browse repositories.",
+        );
         await client.invalidateQueries({ queryKey: ["github-integration"] });
       },
       (reason: unknown) => {
