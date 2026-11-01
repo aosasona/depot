@@ -3,6 +3,15 @@
 Depot will be delivered in independently testable milestones, with a complete
 vertical slice kept working as each capability is added.
 
+## Current phase — static releases and GitHub repository onboarding
+
+1. Add immutable, validated static releases and shared gateway serving.
+2. Add GitHub App configuration, installation linking, repository discovery,
+   project creation, and automatic push handling.
+3. Preserve manual Git and webhook paths as explicit advanced fallbacks.
+4. Verify migrations, security regressions, UI checks, workspace tests, and
+   release packaging before publishing the phase.
+
 ## Milestone A — foundation and authenticated product shell
 
 1. Create the Rust workspace, frontend workspace, quality tooling, and CI.

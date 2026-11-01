@@ -72,6 +72,15 @@ prompt() {
     [ -n "$REPLY" ] || REPLY=$default
 }
 
+prompt_secret() {
+    label=$1
+    printf '%s: ' "$label" >"$TTY"
+    stty -echo <"$TTY"
+    IFS= read -r REPLY <"$TTY" || { stty echo <"$TTY"; die "Input was interrupted."; }
+    stty echo <"$TTY"
+    printf '\n' >"$TTY"
+}
+
 confirm() {
     question=$1
     if [ "$ASSUME_YES" -eq 1 ]; then
@@ -273,11 +282,37 @@ address = \"$agent_address\"
 auth_token = \"$agent_token\"
 timeout_seconds = 30"
     fi
+    github_section=
+    github_key_source=
+    github_secret=
+    if [ "$ASSUME_YES" -eq 0 ] && confirm "Configure GitHub repository browsing now?"; then
+        prompt "GitHub App numeric ID" ""
+        github_app_id=$REPLY
+        case "$github_app_id" in ''|*[!0-9]*) die "GitHub App ID must contain only digits." ;; esac
+        prompt "GitHub App slug" ""
+        github_app_slug=$REPLY
+        case "$github_app_slug" in ''|*[!a-z0-9-]*) die "GitHub App slug must use lowercase letters, numbers, and hyphens." ;; esac
+        prompt "Path to downloaded GitHub App private key" ""
+        github_key_source=$REPLY
+        [ -r "$github_key_source" ] || die "The GitHub App private key is not readable."
+        grep -q -- 'BEGIN.*PRIVATE KEY' "$github_key_source" || die "The GitHub App private key does not look like a PEM key."
+        prompt_secret "GitHub App webhook secret (at least 32 characters)"
+        github_secret=$REPLY
+        [ "${#github_secret}" -ge 32 ] || die "The GitHub webhook secret must contain at least 32 characters."
+        validate_safe_value "$github_secret" "GitHub webhook secret"
+        github_section="
+[github]
+app_id = $github_app_id
+app_slug = \"$github_app_slug\"
+private_key_file = \"/etc/depot/github-app.pem\"
+webhook_secret_file = \"/etc/depot/github-webhook-secret\""
+    fi
     say "Configuration plan:"
     say "  role: Depot VM"
     say "  listen: $bind"
     say "  public origin: $public_origin"
     say "  Caddy agent: ${agent_address:-not configured}"
+    [ -n "$github_section" ] && say "  GitHub App: $github_app_slug"
     confirm "Write and validate this configuration?" || die "Configuration was not changed."
     config_temp=$(mktemp /etc/depot/config.toml.new.XXXXXX)
     umask 0027
@@ -285,14 +320,24 @@ timeout_seconds = 30"
         printf '[server]\nbind = "%s"\n\n' "$bind"
         printf '[database]\nurl = "sqlite:///var/lib/depot/depot.db"\n\n'
         printf '[security]\npublic_origin = "%s"\nmaster_key_file = "/etc/depot/master.key"\n\n' "$public_origin"
-        printf '[worker]\nworkspace_root = "/var/lib/depot/workspaces"\ngit_timeout_seconds = 120\ndocker_binary = "docker"\ndocker_timeout_seconds = 1800\n'
+        printf '[worker]\nworkspace_root = "/var/lib/depot/workspaces"\nstatic_root = "/var/lib/depot/static"\ngit_timeout_seconds = 120\ndocker_binary = "docker"\ndocker_timeout_seconds = 1800\n'
         printf '%s\n' "$agent_section"
+        printf '%s\n' "$github_section"
     } > "$config_temp"
     chown depot:depot "$config_temp"
     chmod 0640 "$config_temp"
     if ! runuser -u depot -- /usr/local/bin/depot validate-config --config "$config_temp"; then
         rm -f "$config_temp"
         die "Configuration validation failed; the active configuration was not changed."
+    fi
+    if [ -n "$github_section" ]; then
+        install -o root -g depot -m 0640 "$github_key_source" /etc/depot/github-app.pem
+        secret_temp=$(mktemp /etc/depot/github-webhook-secret.new.XXXXXX)
+        printf '%s\n' "$github_secret" > "$secret_temp"
+        chown root:depot "$secret_temp"
+        chmod 0640 "$secret_temp"
+        mv "$secret_temp" /etc/depot/github-webhook-secret
+        github_secret=
     fi
     mv "$config_temp" /etc/depot/config.toml
 }

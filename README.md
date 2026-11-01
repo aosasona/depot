@@ -5,10 +5,10 @@ executable supplies the control-plane API, embedded dashboard, private HTTP
 gateway, durable worker, and restricted host-side Caddy agent.
 
 Depot is under active development. Public Git inspection, Dockerfile builds,
-container readiness, project domains, Host-based gateway routing, encrypted
-runtime variables, safe rollback, and signed GitHub push webhooks are
-implemented. Railpack, static artifact releases, and runtime log streaming are
-not complete yet. GitHub Actions and other CI systems
+container readiness, project domains, Host-based gateway routing, immutable
+static releases, encrypted runtime variables, safe rollback, GitHub App
+repository browsing, and signed GitHub push webhooks are implemented. Railpack
+and runtime log streaming are not complete yet. GitHub Actions and other CI systems
 can also trigger exact-commit deployments with a project-scoped bearer token.
 
 ## Quick start: main Depot binary
@@ -59,7 +59,7 @@ For a packaged release and systemd installation, follow the
 ### 2. Create the VM configuration
 
 ```sh
-sudo install -d -m 0750 /etc/depot /var/lib/depot/workspaces
+sudo install -d -m 0750 /etc/depot /var/lib/depot/workspaces /var/lib/depot/static
 sudo install -m 0640 deploy/config.example.toml /etc/depot/config.toml
 sudo editor /etc/depot/config.toml
 ```
@@ -73,6 +73,7 @@ Set these values for the installation:
 - `security.master_key_file`: the separately backed-up encryption key created
   by the installer. For manual installs, run `depot generate-key --output PATH`.
 - `worker.workspace_root`: scratch storage with enough space for Git checkouts.
+- `worker.static_root`: persistent storage for immutable static release trees.
 - `worker.docker_binary`: the Docker CLI executable available to the worker.
 - `worker.caddy_agent`: the private agent address and shared reconciliation
   token; omit this table only when domains will not be reconciled.
@@ -112,6 +113,17 @@ Configure projects in the dashboard, inspect their repositories, select the
 Dockerfile builder, set the container port and readiness path, then deploy.
 Successful services are published on ephemeral loopback ports and selected by
 the internal gateway through exact project-domain matches.
+
+For GitHub, configure one GitHub App and then use **Connect GitHub** in the
+dashboard to browse its repositories and create projects without pasting URLs
+or adding per-repository webhooks. Follow the
+[GitHub App setup guide](docs/operations/github-app.md). Private GitHub projects
+use short-lived installation tokens and store no GitHub access token in Depot.
+
+Static projects run their Node build inside a disposable Docker builder. Set
+the project kind to `static` and its output directory (for example `dist`). The
+validated artifact is promoted atomically and served directly by Depot; no
+application container or exposed port is required.
 
 Private repositories use encrypted, project-scoped SSH deploy keys with strict
 host verification. Follow the
@@ -165,8 +177,9 @@ Release is published, and a reusable curl deployment workflow under
 `github.sha` identifies that application), add `DEPOT_DEPLOY_TOKEN` as a GitHub
 Actions secret, and provide the Depot URL when dispatching it.
 
-For automatic deployments without a CI workflow, create the one-time GitHub
-webhook credentials in the project dashboard and follow the
+GitHub App projects receive automatic push deployments from the App-wide
+webhook. For manually added repositories, create one-time webhook credentials
+in the project dashboard and follow the legacy
 [signed webhook setup guide](docs/operations/github-webhooks.md).
 
 ### 6. Connect host Caddy

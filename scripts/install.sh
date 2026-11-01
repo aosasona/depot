@@ -35,7 +35,7 @@ install -d -m 0755 "$stage/usr/local/sbin"
 install -m 0755 "$repository_root/scripts/setup.sh" "$stage/usr/local/sbin/depot-setup"
 
 if [ "$mode" = "vm" ]; then
-    install -d -m 0770 "$stage/var/lib/depot" "$stage/var/lib/depot/workspaces"
+    install -d -m 0770 "$stage/var/lib/depot" "$stage/var/lib/depot/workspaces" "$stage/var/lib/depot/static"
     if [ ! -e "$stage/etc/depot/config.toml" ]; then
         install -m 0640 "$repository_root/deploy/config.example.toml" "$stage/etc/depot/config.toml"
     fi

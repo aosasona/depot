@@ -10,6 +10,7 @@ master_key_file = "/etc/depot/master.key"
 
 [worker]
 workspace_root = "/var/lib/depot/workspaces"
+static_root = "/var/lib/depot/static"
 git_timeout_seconds = 120
 docker_binary = "docker"
 docker_timeout_seconds = 1800
@@ -18,3 +19,11 @@ docker_timeout_seconds = 1800
 address = "10.0.0.10:9080"
 auth_token = "replace-with-the-same-agent-token"
 timeout_seconds = 30
+
+# Optional GitHub App integration. Create the App first, store both secrets as
+# root-readable files, then uncomment this section.
+# [github]
+# app_id = 123456
+# app_slug = "your-depot-app"
+# private_key_file = "/etc/depot/github-app.pem"
+# webhook_secret_file = "/etc/depot/github-webhook-secret"
