@@ -14,7 +14,7 @@ use axum::{
 };
 use clap::{Parser, Subcommand};
 use depot_auth::{issue_bootstrap_token, issue_deploy_token};
-use depot_core::{Config, ShellHandshake};
+use depot_core::{Config, ShellHandshake, WorkerOperation};
 use depot_store::Store;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
@@ -463,9 +463,7 @@ async fn serve_shell_connection(
     docker_binary: String,
     signing_key: Arc<[u8; 32]>,
 ) -> Result<(), std::io::Error> {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    use tokio::process::Command;
-
+    use tokio::io::AsyncReadExt;
     let mut encoded = Vec::with_capacity(1024);
     tokio::time::timeout(std::time::Duration::from_secs(5), async {
         loop {
@@ -514,6 +512,25 @@ async fn serve_shell_connection(
             "shell container is no longer the active deployment",
         ));
     }
+    match handshake.operation.clone() {
+        WorkerOperation::Shell => {
+            serve_interactive_shell(stream, store, docker_binary, handshake, now).await
+        }
+        operation => serve_file_operation(&mut stream, &docker_binary, &handshake, operation).await,
+    }
+}
+
+/// Streams an interactive shell after the shared worker capability checks pass.
+async fn serve_interactive_shell(
+    mut stream: UnixStream,
+    store: Store,
+    docker_binary: String,
+    handshake: ShellHandshake,
+    now: i64,
+) -> Result<(), std::io::Error> {
+    use tokio::io::AsyncWriteExt;
+    use tokio::process::Command;
+
     stream
         .write_all(b"Connected to the active Depot container. Session limit: 15 minutes.\r\n\r\n")
         .await?;
@@ -569,6 +586,229 @@ async fn serve_shell_connection(
         )
         .await;
     Ok(())
+}
+
+const FILE_TRANSFER_LIMIT: u64 = 32 * 1024 * 1024;
+const FILE_LIST_LIMIT: u64 = 2 * 1024 * 1024;
+
+/// Executes one fixed, signed file operation against the active container.
+async fn serve_file_operation(
+    stream: &mut UnixStream,
+    docker_binary: &str,
+    handshake: &ShellHandshake,
+    operation: WorkerOperation,
+) -> Result<(), std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::process::Command;
+
+    match operation {
+        WorkerOperation::List { path } => {
+            let script = r#"for entry in "$1"/* "$1"/.[!.]* "$1"/..?*; do
+  if [ ! -e "$entry" ] && [ ! -L "$entry" ]; then continue; fi
+  name=${entry##*/}
+  if [ -L "$entry" ]; then kind=symlink; size=0
+  elif [ -d "$entry" ]; then kind=directory; size=0
+  else kind=file; size=$(wc -c < "$entry" 2>/dev/null || printf 0); fi
+  printf '%s\000%s\000%s\000' "$kind" "$size" "$name"
+done"#;
+            let output = bounded_docker_output(
+                Command::new(docker_binary).args([
+                    "exec",
+                    &handshake.container_id,
+                    "sh",
+                    "-c",
+                    script,
+                    "sh",
+                    &path,
+                ]),
+                FILE_LIST_LIMIT,
+            )
+            .await?;
+            let entries = parse_file_entries(&output)?;
+            write_broker_response(stream, &serde_json::json!({"ok": true, "entries": entries}))
+                .await?;
+        }
+        WorkerOperation::Download { path } => {
+            let script = r#"test -f "$1" && cat -- "$1""#;
+            let output = bounded_docker_output(
+                Command::new(docker_binary).args([
+                    "exec",
+                    &handshake.container_id,
+                    "sh",
+                    "-c",
+                    script,
+                    "sh",
+                    &path,
+                ]),
+                FILE_TRANSFER_LIMIT,
+            )
+            .await?;
+            write_broker_response(
+                stream,
+                &serde_json::json!({"ok": true, "size": output.len()}),
+            )
+            .await?;
+            stream.write_all(&output).await?;
+        }
+        WorkerOperation::Upload { path, size } => {
+            if size > FILE_TRANSFER_LIMIT {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidInput,
+                    "container upload exceeds the worker limit",
+                ));
+            }
+            let script = r#"umask 077; cat > "$1""#;
+            let mut child = Command::new(docker_binary)
+                .args([
+                    "exec",
+                    "-i",
+                    &handshake.container_id,
+                    "sh",
+                    "-c",
+                    script,
+                    "sh",
+                    &path,
+                ])
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::piped())
+                .kill_on_drop(true)
+                .spawn()?;
+            let mut stdin = child.stdin.take().ok_or_else(|| {
+                std::io::Error::new(std::io::ErrorKind::BrokenPipe, "upload stdin unavailable")
+            })?;
+            let copied = tokio::io::copy(&mut stream.take(size), &mut stdin).await?;
+            drop(stdin);
+            if copied != size {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "container upload ended before its declared size",
+                ));
+            }
+            let output = child.wait_with_output().await?;
+            ensure_docker_success(output.status, &output.stderr)?;
+            write_broker_response(stream, &serde_json::json!({"ok": true})).await?;
+        }
+        WorkerOperation::CreateDirectory { path } => {
+            run_file_mutation(
+                docker_binary,
+                &handshake.container_id,
+                &["mkdir", "--", &path],
+            )
+            .await?;
+            write_broker_response(stream, &serde_json::json!({"ok": true})).await?;
+        }
+        WorkerOperation::Rename { path, destination } => {
+            run_file_mutation(
+                docker_binary,
+                &handshake.container_id,
+                &["mv", "--", &path, &destination],
+            )
+            .await?;
+            write_broker_response(stream, &serde_json::json!({"ok": true})).await?;
+        }
+        WorkerOperation::Delete { path } => {
+            run_file_mutation(
+                docker_binary,
+                &handshake.container_id,
+                &["rm", "-rf", "--", &path],
+            )
+            .await?;
+            write_broker_response(stream, &serde_json::json!({"ok": true})).await?;
+        }
+        WorkerOperation::Shell => unreachable!("shell operations are dispatched separately"),
+    }
+    Ok(())
+}
+
+/// Runs one bounded Docker command and rejects truncation or a non-zero exit.
+async fn bounded_docker_output(
+    command: &mut tokio::process::Command,
+    limit: u64,
+) -> Result<Vec<u8>, std::io::Error> {
+    use tokio::io::AsyncReadExt;
+
+    let mut child = command
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let stdout = child.stdout.take().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "Docker stdout unavailable")
+    })?;
+    let mut bytes = Vec::new();
+    stdout.take(limit + 1).read_to_end(&mut bytes).await?;
+    let output = child.wait_with_output().await?;
+    ensure_docker_success(output.status, &output.stderr)?;
+    if u64::try_from(bytes.len()).unwrap_or(u64::MAX) > limit {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "container file response exceeds the worker limit",
+        ));
+    }
+    Ok(bytes)
+}
+
+/// Converts NUL-delimited worker records into transport-safe file metadata.
+fn parse_file_entries(bytes: &[u8]) -> Result<Vec<serde_json::Value>, std::io::Error> {
+    let fields = bytes.split(|byte| *byte == 0).collect::<Vec<_>>();
+    if !fields.last().is_some_and(|field| field.is_empty()) || (fields.len() - 1) % 3 != 0 {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "container returned malformed directory metadata",
+        ));
+    }
+    let mut entries = Vec::new();
+    for record in fields[..fields.len().saturating_sub(1)].chunks_exact(3) {
+        let kind = String::from_utf8_lossy(record[0]);
+        let size = String::from_utf8_lossy(record[1])
+            .parse::<u64>()
+            .unwrap_or(0);
+        let name = String::from_utf8_lossy(record[2]);
+        entries.push(serde_json::json!({"name": name, "kind": kind, "size": size}));
+    }
+    Ok(entries)
+}
+
+/// Runs a fixed file mutation without accepting command structure from the caller.
+async fn run_file_mutation(
+    docker_binary: &str,
+    container_id: &str,
+    arguments: &[&str],
+) -> Result<(), std::io::Error> {
+    let output = tokio::process::Command::new(docker_binary)
+        .arg("exec")
+        .arg(container_id)
+        .args(arguments)
+        .output()
+        .await?;
+    ensure_docker_success(output.status, &output.stderr)
+}
+
+/// Maps Docker command failure to a bounded local broker error.
+fn ensure_docker_success(
+    status: std::process::ExitStatus,
+    stderr: &[u8],
+) -> Result<(), std::io::Error> {
+    if status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(stderr);
+    Err(std::io::Error::other(format!(
+        "container file operation failed: {}",
+        detail.trim().chars().take(300).collect::<String>()
+    )))
+}
+
+/// Writes one newline-delimited broker response header.
+async fn write_broker_response(
+    stream: &mut UnixStream,
+    value: &serde_json::Value,
+) -> Result<(), std::io::Error> {
+    use tokio::io::AsyncWriteExt;
+    let mut encoded = serde_json::to_vec(value).map_err(std::io::Error::other)?;
+    encoded.push(b'\n');
+    stream.write_all(&encoded).await
 }
 
 /// Reads one Docker output stream into the bounded broker channel.
@@ -1407,7 +1647,7 @@ fn content_type(asset_name: &str) -> &'static str {
 mod tests {
     use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 
-    use super::{content_type, request_hostname, serve_static_release};
+    use super::{content_type, parse_file_entries, request_hostname, serve_static_release};
 
     /// Ensures unknown embedded files cannot select an executable content type.
     #[test]
@@ -1429,6 +1669,17 @@ mod tests {
         );
         headers.insert(header::HOST, HeaderValue::from_static("invalid host"));
         assert!(request_hostname(&headers).is_none());
+    }
+
+    /// Parses whitespace-bearing file names without treating them as command structure.
+    #[test]
+    fn container_file_records_are_nul_delimited() {
+        let entries = parse_file_entries(b"directory\0\0my folder\0file\012\0notes.txt\0")
+            .expect("records are valid");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0]["name"], "my folder");
+        assert_eq!(entries[1]["size"], 12);
+        assert!(parse_file_entries(b"file\01\0missing terminator").is_err());
     }
 
     /// Serves files and SPA routes only from the selected immutable release root.

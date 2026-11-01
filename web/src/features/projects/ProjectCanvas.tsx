@@ -11,6 +11,7 @@ import {
   updateServiceConfig,
   upsertVariable,
 } from "../../lib/api/client";
+import { ContainerFileBrowser } from "./ContainerFileBrowser";
 
 type NodeKind = "app" | "database" | "redis" | "storage" | "domain";
 type CanvasNode = {
@@ -53,6 +54,7 @@ export function ProjectCanvas({ project }: { project: Project }) {
     suggestedName?: string;
   }>();
   const [shellOpen, setShellOpen] = useState(false);
+  const [filesOpen, setFilesOpen] = useState(false);
   const [message, setMessage] = useState<string>();
   const active = deployments.data?.find((deployment) => deployment.active);
   const nodes = useMemo(
@@ -134,10 +136,14 @@ export function ProjectCanvas({ project }: { project: Project }) {
   }
 
   /** Dispatches a context action for the selected topology node. */
-  function act(action: "inspect" | "clone" | "shell", node: CanvasNode) {
+  function act(
+    action: "inspect" | "clone" | "shell" | "files",
+    node: CanvasNode,
+  ) {
     setMenu(undefined);
     if (action === "inspect") return setSelected(node);
     if (action === "shell" && node.kind === "app") return setShellOpen(true);
+    if (action === "files" && node.kind === "app") return setFilesOpen(true);
     if (action === "clone" && node.kind === "app") {
       void cloneProject();
       return;
@@ -157,6 +163,22 @@ export function ProjectCanvas({ project }: { project: Project }) {
           <span>Right-click any node for actions.</span>
         </div>
         <div className="canvas-toolbar-actions">
+          <button
+            className="table-action file-action"
+            type="button"
+            disabled={!active?.container_id}
+            title={
+              active?.container_id
+                ? "Browse files in the active release container"
+                : "Deploy the project before browsing files"
+            }
+            onClick={() => setFilesOpen(true)}
+          >
+            <span className="file-action-label" aria-hidden="true">
+              []
+            </span>{" "}
+            Browse files
+          </button>
           <button
             className="table-action shell-action"
             type="button"
@@ -247,6 +269,13 @@ export function ProjectCanvas({ project }: { project: Project }) {
           onClose={() => setShellOpen(false)}
         />
       )}
+      {filesOpen && (
+        <ContainerFileBrowser
+          projectId={project.id}
+          available={Boolean(active?.container_id)}
+          onClose={() => setFilesOpen(false)}
+        />
+      )}
     </div>
   );
 }
@@ -329,7 +358,10 @@ function NodeMenu({
   onAction,
 }: {
   menu: { node: CanvasNode; x: number; y: number };
-  onAction: (action: "inspect" | "clone" | "shell", node: CanvasNode) => void;
+  onAction: (
+    action: "inspect" | "clone" | "shell" | "files",
+    node: CanvasNode,
+  ) => void;
 }) {
   return (
     <div
@@ -355,13 +387,22 @@ function NodeMenu({
         </button>
       )}
       {menu.node.kind === "app" && (
-        <button
-          type="button"
-          role="menuitem"
-          onClick={() => onAction("shell", menu.node)}
-        >
-          Open shell
-        </button>
+        <>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => onAction("files", menu.node)}
+          >
+            Browse files
+          </button>
+          <button
+            type="button"
+            role="menuitem"
+            onClick={() => onAction("shell", menu.node)}
+          >
+            Open shell
+          </button>
+        </>
       )}
     </div>
   );

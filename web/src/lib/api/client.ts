@@ -122,6 +122,11 @@ const variableSchema = z.object({
   created_at: z.number(),
   updated_at: z.number(),
 });
+const containerFileSchema = z.object({
+  name: z.string(),
+  kind: z.enum(["file", "directory", "symlink"]),
+  size: z.number().nonnegative(),
+});
 const githubWebhookCredentialSchema = z.object({
   endpoint_path: z.string(),
   secret: z.string(),
@@ -259,6 +264,18 @@ function csrfHeaders() {
   if (!csrfToken)
     throw new ApiError("missing_csrf", "The session cannot be verified.");
   return { "x-csrf-token": csrfToken };
+}
+
+/** Converts a failed non-JSON file response into the standard client error. */
+async function throwFileResponseError(response: Response): Promise<never> {
+  const body: unknown = await response.json().catch(() => undefined);
+  const parsed = errorSchema.safeParse(body);
+  throw parsed.success
+    ? new ApiError(parsed.data.error.code, parsed.data.error.message)
+    : new ApiError(
+        "container_file_failed",
+        "Depot could not complete that container file operation.",
+      );
 }
 
 /** Revokes the active session using the CSRF value bound to it. */
@@ -467,6 +484,94 @@ export function requestRuntimeLogs(projectId: string) {
     z.object({ job_id: z.string() }),
     { method: "POST", headers: csrfHeaders() },
   );
+}
+
+/** Lists direct children of one absolute directory in the active container. */
+export function listContainerFiles(projectId: string, path: string) {
+  const query = new URLSearchParams({ path });
+  return request(
+    `/api/v1/projects/${projectId}/container-files?${query}`,
+    z.array(containerFileSchema),
+  );
+}
+
+/** Uploads one browser file into the active container with CSRF protection. */
+export async function uploadContainerFile(
+  projectId: string,
+  path: string,
+  file: File,
+) {
+  const query = new URLSearchParams({ path });
+  const response = await fetch(
+    `/api/v1/projects/${projectId}/container-files?${query}`,
+    {
+      method: "PUT",
+      credentials: "same-origin",
+      headers: csrfHeaders(),
+      body: file,
+    },
+  );
+  if (!response.ok) await throwFileResponseError(response);
+}
+
+/** Downloads one regular file from the active container as a browser blob. */
+export async function downloadContainerFile(projectId: string, path: string) {
+  const query = new URLSearchParams({ path });
+  const response = await fetch(
+    `/api/v1/projects/${projectId}/container-files/download?${query}`,
+    { credentials: "same-origin" },
+  );
+  if (!response.ok) await throwFileResponseError(response);
+  return response.blob();
+}
+
+/** Creates one directory in the active container. */
+export async function createContainerDirectory(
+  projectId: string,
+  path: string,
+) {
+  const response = await fetch(
+    `/api/v1/projects/${projectId}/container-files/directory`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...csrfHeaders() },
+      body: JSON.stringify({ path }),
+    },
+  );
+  if (!response.ok) await throwFileResponseError(response);
+}
+
+/** Moves or renames one file-system entry in the active container. */
+export async function renameContainerFile(
+  projectId: string,
+  path: string,
+  destination: string,
+) {
+  const response = await fetch(
+    `/api/v1/projects/${projectId}/container-files/rename`,
+    {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...csrfHeaders() },
+      body: JSON.stringify({ path, destination }),
+    },
+  );
+  if (!response.ok) await throwFileResponseError(response);
+}
+
+/** Recursively removes one explicitly selected non-root container path. */
+export async function deleteContainerFile(projectId: string, path: string) {
+  const query = new URLSearchParams({ path });
+  const response = await fetch(
+    `/api/v1/projects/${projectId}/container-files?${query}`,
+    {
+      method: "DELETE",
+      credentials: "same-origin",
+      headers: csrfHeaders(),
+    },
+  );
+  if (!response.ok) await throwFileResponseError(response);
 }
 
 /** Enqueues a manual deployment of the latest successfully inspected commit. */

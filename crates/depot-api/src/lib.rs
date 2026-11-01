@@ -2,12 +2,12 @@
 
 use axum::{
     Json, Router,
-    body::Bytes,
+    body::{Body, Bytes},
     extract::{
         DefaultBodyLimit, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
-    http::{HeaderMap, StatusCode},
+    http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::{get, post},
 };
@@ -21,8 +21,8 @@ use depot_auth::{
     validate_csrf,
 };
 use depot_core::{
-    ProjectValidationError, ShellHandshake, validate_domain_hostname, validate_project_slug,
-    validate_repository_url,
+    ProjectValidationError, ShellHandshake, WorkerOperation, valid_container_path,
+    validate_domain_hostname, validate_project_slug, validate_repository_url,
 };
 use depot_github::{GithubAppClient, GithubError, Repository, RepositoryEntry};
 use depot_secrets::SecretCipher;
@@ -275,6 +275,8 @@ enum ApiError {
     ShellUnavailable,
     ShellNotRunning,
     InvalidShellOrigin,
+    InvalidContainerPath,
+    FileBroker,
 }
 
 #[derive(Debug, Deserialize)]
@@ -358,6 +360,40 @@ struct DomainResponse {
 #[derive(Debug, Deserialize)]
 struct CreateDomainRequest {
     hostname: String,
+}
+
+/// Validated absolute path selecting one object inside the active container.
+#[derive(Debug, Deserialize)]
+struct ContainerPathQuery {
+    path: String,
+}
+
+/// One direct child returned by the active container's file browser.
+#[derive(Debug, Deserialize, Serialize)]
+struct ContainerFileEntry {
+    name: String,
+    kind: String,
+    size: u64,
+}
+
+/// Worker response for one directory listing.
+#[derive(Debug, Deserialize)]
+struct ContainerFileListResponse {
+    ok: bool,
+    entries: Vec<ContainerFileEntry>,
+}
+
+/// Mutation body for directory creation.
+#[derive(Debug, Deserialize)]
+struct ContainerDirectoryRequest {
+    path: String,
+}
+
+/// Mutation body for moving one file or directory without shell interpolation.
+#[derive(Debug, Deserialize)]
+struct ContainerRenameRequest {
+    path: String,
+    destination: String,
 }
 
 /// Label used to identify a project deployment credential after issuance.
@@ -541,6 +577,25 @@ pub fn router_with_shell(
             post(enqueue_runtime_logs),
         )
         .route("/api/v1/projects/{project_id}/shell", get(project_shell))
+        .route(
+            "/api/v1/projects/{project_id}/container-files",
+            get(list_container_files)
+                .put(upload_container_file)
+                .delete(delete_container_file)
+                .layer(DefaultBodyLimit::max(32 * 1024 * 1024)),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/container-files/download",
+            get(download_container_file),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/container-files/directory",
+            post(create_container_directory),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/container-files/rename",
+            post(rename_container_file),
+        )
         .route(
             "/api/v1/projects/{project_id}/deploy-tokens",
             post(create_deploy_token),
@@ -1448,6 +1503,7 @@ async fn project_shell(
         project_id: project_id.clone(),
         container_id,
         actor_user_id: actor.id.clone(),
+        operation: WorkerOperation::Shell,
         expires_at: now + 15 * 60,
         nonce: uuid::Uuid::now_v7().to_string(),
         signature: String::new(),
@@ -1531,6 +1587,303 @@ async fn proxy_shell(mut socket: WebSocket, broker: ShellBroker, handshake: Shel
         () = browser_to_worker => {}
         () = worker_to_browser => {}
     }
+}
+
+/// Lists one directory in the active service container through the worker broker.
+async fn list_container_files(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Query(query): Query<ContainerPathQuery>,
+) -> Result<Json<Vec<ContainerFileEntry>>, ApiError> {
+    let actor = require_user(&state.store, &jar).await?;
+    validate_container_file_path(&query.path, true)?;
+    let (broker, handshake) = container_file_capability(
+        &state,
+        &actor,
+        &project_id,
+        WorkerOperation::List { path: query.path },
+    )
+    .await?;
+    let (header, _) = request_file_broker(&broker, &handshake, &[]).await?;
+    let response: ContainerFileListResponse =
+        serde_json::from_value(header).map_err(|_| ApiError::FileBroker)?;
+    if !response.ok {
+        return Err(ApiError::FileBroker);
+    }
+    Ok(Json(response.entries))
+}
+
+/// Downloads one bounded regular file from the active service container.
+async fn download_container_file(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Query(query): Query<ContainerPathQuery>,
+) -> Result<Response, ApiError> {
+    let actor = require_user(&state.store, &jar).await?;
+    validate_container_file_path(&query.path, false)?;
+    let (broker, handshake) = container_file_capability(
+        &state,
+        &actor,
+        &project_id,
+        WorkerOperation::Download { path: query.path },
+    )
+    .await?;
+    let (_, bytes) = request_file_broker(&broker, &handshake, &[]).await?;
+    let mut response = Response::new(Body::from(bytes));
+    response.headers_mut().insert(
+        header::CONTENT_TYPE,
+        HeaderValue::from_static("application/octet-stream"),
+    );
+    response.headers_mut().insert(
+        header::CONTENT_DISPOSITION,
+        HeaderValue::from_static("attachment"),
+    );
+    Ok(response)
+}
+
+/// Uploads one bounded file body to an explicit path in the active container.
+async fn upload_container_file(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Query(query): Query<ContainerPathQuery>,
+    body: Bytes,
+) -> Result<StatusCode, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    validate_container_file_path(&query.path, false)?;
+    let size = u64::try_from(body.len()).map_err(|_| ApiError::FileBroker)?;
+    let (broker, handshake) = container_file_capability(
+        &state,
+        &actor,
+        &project_id,
+        WorkerOperation::Upload {
+            path: query.path.clone(),
+            size,
+        },
+    )
+    .await?;
+    request_file_broker(&broker, &handshake, &body).await?;
+    record_container_file_audit(
+        &state,
+        &actor,
+        &project_id,
+        "project.file.upload",
+        &query.path,
+    )
+    .await?;
+    Ok(StatusCode::CREATED)
+}
+
+/// Creates one directory in the active container after CSRF and path validation.
+async fn create_container_directory(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(request): Json<ContainerDirectoryRequest>,
+) -> Result<StatusCode, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    validate_container_file_path(&request.path, false)?;
+    let (broker, handshake) = container_file_capability(
+        &state,
+        &actor,
+        &project_id,
+        WorkerOperation::CreateDirectory {
+            path: request.path.clone(),
+        },
+    )
+    .await?;
+    request_file_broker(&broker, &handshake, &[]).await?;
+    record_container_file_audit(
+        &state,
+        &actor,
+        &project_id,
+        "project.file.mkdir",
+        &request.path,
+    )
+    .await?;
+    Ok(StatusCode::CREATED)
+}
+
+/// Renames one non-root container path without accepting shell command text.
+async fn rename_container_file(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Json(request): Json<ContainerRenameRequest>,
+) -> Result<StatusCode, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    validate_container_file_path(&request.path, false)?;
+    validate_container_file_path(&request.destination, false)?;
+    let (broker, handshake) = container_file_capability(
+        &state,
+        &actor,
+        &project_id,
+        WorkerOperation::Rename {
+            path: request.path.clone(),
+            destination: request.destination,
+        },
+    )
+    .await?;
+    request_file_broker(&broker, &handshake, &[]).await?;
+    record_container_file_audit(
+        &state,
+        &actor,
+        &project_id,
+        "project.file.rename",
+        &request.path,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Deletes one non-root file tree in the active container after explicit validation.
+async fn delete_container_file(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    Query(query): Query<ContainerPathQuery>,
+) -> Result<StatusCode, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    validate_container_file_path(&query.path, false)?;
+    let (broker, handshake) = container_file_capability(
+        &state,
+        &actor,
+        &project_id,
+        WorkerOperation::Delete {
+            path: query.path.clone(),
+        },
+    )
+    .await?;
+    request_file_broker(&broker, &handshake, &[]).await?;
+    record_container_file_audit(
+        &state,
+        &actor,
+        &project_id,
+        "project.file.delete",
+        &query.path,
+    )
+    .await?;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+/// Issues one short-lived file capability bound to the current active container.
+async fn container_file_capability(
+    state: &ApiState,
+    actor: &SessionUser,
+    project_id: &str,
+    operation: WorkerOperation,
+) -> Result<(ShellBroker, ShellHandshake), ApiError> {
+    let broker = state.shell.clone().ok_or(ApiError::ShellUnavailable)?;
+    state.store.project_by_id(project_id).await?;
+    let deployment = state
+        .store
+        .list_deployments(project_id)
+        .await?
+        .into_iter()
+        .find(|deployment| deployment.active)
+        .ok_or(ApiError::ShellNotRunning)?;
+    let container_id = deployment.container_id.ok_or(ApiError::ShellNotRunning)?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let mut handshake = ShellHandshake {
+        session_id: uuid::Uuid::now_v7().to_string(),
+        project_id: project_id.to_owned(),
+        container_id,
+        actor_user_id: actor.id.clone(),
+        operation,
+        expires_at: now + 60,
+        nonce: uuid::Uuid::now_v7().to_string(),
+        signature: String::new(),
+    };
+    handshake.sign(&broker.signing_key);
+    Ok((broker, handshake))
+}
+
+/// Exchanges one bounded request and response with the local privileged worker.
+async fn request_file_broker(
+    broker: &ShellBroker,
+    handshake: &ShellHandshake,
+    body: &[u8],
+) -> Result<(serde_json::Value, Vec<u8>), ApiError> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut worker = tokio::net::UnixStream::connect(broker.socket_path.as_ref())
+        .await
+        .map_err(|error| {
+            error!(?error, "container file broker connection failed");
+            ApiError::FileBroker
+        })?;
+    let mut encoded = serde_json::to_vec(handshake).map_err(|_| ApiError::FileBroker)?;
+    encoded.push(b'\n');
+    worker
+        .write_all(&encoded)
+        .await
+        .map_err(|_| ApiError::FileBroker)?;
+    worker
+        .write_all(body)
+        .await
+        .map_err(|_| ApiError::FileBroker)?;
+    let header_limit = if matches!(&handshake.operation, WorkerOperation::List { .. }) {
+        2 * 1024 * 1024
+    } else {
+        16 * 1024
+    };
+    let mut header_bytes = Vec::with_capacity(256);
+    loop {
+        let byte = worker.read_u8().await.map_err(|_| ApiError::FileBroker)?;
+        if byte == b'\n' {
+            break;
+        }
+        if header_bytes.len() >= header_limit {
+            return Err(ApiError::FileBroker);
+        }
+        header_bytes.push(byte);
+    }
+    let response = serde_json::from_slice(&header_bytes).map_err(|_| ApiError::FileBroker)?;
+    let mut response_body = Vec::new();
+    worker
+        .take(32 * 1024 * 1024 + 1)
+        .read_to_end(&mut response_body)
+        .await
+        .map_err(|_| ApiError::FileBroker)?;
+    if response_body.len() > 32 * 1024 * 1024 {
+        return Err(ApiError::FileBroker);
+    }
+    Ok((response, response_body))
+}
+
+/// Rejects traversal, control characters, and root-targeting file mutations.
+fn validate_container_file_path(path: &str, allow_root: bool) -> Result<(), ApiError> {
+    valid_container_path(path, allow_root)
+        .then_some(())
+        .ok_or(ApiError::InvalidContainerPath)
+}
+
+/// Records a container file mutation without persisting file contents.
+async fn record_container_file_audit(
+    state: &ApiState,
+    actor: &SessionUser,
+    project_id: &str,
+    action: &str,
+    path: &str,
+) -> Result<(), ApiError> {
+    let metadata = serde_json::json!({"path": path});
+    state
+        .store
+        .record_project_audit(
+            &actor.id,
+            action,
+            project_id,
+            &metadata.to_string(),
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(())
 }
 
 /// Creates a manual deployment from the latest successfully inspected commit.
@@ -2499,6 +2852,16 @@ impl IntoResponse for ApiError {
                 StatusCode::FORBIDDEN,
                 "invalid_shell_origin",
                 "Shell connections must originate from this Depot dashboard.",
+            ),
+            Self::InvalidContainerPath => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_container_path",
+                "Use a canonical absolute container path outside the filesystem root.",
+            ),
+            Self::FileBroker => (
+                StatusCode::BAD_GATEWAY,
+                "container_file_failed",
+                "The active container could not complete that file operation.",
             ),
             Self::Store(StoreError::InvalidRole(_))
             | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (

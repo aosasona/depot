@@ -1396,6 +1396,10 @@ td {
 .canvas-toolbar-actions .shell-action {
   border-color: var(--accent);
 }
+.file-action-label {
+  color: var(--accent);
+  font-family: var(--mono-font);
+}
 .canvas-toolbar-actions .shell-action > span {
   color: var(--accent);
   font-family: var(--mono-font);
@@ -1696,6 +1700,152 @@ td {
 .browser-shell footer {
   justify-content: space-between;
 }
+.container-file-browser {
+  width: min(64rem, 100%);
+  max-height: min(90vh, 54rem);
+  grid-template-rows: auto auto auto auto minmax(10rem, 1fr) auto auto;
+}
+.container-file-browser header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+}
+.file-browser-limit {
+  color: var(--muted);
+  font: 0.6rem var(--mono-font);
+  text-transform: uppercase;
+}
+.file-breadcrumbs {
+  display: flex;
+  align-items: center;
+  min-height: 2.5rem;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  background: #070709;
+  white-space: nowrap;
+}
+.file-breadcrumbs span {
+  display: flex;
+  align-items: center;
+}
+.file-breadcrumbs i {
+  color: var(--border);
+  font-style: normal;
+}
+.file-breadcrumbs button {
+  min-height: 2.4rem;
+  padding: 0 0.65rem;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: 0.7rem var(--mono-font);
+}
+.file-breadcrumbs button:hover {
+  color: var(--accent);
+}
+.file-browser-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+}
+.file-drop-zone {
+  display: grid;
+  place-items: center;
+  min-height: 5rem;
+  border: 1px dashed var(--border);
+  background: #0b0b0d;
+  color: var(--text);
+}
+.file-drop-zone:hover,
+.file-drop-zone.dragging {
+  border-color: var(--accent);
+  background: rgb(198 245 71 / 8%);
+}
+.file-drop-zone span {
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+.file-list {
+  min-height: 12rem;
+  overflow: auto;
+  border: 1px solid var(--border);
+  background: #09090b;
+}
+.file-list > p {
+  margin: 0;
+  padding: 1rem;
+  color: var(--muted);
+  font-size: 0.75rem;
+}
+.file-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  border-bottom: 1px solid var(--border);
+}
+.file-row:last-child {
+  border-bottom: 0;
+}
+.file-entry {
+  display: grid;
+  grid-template-columns: 3rem minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 0.75rem;
+  min-width: 0;
+  padding: 0.7rem;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+}
+.file-entry:hover:not(:disabled) {
+  background: var(--surface-hover);
+}
+.file-entry > span {
+  color: var(--accent);
+  font: 0.58rem var(--mono-font);
+}
+.file-entry strong {
+  overflow: hidden;
+  font: 0.75rem var(--mono-font);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.file-entry small {
+  color: var(--muted);
+  font: 0.62rem var(--mono-font);
+}
+.file-row > button:not(.file-entry) {
+  padding: 0 0.75rem;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: transparent;
+  color: var(--muted);
+  font: 0.6rem var(--mono-font);
+  text-transform: uppercase;
+}
+.file-row > button:not(.file-entry):hover:not(:disabled) {
+  background: var(--surface-hover);
+  color: var(--text);
+}
+.file-row > .danger-action:hover:not(:disabled) {
+  background: var(--danger);
+  color: #111;
+}
+.file-browser-message {
+  margin: 0;
+  color: var(--muted);
+  font: 0.68rem var(--mono-font);
+}
+.container-file-browser footer {
+  align-items: center;
+  justify-content: space-between;
+}
+.container-file-browser footer > span {
+  max-width: 36rem;
+  color: var(--warning);
+  font-size: 0.65rem;
+  line-height: 1.4;
+}
 
 @media (max-width: 760px) {
   .canvas-toolbar {
@@ -1704,7 +1854,7 @@ td {
   }
   .canvas-toolbar > .canvas-toolbar-actions {
     display: grid;
-    grid-template-columns: 1fr 1fr;
+    grid-template-columns: 1fr;
   }
   .project-topology {
     grid-template-columns: 1fr;
@@ -1725,6 +1875,19 @@ td {
     width: auto;
     max-height: calc(100vh - 1rem);
     overflow: auto;
+  }
+  .file-row {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+  .file-row > .danger-action {
+    grid-column: 2;
+  }
+  .file-entry {
+    grid-row: span 2;
+  }
+  .container-file-browser footer {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 

@@ -103,9 +103,39 @@ pub struct ShellHandshake {
     pub project_id: String,
     pub container_id: String,
     pub actor_user_id: String,
+    #[serde(default)]
+    pub operation: WorkerOperation,
     pub expires_at: i64,
     pub nonce: String,
     pub signature: String,
+}
+
+/// Enumerates the only container operations accepted by the privileged worker broker.
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum WorkerOperation {
+    #[default]
+    Shell,
+    List {
+        path: String,
+    },
+    Download {
+        path: String,
+    },
+    Upload {
+        path: String,
+        size: u64,
+    },
+    CreateDirectory {
+        path: String,
+    },
+    Rename {
+        path: String,
+        destination: String,
+    },
+    Delete {
+        path: String,
+    },
 }
 
 /// Domain-separates the local shell MAC key from the secret-encryption key.
@@ -115,6 +145,25 @@ pub fn derive_shell_signing_key(master_key: &[u8; 32]) -> [u8; 32] {
     digest.update(b"depot:worker-shell:v1:");
     digest.update(master_key);
     digest.finalize().into()
+}
+
+/// Accepts one canonical absolute container path without traversal or control bytes.
+pub fn valid_container_path(value: &str, allow_root: bool) -> bool {
+    if value.is_empty()
+        || value.len() > 4096
+        || !value.starts_with('/')
+        || value.bytes().any(|byte| byte.is_ascii_control())
+        || value.contains("//")
+        || (value.len() > 1 && value.ends_with('/'))
+        || (!allow_root && value == "/")
+    {
+        return false;
+    }
+    value
+        .split('/')
+        .skip(1)
+        .all(|component| !component.is_empty() && component != "." && component != "..")
+        || (allow_root && value == "/")
 }
 
 impl ShellHandshake {
@@ -147,6 +196,49 @@ impl ShellHandshake {
         let mut value = format!("{}|", self.expires_at);
         for field in fields {
             value.push_str(&format!("{}:{field}|", field.len()));
+        }
+        let operation = self.operation.canonical();
+        value.push_str(&format!("{}:{operation}|", operation.len()));
+        value
+    }
+}
+
+impl WorkerOperation {
+    /// Produces a stable length-prefixed representation for capability signing.
+    fn canonical(&self) -> String {
+        /// Appends one unambiguous string field to a signed operation value.
+        fn field(value: &mut String, field: &str) {
+            value.push_str(&format!("{}:{field}|", field.len()));
+        }
+
+        let mut value = String::new();
+        match self {
+            Self::Shell => value.push_str("shell|"),
+            Self::List { path } => {
+                value.push_str("list|");
+                field(&mut value, path);
+            }
+            Self::Download { path } => {
+                value.push_str("download|");
+                field(&mut value, path);
+            }
+            Self::Upload { path, size } => {
+                value.push_str(&format!("upload|{size}|"));
+                field(&mut value, path);
+            }
+            Self::CreateDirectory { path } => {
+                value.push_str("create_directory|");
+                field(&mut value, path);
+            }
+            Self::Rename { path, destination } => {
+                value.push_str("rename|");
+                field(&mut value, path);
+                field(&mut value, destination);
+            }
+            Self::Delete { path } => {
+                value.push_str("delete|");
+                field(&mut value, path);
+            }
         }
         value
     }
@@ -434,8 +526,9 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, ConfigError, ProjectValidationError, ShellHandshake, validate_domain_hostname,
-        validate_host_port, validate_project_slug, validate_repository_url,
+        Config, ConfigError, ProjectValidationError, ShellHandshake, WorkerOperation,
+        valid_container_path, validate_domain_hostname, validate_host_port, validate_project_slug,
+        validate_repository_url,
     };
 
     /// Proves shell capabilities cannot be altered after the API signs them.
@@ -447,14 +540,33 @@ mod tests {
             project_id: "project".to_owned(),
             container_id: "container".to_owned(),
             actor_user_id: "user".to_owned(),
+            operation: WorkerOperation::Shell,
             expires_at: 100,
             nonce: "nonce".to_owned(),
             signature: String::new(),
         };
         handshake.sign(&key);
         assert!(handshake.verify(&key));
+        handshake.operation = WorkerOperation::Delete {
+            path: "/app/data".to_owned(),
+        };
+        assert!(!handshake.verify(&key));
+        handshake.operation = WorkerOperation::Shell;
+        handshake.sign(&key);
         handshake.container_id = "other".to_owned();
         assert!(!handshake.verify(&key));
+    }
+
+    /// Ensures container file capabilities cannot traverse or target root mutations.
+    #[test]
+    fn container_paths_are_absolute_and_canonical() {
+        assert!(valid_container_path("/app/config.json", false));
+        assert!(valid_container_path("/", true));
+        assert!(!valid_container_path("/", false));
+        assert!(!valid_container_path("app/config.json", false));
+        assert!(!valid_container_path("/app/../etc/passwd", false));
+        assert!(!valid_container_path("/app//config.json", false));
+        assert!(!valid_container_path("/app/config\n.json", false));
     }
 
     /// Ensures the built-in development configuration satisfies all validation.
