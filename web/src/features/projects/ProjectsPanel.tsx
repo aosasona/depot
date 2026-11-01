@@ -10,6 +10,7 @@ import {
   listProjects,
   type Project,
 } from "../../lib/api/client";
+import { DeploymentLogsPanel } from "./DeploymentLogsPanel";
 import { DeploymentPanel } from "./DeploymentPanel";
 import { DomainPanel } from "./DomainPanel";
 import { EnvironmentPanel } from "./EnvironmentPanel";
@@ -33,6 +34,18 @@ const projectSchema = z.object({
 /** Renders project creation, live project state, and intentional empty feedback. */
 export function ProjectsPanel() {
   const projects = useQuery({ queryKey: ["projects"], queryFn: listProjects });
+  const [selectedProjectId, setSelectedProjectId] = useState<string>();
+  const selectedProject = projects.data?.find(
+    (project) => project.id === selectedProjectId,
+  );
+  if (selectedProject) {
+    return (
+      <ProjectWorkspace
+        project={selectedProject}
+        onBack={() => setSelectedProjectId(undefined)}
+      />
+    );
+  }
   return (
     <section className="projects-panel" aria-labelledby="projects-heading">
       <div className="section-heading">
@@ -64,7 +77,11 @@ export function ProjectsPanel() {
       )}
       <div className="project-grid">
         {projects.data?.map((project) => (
-          <ProjectCard key={project.id} project={project} />
+          <ProjectListCard
+            key={project.id}
+            project={project}
+            onSelect={() => setSelectedProjectId(project.id)}
+          />
         ))}
       </div>
     </section>
@@ -156,8 +173,63 @@ function NewProjectForm() {
   );
 }
 
-/** Displays repository metadata for one real project record. */
-function ProjectCard({ project }: { project: Project }) {
+/** Presents one project as a focused selection instead of an expanded control wall. */
+function ProjectListCard({
+  project,
+  onSelect,
+}: {
+  project: Project;
+  onSelect: () => void;
+}) {
+  return (
+    <button className="project-list-card" type="button" onClick={onSelect}>
+      <span className="project-index">
+        {project.slug.slice(0, 2).toUpperCase()}
+      </span>
+      <span className="project-list-identity">
+        <strong>{project.name}</strong>
+        <small>{project.repository_url}</small>
+      </span>
+      <span className="project-branch">{project.branch}</span>
+      <span
+        className={`project-readiness ${project.latest_inspection_job_id ? "ready" : "waiting"}`}
+      >
+        <i aria-hidden="true" />
+        {project.latest_inspection_job_id ? "Inspected" : "Setup required"}
+      </span>
+      <span className="project-open" aria-hidden="true">
+        →
+      </span>
+    </button>
+  );
+}
+
+type ProjectTab =
+  | "overview"
+  | "deployments"
+  | "logs"
+  | "environment"
+  | "domains"
+  | "settings";
+
+const projectTabs: Array<{ id: ProjectTab; label: string }> = [
+  { id: "overview", label: "Overview" },
+  { id: "deployments", label: "Deployments" },
+  { id: "logs", label: "Logs" },
+  { id: "environment", label: "Environment" },
+  { id: "domains", label: "Domains" },
+  { id: "settings", label: "Settings" },
+];
+
+/** Hosts project operations in stable, task-oriented views. */
+function ProjectWorkspace({
+  project,
+  onBack,
+}: {
+  project: Project;
+  onBack: () => void;
+}) {
+  const [tab, setTab] = useState<ProjectTab>("overview");
   const [jobId, setJobId] = useState<string | undefined>(
     project.latest_inspection_job_id ?? undefined,
   );
@@ -179,71 +251,150 @@ function ProjectCard({ project }: { project: Project }) {
       ? job.data.result
       : undefined;
   return (
-    <article className="project-card">
-      <div className="project-index">
-        {project.slug.slice(0, 2).toUpperCase()}
-      </div>
-      <div>
-        <h3>{project.name}</h3>
-        <p>{project.repository_url}</p>
-      </div>
-      <dl>
-        <div>
-          <dt>Branch</dt>
-          <dd>{project.branch}</dd>
+    <section className="project-workspace" aria-labelledby="project-title">
+      <button className="project-back" type="button" onClick={onBack}>
+        ← All projects
+      </button>
+      <div className="project-workspace-heading">
+        <div className="project-index">
+          {project.slug.slice(0, 2).toUpperCase()}
         </div>
         <div>
-          <dt>Status</dt>
-          <dd>Not deployed</dd>
+          <h2 id="project-title">{project.name}</h2>
+          <p>{project.repository_url}</p>
         </div>
-      </dl>
-      <div className="inspection-panel">
-        <button
-          className="table-action inspection-action"
-          type="button"
-          disabled={
-            inspection.isPending ||
-            job.data?.state === "queued" ||
-            job.data?.state === "running"
-          }
-          onClick={() => inspection.mutate()}
-        >
-          {job.data?.state === "queued"
-            ? "Inspection queued"
-            : job.data?.state === "running"
-              ? "Inspecting…"
-              : "Inspect build"}
-        </button>
-        {inspectionResult && (
-          <div className="inspection-result">
-            <strong>{inspectionResult.builder}</strong>
-            <code>{inspectionResult.commit_sha.slice(0, 12)}</code>
-            <span>{inspectionResult.reason}</span>
-            {inspectionResult.has_mise_config && (
-              <span>
-                mise config detected; builder support will be verified.
-              </span>
-            )}
+        <span className="project-branch">{project.branch}</span>
+      </div>
+      <nav className="project-tabs" aria-label={`${project.name} sections`}>
+        {projectTabs.map((item) => (
+          <button
+            className={tab === item.id ? "active" : undefined}
+            key={item.id}
+            type="button"
+            onClick={() => setTab(item.id)}
+          >
+            {item.label}
+          </button>
+        ))}
+      </nav>
+      <div className="project-tab-content">
+        {tab === "overview" && (
+          <div className="project-overview-grid">
+            <section className="project-surface inspection-surface">
+              <div className="surface-heading">
+                <div>
+                  <strong>Source inspection</strong>
+                  <span>Detect the build plan at the current branch head.</span>
+                </div>
+                <button
+                  className="table-action inspection-action"
+                  type="button"
+                  disabled={
+                    inspection.isPending ||
+                    job.data?.state === "queued" ||
+                    job.data?.state === "running"
+                  }
+                  onClick={() => inspection.mutate()}
+                >
+                  {job.data?.state === "queued"
+                    ? "Inspection queued"
+                    : job.data?.state === "running"
+                      ? "Inspecting…"
+                      : "Inspect source"}
+                </button>
+              </div>
+              {inspectionResult ? (
+                <div className="inspection-result">
+                  <strong>{inspectionResult.builder}</strong>
+                  <code>{inspectionResult.commit_sha.slice(0, 12)}</code>
+                  <span>{inspectionResult.reason}</span>
+                  {inspectionResult.has_mise_config && (
+                    <span>mise configuration detected.</span>
+                  )}
+                </div>
+              ) : (
+                <p className="surface-empty">
+                  No successful inspection is loaded for this project yet.
+                </p>
+              )}
+              {job.data?.state === "failed" && (
+                <p className="inspection-error">
+                  {job.data.last_error ?? "Inspection failed."}
+                </p>
+              )}
+              {inspection.error && (
+                <p className="inspection-error">
+                  {errorMessage(inspection.error)}
+                </p>
+              )}
+            </section>
+            <section className="project-surface project-source-card">
+              <div className="surface-heading">
+                <div>
+                  <strong>Source</strong>
+                  <span>Authoritative repository configuration.</span>
+                </div>
+              </div>
+              <dl>
+                <div>
+                  <dt>Repository</dt>
+                  <dd>{project.repository_url}</dd>
+                </div>
+                <div>
+                  <dt>Branch</dt>
+                  <dd>{project.branch}</dd>
+                </div>
+                <div>
+                  <dt>Project slug</dt>
+                  <dd>{project.slug}</dd>
+                </div>
+              </dl>
+            </section>
           </div>
         )}
-        {job.data?.state === "failed" && (
-          <p className="inspection-error">
-            {job.data.last_error ?? "Inspection failed."}
-          </p>
+        {tab === "deployments" && (
+          <section className="project-surface">
+            <DeploymentPanel projectId={project.id} />
+          </section>
         )}
-        {inspection.error && (
-          <p className="inspection-error">{errorMessage(inspection.error)}</p>
+        {tab === "logs" && (
+          <section className="project-surface">
+            <DeploymentLogsPanel projectId={project.id} />
+          </section>
+        )}
+        {tab === "environment" && (
+          <section className="project-surface">
+            <EnvironmentPanel projectId={project.id} />
+          </section>
+        )}
+        {tab === "domains" && (
+          <section className="project-surface">
+            <DomainPanel projectId={project.id} />
+          </section>
+        )}
+        {tab === "settings" && (
+          <div className="project-settings-grid">
+            <section className="project-surface">
+              <div className="surface-heading">
+                <div>
+                  <strong>Build and runtime</strong>
+                  <span>Builder, paths, port, and health checks.</span>
+                </div>
+              </div>
+              <ServiceConfigForm projectId={project.id} />
+            </section>
+            {project.repository_url.startsWith("ssh://") && (
+              <section className="project-surface">
+                <SshCredentialPanel projectId={project.id} />
+              </section>
+            )}
+            <section className="project-surface">
+              <WebhookPanel projectId={project.id} />
+            </section>
+          </div>
         )}
       </div>
-      <ServiceConfigForm projectId={project.id} />
-      <DeploymentPanel projectId={project.id} />
-      <DomainPanel projectId={project.id} />
-      <EnvironmentPanel projectId={project.id} />
-      {project.repository_url.startsWith("ssh://") && (
-        <SshCredentialPanel projectId={project.id} />
-      )}
-      <WebhookPanel projectId={project.id} />
-    </article>
+    </section>
   );
 }
 

@@ -1245,3 +1245,315 @@ td {
     gap: 1rem;
   }
 }
+
+/* Project workspace */
+.project-list-card {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  gap: 1rem;
+  align-items: center;
+  width: 100%;
+  min-height: 76px;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+.project-list-card:hover {
+  border-color: #52525b;
+  background: #141418;
+}
+.project-list-identity {
+  display: grid;
+  min-width: 0;
+  gap: 0.3rem;
+}
+.project-list-identity strong {
+  font-size: 0.88rem;
+}
+.project-list-identity small {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-branch {
+  padding: 0.3rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  color: var(--muted);
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.63rem;
+}
+.project-readiness {
+  display: inline-flex;
+  gap: 0.4rem;
+  align-items: center;
+  min-width: 7rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+.project-readiness i {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: #71717a;
+}
+.project-readiness.ready i {
+  background: #22c55e;
+}
+.project-open {
+  color: #71717a;
+  font-size: 1rem;
+}
+.project-workspace {
+  min-width: 0;
+}
+.project-back {
+  margin: 0 0 1.2rem;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+.project-back:hover {
+  color: var(--text);
+}
+.project-workspace-heading {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 0.9rem;
+  align-items: center;
+  margin-bottom: 1.5rem;
+}
+.app-content .project-workspace-heading h2 {
+  margin: 0;
+  font-size: 1.45rem;
+  letter-spacing: -0.03em;
+}
+.project-workspace-heading p {
+  overflow: hidden;
+  margin: 0.35rem 0 0;
+  color: var(--muted);
+  font-size: 0.7rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-tabs {
+  display: flex;
+  overflow-x: auto;
+  gap: 1.4rem;
+  border-bottom: 1px solid var(--border);
+}
+.project-tabs button {
+  position: relative;
+  flex: 0 0 auto;
+  min-height: 42px;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.72rem;
+}
+.project-tabs button:hover,
+.project-tabs button.active {
+  color: var(--text);
+}
+.project-tabs button.active::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 2px;
+  background: var(--accent);
+  content: "";
+}
+.project-tab-content {
+  padding-top: 1.5rem;
+}
+.project-overview-grid,
+.project-settings-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+.project-settings-grid {
+  grid-template-columns: 1fr;
+}
+.project-surface {
+  min-width: 0;
+  padding: 1.2rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.surface-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+}
+.surface-heading > div {
+  display: grid;
+  gap: 0.35rem;
+}
+.surface-heading strong {
+  font-size: 0.82rem;
+}
+.surface-heading span,
+.surface-empty {
+  color: var(--muted);
+  font-size: 0.7rem;
+  line-height: 1.5;
+}
+.surface-empty {
+  margin: 0;
+  padding: 1rem;
+  border: 1px dashed var(--border);
+  border-radius: 7px;
+}
+.project-source-card dl {
+  display: grid;
+  gap: 0.9rem;
+  margin: 0;
+}
+.project-source-card dl div {
+  display: grid;
+  gap: 0.3rem;
+}
+.project-source-card dt {
+  color: var(--muted);
+  font-size: 0.62rem;
+  text-transform: uppercase;
+}
+.project-source-card dd {
+  overflow: hidden;
+  margin: 0;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.68rem;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.project-surface .inspection-action {
+  justify-self: auto;
+}
+.project-surface .deployment-panel,
+.project-surface .domain-panel,
+.project-surface .service-config {
+  border: 0;
+  padding: 0;
+}
+.project-surface .service-config .config-toggle {
+  width: auto;
+}
+.project-surface .config-form {
+  margin-top: 1rem;
+}
+.project-surface .domain-panel > strong,
+.project-surface .deployment-heading > strong {
+  font-size: 0.82rem;
+}
+.deployment-logs {
+  min-width: 0;
+}
+.deployment-log-list {
+  display: grid;
+  gap: 0.6rem;
+}
+.deployment-log {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: #0c0c0f;
+}
+.deployment-log summary {
+  display: grid;
+  grid-template-columns: auto auto 1fr auto;
+  gap: 0.8rem;
+  align-items: center;
+  min-height: 46px;
+  padding: 0 0.8rem;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.68rem;
+  list-style: none;
+}
+.deployment-log summary::-webkit-details-marker {
+  display: none;
+}
+.app-content .deployment-log summary code {
+  color: var(--text);
+  font-size: 0.65rem;
+}
+.log-stream {
+  overflow: auto;
+  max-height: 34rem;
+  padding: 0.8rem;
+  border-top: 1px solid var(--border);
+  background: #070709;
+  color: #d4d4d8;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.66rem;
+  line-height: 1.6;
+}
+.log-line {
+  display: grid;
+  grid-template-columns: 5.5rem 4rem minmax(0, 1fr);
+  gap: 0.7rem;
+}
+.log-line time,
+.log-line > span {
+  color: #71717a;
+}
+.log-line.warning > span {
+  color: #f59e0b;
+}
+.log-line.error > span,
+.log-error {
+  color: #f87171;
+}
+.log-line p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+.log-stream pre {
+  overflow: visible;
+  margin: 0.8rem 0 0;
+  padding: 0.8rem;
+  border-top: 1px solid var(--border);
+  color: inherit;
+  font: inherit;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 760px) {
+  .project-list-card {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+  }
+  .project-list-card .project-branch,
+  .project-readiness {
+    display: none;
+  }
+  .project-overview-grid {
+    grid-template-columns: 1fr;
+  }
+  .surface-heading {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .log-line {
+    grid-template-columns: 4rem minmax(0, 1fr);
+  }
+  .log-line > span {
+    display: none;
+  }
+}
