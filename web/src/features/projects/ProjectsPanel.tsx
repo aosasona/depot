@@ -1,11 +1,8 @@
-import { useForm } from "@tanstack/react-form";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery } from "@tanstack/react-query";
 import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
-import { z } from "zod";
 import {
   ApiError,
-  createProject,
   getJobStatus,
   inspectProject,
   listProjects,
@@ -16,21 +13,11 @@ import { DeploymentPanel } from "./DeploymentPanel";
 import { DomainPanel } from "./DomainPanel";
 import { EnvironmentPanel } from "./EnvironmentPanel";
 import { GithubImportPanel } from "./GithubImportPanel";
+import { ProjectIdentityForm } from "./ProjectIdentityForm";
+import { ProjectOverview } from "./ProjectOverview";
 import { ServiceConfigForm } from "./ServiceConfigForm";
 import { SshCredentialPanel } from "./SshCredentialPanel";
 import { WebhookPanel } from "./WebhookPanel";
-
-const projectSchema = z.object({
-  slug: z
-    .string()
-    .regex(
-      /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/,
-      "Use lowercase letters, numbers, and hyphens.",
-    ),
-  name: z.string().trim().min(1).max(100),
-  repository_url: z.url("Enter a valid HTTPS or SSH repository URL."),
-  branch: z.string().trim().min(1).max(255),
-});
 
 /** Renders project creation, live project state, and intentional empty feedback. */
 export function ProjectsPanel({
@@ -70,10 +57,6 @@ export function ProjectsPanel({
         </span>
       </div>
       <GithubImportPanel />
-      <details className="manual-project">
-        <summary>Advanced: add a repository URL manually</summary>
-        <NewProjectForm />
-      </details>
       {projects.isPending && <p className="panel-message">Loading projects…</p>}
       {projects.isError && (
         <p className="notice danger">Projects are unavailable.</p>
@@ -102,91 +85,6 @@ export function ProjectsPanel({
         ))}
       </div>
     </section>
-  );
-}
-
-/** Collects the minimal Git source details needed for a durable project record. */
-function NewProjectForm() {
-  const queryClient = useQueryClient();
-  const [error, setError] = useState<string>();
-  const mutation = useMutation({ mutationFn: createProject });
-  const form = useForm({
-    defaultValues: { slug: "", name: "", repository_url: "", branch: "main" },
-    onSubmit: async ({ value, formApi }) => {
-      setError(undefined);
-      const parsed = projectSchema.safeParse(value);
-      if (!parsed.success) return setError(parsed.error.issues[0]?.message);
-      try {
-        await mutation.mutateAsync(parsed.data);
-        formApi.reset();
-        await queryClient.invalidateQueries({ queryKey: ["projects"] });
-      } catch (reason) {
-        setError(errorMessage(reason));
-      }
-    },
-  });
-  return (
-    <form
-      className="project-form"
-      onSubmit={(event) => {
-        event.preventDefault();
-        void form.handleSubmit();
-      }}
-    >
-      <form.Field name="name">
-        {(field) => (
-          <input
-            aria-label="Project name"
-            placeholder="Project name"
-            value={field.state.value}
-            onChange={(event) => field.handleChange(event.target.value)}
-          />
-        )}
-      </form.Field>
-      <form.Field name="slug">
-        {(field) => (
-          <input
-            aria-label="Project slug"
-            placeholder="project-slug"
-            value={field.state.value}
-            onChange={(event) => field.handleChange(event.target.value)}
-          />
-        )}
-      </form.Field>
-      <form.Field name="repository_url">
-        {(field) => (
-          <input
-            aria-label="Repository URL"
-            placeholder="https://github.com/you/project.git"
-            type="url"
-            value={field.state.value}
-            onChange={(event) => field.handleChange(event.target.value)}
-          />
-        )}
-      </form.Field>
-      <form.Field name="branch">
-        {(field) => (
-          <input
-            aria-label="Git branch"
-            placeholder="main"
-            value={field.state.value}
-            onChange={(event) => field.handleChange(event.target.value)}
-          />
-        )}
-      </form.Field>
-      <button
-        className="primary-action"
-        type="submit"
-        disabled={mutation.isPending}
-      >
-        Create project →
-      </button>
-      {error && (
-        <p className="notice danger" role="alert">
-          {error}
-        </p>
-      )}
-    </form>
   );
 }
 
@@ -295,7 +193,8 @@ function ProjectWorkspace({
       </nav>
       <div className="project-tab-content">
         {tab === "overview" && (
-          <div className="project-overview-grid">
+          <div className="overview-stack">
+            <ProjectOverview project={project} />
             <section className="project-surface inspection-surface">
               <div className="surface-heading">
                 <div>
@@ -344,28 +243,6 @@ function ProjectWorkspace({
                 </p>
               )}
             </section>
-            <section className="project-surface project-source-card">
-              <div className="surface-heading">
-                <div>
-                  <strong>Source</strong>
-                  <span>Authoritative repository configuration.</span>
-                </div>
-              </div>
-              <dl>
-                <div>
-                  <dt>Repository</dt>
-                  <dd>{project.repository_url}</dd>
-                </div>
-                <div>
-                  <dt>Branch</dt>
-                  <dd>{project.branch}</dd>
-                </div>
-                <div>
-                  <dt>Project slug</dt>
-                  <dd>{project.slug}</dd>
-                </div>
-              </dl>
-            </section>
           </div>
         )}
         {tab === "deployments" && (
@@ -390,6 +267,15 @@ function ProjectWorkspace({
         )}
         {tab === "settings" && (
           <div className="project-settings-grid">
+            <section className="project-surface">
+              <div className="surface-heading">
+                <div>
+                  <strong>Project details</strong>
+                  <span>Name, source repository, and tracked branch.</span>
+                </div>
+              </div>
+              <ProjectIdentityForm project={project} />
+            </section>
             <section className="project-surface">
               <div className="surface-heading">
                 <div>

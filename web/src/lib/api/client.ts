@@ -297,6 +297,37 @@ export function createProject(input: {
   });
 }
 
+/** Updates mutable source metadata for an existing project. */
+export function updateProject(
+  projectId: string,
+  input: { name: string; repository_url: string; branch: string },
+) {
+  return request(`/api/v1/projects/${projectId}`, projectSchema, {
+    method: "PATCH",
+    headers: csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+/** Permanently removes a project after server-side dependency checks. */
+export async function deleteProject(projectId: string) {
+  const response = await fetch(`/api/v1/projects/${projectId}`, {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: csrfHeaders(),
+  });
+  if (!response.ok) {
+    const body: unknown = await response.json().catch(() => undefined);
+    const parsed = errorSchema.safeParse(body);
+    throw parsed.success
+      ? new ApiError(parsed.data.error.code, parsed.data.error.message)
+      : new ApiError(
+          "project_delete_failed",
+          "Depot could not remove this project.",
+        );
+  }
+}
+
 /** Returns configured GitHub App state and installations linked to Depot. */
 export function getGithubIntegration() {
   return request("/api/v1/integrations/github", githubIntegrationSchema);

@@ -1,36 +1,127 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
+  ApiError,
+  createProject,
   type GithubRepository,
   getGithubIntegration,
   importGithubProject,
   linkGithubInstallation,
   listGithubRepositories,
+  type Project,
+  updateServiceConfig,
 } from "../../lib/api/client";
 
-/** Connects a GitHub App installation and imports server-verified repositories. */
+type Source =
+  | { kind: "github"; repository: GithubRepository }
+  | { kind: "manual" };
+type ConfigureValues = {
+  name: string;
+  slug: string;
+  branch: string;
+  repositoryUrl: string;
+  projectKind: "auto" | "service" | "static";
+  builder: "auto" | "dockerfile" | "railpack";
+  staticOutput: string;
+  port: string;
+};
+const initialValues: ConfigureValues = {
+  name: "",
+  slug: "",
+  branch: "main",
+  repositoryUrl: "",
+  projectKind: "auto",
+  builder: "auto",
+  staticOutput: "dist",
+  port: "",
+};
+
+/** Launches a guided GitHub-first project creation flow. */
 export function GithubImportPanel() {
-  const queryClient = useQueryClient();
+  const dialog = useRef<HTMLDialogElement>(null);
+  const [open, setOpen] = useState(false);
+  const integration = useQuery({
+    queryKey: ["github-integration"],
+    queryFn: getGithubIntegration,
+  });
+  useEffect(() => {
+    if (new URLSearchParams(window.location.search).has("installation_id"))
+      setOpen(true);
+  }, []);
+  useEffect(() => {
+    if (open && !dialog.current?.open) dialog.current?.showModal();
+    if (!open && dialog.current?.open) dialog.current.close();
+  }, [open]);
+  return (
+    <>
+      <div className="new-project-banner">
+        <div>
+          <span className="eyebrow">NEW DEPLOYMENT</span>
+          <strong>Ship from a repository</strong>
+          <p>
+            Connect GitHub or provide a Git URL. Depot detects the build and
+            keeps future pushes connected.
+          </p>
+        </div>
+        <button
+          className="primary-action"
+          type="button"
+          onClick={() => setOpen(true)}
+        >
+          New project →
+        </button>
+      </div>
+      <dialog
+        ref={dialog}
+        className="project-wizard"
+        onClose={() => setOpen(false)}
+        onCancel={() => setOpen(false)}
+      >
+        {open && (
+          <ProjectWizard
+            configured={integration.data?.configured ?? false}
+            installUrl={integration.data?.install_url ?? null}
+            onClose={() => setOpen(false)}
+          />
+        )}
+      </dialog>
+    </>
+  );
+}
+
+/** Coordinates source selection and configuration without hiding provider failures. */
+function ProjectWizard({
+  configured,
+  installUrl,
+  onClose,
+}: {
+  configured: boolean;
+  installUrl: string | null;
+  onClose: () => void;
+}) {
+  const client = useQueryClient();
   const integration = useQuery({
     queryKey: ["github-integration"],
     queryFn: getGithubIntegration,
   });
   const [installationId, setInstallationId] = useState<number>();
+  const [source, setSource] = useState<Source>();
+  const [values, setValues] = useState<ConfigureValues>(initialValues);
   const [search, setSearch] = useState("");
   const [message, setMessage] = useState<string>();
   const linkedCallback = useRef(false);
   const link = useMutation({ mutationFn: linkGithubInstallation });
+  const create = useMutation({ mutationFn: createProject });
+  const importProject = useMutation({ mutationFn: importGithubProject });
 
   useEffect(() => {
     const first = integration.data?.installations[0]?.installation_id;
     if (!installationId && first) setInstallationId(first);
   }, [installationId, integration.data]);
-
   useEffect(() => {
-    if (!integration.data?.configured || linkedCallback.current) return;
+    if (!configured || linkedCallback.current) return;
     const params = new URLSearchParams(window.location.search);
-    const rawId = params.get("installation_id");
-    const callbackId = rawId ? Number(rawId) : 0;
+    const callbackId = Number(params.get("installation_id"));
     if (!Number.isSafeInteger(callbackId) || callbackId <= 0) return;
     linkedCallback.current = true;
     setMessage("Verifying GitHub installation…");
@@ -38,145 +129,331 @@ export function GithubImportPanel() {
       async () => {
         params.delete("installation_id");
         params.delete("setup_action");
-        const query = params.toString();
         window.history.replaceState(
           {},
           "",
-          `${window.location.pathname}${query ? `?${query}` : ""}`,
+          `${window.location.pathname}${params.size ? `?${params}` : ""}`,
         );
         setInstallationId(callbackId);
-        setMessage("GitHub installation connected.");
-        await queryClient.invalidateQueries({
-          queryKey: ["github-integration"],
-        });
+        setMessage(undefined);
+        await client.invalidateQueries({ queryKey: ["github-integration"] });
       },
       (reason: unknown) => setMessage(errorMessage(reason)),
     );
-  }, [integration.data?.configured, link, queryClient]);
+  }, [client, configured, link]);
 
   const repositories = useQuery({
     queryKey: ["github-repositories", installationId],
     queryFn: () => listGithubRepositories(installationId ?? 0),
-    enabled: Boolean(installationId),
+    enabled: Boolean(installationId) && !source,
   });
   const visible = useMemo(() => {
     const needle = search.trim().toLowerCase();
-    return repositories.data?.filter((repository) =>
-      repository.full_name.toLowerCase().includes(needle),
+    return repositories.data?.filter((repo) =>
+      repo.full_name.toLowerCase().includes(needle),
     );
   }, [repositories.data, search]);
-  const importProject = useMutation({ mutationFn: importGithubProject });
 
-  async function importRepository(repository: GithubRepository) {
-    if (!installationId) return;
+  /** Selects a verified GitHub repository and seeds editable defaults. */
+  function chooseRepository(repository: GithubRepository) {
+    setSource({ kind: "github", repository });
+    setValues({
+      ...initialValues,
+      name: repository.name,
+      slug: projectSlug(repository.name),
+      branch: repository.default_branch,
+      repositoryUrl: repository.clone_url,
+    });
+  }
+
+  /** Creates the project and immediately persists its deployment configuration. */
+  async function finish() {
     setMessage(undefined);
+    if (!values.name.trim() || !validSlug(values.slug) || !values.branch.trim())
+      return setMessage("Complete the name, valid slug, and branch.");
+    if (
+      !source ||
+      (source.kind === "manual" &&
+        !/^https?:\/\/|^ssh:\/\//.test(values.repositoryUrl))
+    )
+      return setMessage("Enter a valid HTTPS or SSH repository URL.");
+    if (
+      values.projectKind === "service" &&
+      (!/^\d+$/.test(values.port) || Number(values.port) > 65535)
+    )
+      return setMessage("Services need a port between 1 and 65535.");
     try {
-      await importProject.mutateAsync({
-        installation_id: installationId,
-        repository_id: repository.id,
-        slug: projectSlug(repository.name),
-        name: repository.name,
+      let project: Project;
+      if (source.kind === "github") {
+        if (!installationId) throw new Error("Choose a GitHub installation.");
+        project = await importProject.mutateAsync({
+          installation_id: installationId,
+          repository_id: source.repository.id,
+          name: values.name.trim(),
+          slug: values.slug,
+          branch: values.branch.trim(),
+        });
+      } else {
+        project = await create.mutateAsync({
+          name: values.name.trim(),
+          slug: values.slug,
+          branch: values.branch.trim(),
+          repository_url: values.repositoryUrl.trim(),
+        });
+      }
+      await updateServiceConfig(project.id, {
+        project_kind: values.projectKind,
+        builder: values.builder,
+        context_path: ".",
+        dockerfile_path: "Dockerfile",
+        static_output_dir:
+          values.projectKind === "static"
+            ? values.staticOutput || "dist"
+            : null,
+        exposed_port:
+          values.projectKind === "service" ? Number(values.port) : null,
+        healthcheck_path: null,
       });
-      setMessage(`${repository.full_name} was added to Depot.`);
-      await queryClient.invalidateQueries({ queryKey: ["projects"] });
+      await client.invalidateQueries({ queryKey: ["projects"] });
+      onClose();
     } catch (reason) {
       setMessage(errorMessage(reason));
     }
   }
 
-  if (integration.isPending)
-    return <p className="panel-message">Loading GitHub…</p>;
-  if (integration.isError)
-    return <p className="notice danger">GitHub status is unavailable.</p>;
-  if (!integration.data.configured) {
-    return (
-      <div className="github-import muted-integration">
-        <strong>GitHub App is not configured</strong>
-        <span>
-          Add the GitHub App settings on the Depot host to browse repositories
-          here.
-        </span>
-      </div>
-    );
-  }
-
   return (
-    <div className="github-import">
-      <div className="github-import-heading">
+    <div className="wizard-shell">
+      <header>
         <div>
-          <strong>Import from GitHub</strong>
-          <span>
-            Choose a repository—Depot handles the connection and deploy hook.
-          </span>
+          <span className="eyebrow">CREATE PROJECT</span>
+          <h2>{source ? "Configure deployment" : "Choose a source"}</h2>
         </div>
-        {integration.data.install_url && (
-          <a
-            className="table-action github-connect"
-            href={integration.data.install_url}
-          >
-            Connect GitHub
-          </a>
-        )}
-      </div>
-      {integration.data.installations.length > 0 && (
-        <div className="github-controls">
-          <select
-            aria-label="GitHub account"
-            value={installationId ?? ""}
-            onChange={(event) => setInstallationId(Number(event.target.value))}
-          >
-            {integration.data.installations.map((installation) => (
-              <option
-                key={installation.installation_id}
-                value={installation.installation_id}
+        <button
+          className="icon-action"
+          type="button"
+          aria-label="Close project wizard"
+          onClick={onClose}
+        >
+          ×
+        </button>
+      </header>
+      {!source ? (
+        <div className="wizard-source">
+          <div className="source-toolbar">
+            <div className="source-tabs">
+              <button className="active" type="button">
+                GitHub
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setSource({ kind: "manual" });
+                  setValues(initialValues);
+                }}
               >
-                {installation.account_login}
-              </option>
-            ))}
-          </select>
-          <input
-            aria-label="Search GitHub repositories"
-            placeholder="Search repositories"
-            value={search}
-            onChange={(event) => setSearch(event.target.value)}
-          />
-        </div>
-      )}
-      {repositories.isPending && installationId && (
-        <p className="panel-message">Loading repositories…</p>
-      )}
-      {repositories.isError && (
-        <p className="notice danger">Repositories could not be loaded.</p>
-      )}
-      <div className="github-repositories">
-        {visible?.map((repository) => (
-          <div className="github-repository" key={repository.id}>
-            <div>
-              <strong>{repository.full_name}</strong>
+                Git URL
+              </button>
+            </div>
+            {installUrl && (
+              <a className="table-action" href={installUrl}>
+                Connect account
+              </a>
+            )}
+          </div>
+          {!configured && (
+            <div className="empty-state">
+              <strong>GitHub App is not configured.</strong>
               <span>
-                {repository.private ? "Private" : "Public"} ·{" "}
-                {repository.default_branch}
+                Use Git URL now, or configure the GitHub App on the Depot host.
               </span>
             </div>
-            <button
-              className="table-action"
-              type="button"
-              disabled={repository.archived || importProject.isPending}
-              onClick={() => void importRepository(repository)}
-            >
-              {repository.archived ? "Archived" : "Create project"}
-            </button>
+          )}
+          {integration.data?.installations.length ? (
+            <div className="github-controls">
+              <select
+                aria-label="GitHub account"
+                value={installationId ?? ""}
+                onChange={(event) =>
+                  setInstallationId(Number(event.target.value))
+                }
+              >
+                {integration.data.installations.map((item) => (
+                  <option
+                    key={item.installation_id}
+                    value={item.installation_id}
+                  >
+                    {item.account_login}
+                  </option>
+                ))}
+              </select>
+              <input
+                aria-label="Search repositories"
+                placeholder="Search repositories…"
+                value={search}
+                onChange={(event) => setSearch(event.target.value)}
+              />
+            </div>
+          ) : (
+            configured && (
+              <div className="empty-state">
+                <strong>No GitHub account connected.</strong>
+                <span>Connect the GitHub App to browse repositories.</span>
+              </div>
+            )
+          )}
+          <div className="wizard-repositories">
+            {repositories.isPending && installationId && (
+              <p className="panel-message">Loading repositories…</p>
+            )}
+            {visible?.map((repository) => (
+              <button
+                type="button"
+                key={repository.id}
+                disabled={repository.archived}
+                onClick={() => chooseRepository(repository)}
+              >
+                <span>
+                  <strong>{repository.full_name}</strong>
+                  <small>
+                    {repository.private ? "Private" : "Public"} ·{" "}
+                    {repository.default_branch}
+                  </small>
+                </span>
+                <i aria-hidden="true">→</i>
+              </button>
+            ))}
           </div>
-        ))}
-      </div>
+        </div>
+      ) : (
+        <div className="wizard-configure">
+          <button
+            className="project-back"
+            type="button"
+            onClick={() => setSource(undefined)}
+          >
+            ← Change source
+          </button>
+          <div className="wizard-form-grid">
+            <label>
+              Project name
+              <input
+                value={values.name}
+                onChange={(event) =>
+                  setValues({ ...values, name: event.target.value })
+                }
+              />
+            </label>
+            <label>
+              Project slug
+              <input
+                value={values.slug}
+                onChange={(event) =>
+                  setValues({
+                    ...values,
+                    slug: projectSlug(event.target.value),
+                  })
+                }
+              />
+            </label>
+            {source.kind === "manual" && (
+              <label className="wide">
+                Repository URL
+                <input
+                  type="url"
+                  placeholder="https://github.com/you/project.git"
+                  value={values.repositoryUrl}
+                  onChange={(event) =>
+                    setValues({ ...values, repositoryUrl: event.target.value })
+                  }
+                />
+              </label>
+            )}
+            <label>
+              Branch
+              <input
+                value={values.branch}
+                onChange={(event) =>
+                  setValues({ ...values, branch: event.target.value })
+                }
+              />
+            </label>
+            <label>
+              Project type
+              <select
+                value={values.projectKind}
+                onChange={(event) =>
+                  setValues({
+                    ...values,
+                    projectKind: event.target
+                      .value as ConfigureValues["projectKind"],
+                  })
+                }
+              >
+                <option value="auto">Auto-detect</option>
+                <option value="service">Web service</option>
+                <option value="static">Static site</option>
+              </select>
+            </label>
+            <label>
+              Builder
+              <select
+                value={values.builder}
+                onChange={(event) =>
+                  setValues({
+                    ...values,
+                    builder: event.target.value as ConfigureValues["builder"],
+                  })
+                }
+              >
+                <option value="auto">Auto-detect</option>
+                <option value="dockerfile">Dockerfile</option>
+                <option value="railpack">Railpack</option>
+              </select>
+            </label>
+            {values.projectKind === "static" && (
+              <label>
+                Output directory
+                <input
+                  value={values.staticOutput}
+                  onChange={(event) =>
+                    setValues({ ...values, staticOutput: event.target.value })
+                  }
+                />
+              </label>
+            )}
+            {values.projectKind === "service" && (
+              <label>
+                Exposed port
+                <input
+                  type="number"
+                  min="1"
+                  max="65535"
+                  placeholder="3000"
+                  value={values.port}
+                  onChange={(event) =>
+                    setValues({ ...values, port: event.target.value })
+                  }
+                />
+              </label>
+            )}
+          </div>
+          <footer>
+            <span>Settings remain editable after creation.</span>
+            <button
+              className="primary-action"
+              type="button"
+              disabled={create.isPending || importProject.isPending}
+              onClick={() => void finish()}
+            >
+              {create.isPending || importProject.isPending
+                ? "Creating…"
+                : "Create project →"}
+            </button>
+          </footer>
+        </div>
+      )}
       {message && (
-        <p
-          className={
-            link.isError || importProject.isError
-              ? "notice danger"
-              : "notice success"
-          }
-        >
+        <p className="notice danger" role="alert">
           {message}
         </p>
       )}
@@ -184,6 +461,7 @@ export function GithubImportPanel() {
   );
 }
 
+/** Converts an arbitrary repository name to Depot's stable slug format. */
 function projectSlug(name: string) {
   const slug = name
     .toLowerCase()
@@ -192,9 +470,13 @@ function projectSlug(name: string) {
     .slice(0, 63);
   return slug.length >= 2 ? slug : `${slug || "app"}-project`;
 }
-
+/** Checks the backend-compatible project slug shape. */
+function validSlug(slug: string) {
+  return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug);
+}
+/** Converts provider and validation failures into safe dialog feedback. */
 function errorMessage(reason: unknown) {
-  return reason instanceof Error
+  return reason instanceof ApiError || reason instanceof Error
     ? reason.message
-    : "The GitHub request failed.";
+    : "The project could not be created.";
 }
