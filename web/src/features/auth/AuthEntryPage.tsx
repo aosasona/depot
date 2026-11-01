@@ -278,6 +278,7 @@ function LabeledInput({
 
 /** Shows the authenticated identity while the operational dashboard is built. */
 function Dashboard({ user }: { user: User }) {
+  const [view, setView] = useState<"projects" | "team">("projects");
   const queryClient = useQueryClient();
   const mutation = useMutation({
     mutationFn: logout,
@@ -285,34 +286,104 @@ function Dashboard({ user }: { user: User }) {
       queryClient.invalidateQueries({ queryKey: ["auth", "current-user"] }),
   });
   return (
-    <main className="shell">
-      <header className="masthead">
-        <span className="brand">
-          DEPOT<span>_</span>
-        </span>
-        <button
-          className="text-action"
-          onClick={() => mutation.mutate()}
-          type="button"
-        >
-          Sign out
-        </button>
-      </header>
-      <section className="hero">
-        <p className="eyebrow">CONTROL PLANE ONLINE</p>
-        <h1>Ready to deploy.</h1>
-        <p className="lede">
-          Signed in as {user.email} / {user.role}
-        </p>
-        <div className="status-panel">
-          <span className="status-dot" />
-          <span>Authentication operational</span>
-          <code>milestone/a</code>
+    <main className="app-shell">
+      <aside className="app-sidebar">
+        <div className="sidebar-brand">
+          <span className="brand-mark">D</span>
+          <span className="brand-word">Depot</span>
         </div>
-      </section>
-      <ProjectsPanel />
-      {user.role === "admin" && <UsersPanel />}
+        <div className="workspace-switcher">
+          <span className="workspace-avatar">P</span>
+          <span>
+            <strong>Personal workspace</strong>
+            <small>Self-hosted</small>
+          </span>
+        </div>
+        <nav className="app-navigation" aria-label="Workspace">
+          <button
+            className={view === "projects" ? "active" : undefined}
+            type="button"
+            onClick={() => setView("projects")}
+          >
+            <NavigationIcon name="projects" />
+            Projects
+          </button>
+          {user.role === "admin" && (
+            <button
+              className={view === "team" ? "active" : undefined}
+              type="button"
+              onClick={() => setView("team")}
+            >
+              <NavigationIcon name="team" />
+              Team
+            </button>
+          )}
+        </nav>
+        <div className="sidebar-footer">
+          <span className="system-state">
+            <i aria-hidden="true" /> All systems operational
+          </span>
+          <span className="sidebar-version">Depot v0.2.0</span>
+        </div>
+      </aside>
+      <div className="app-workspace">
+        <header className="app-header">
+          <div className="breadcrumb">
+            <span>Personal workspace</span>
+            <b>/</b>
+            <strong>{view === "projects" ? "Projects" : "Team"}</strong>
+          </div>
+          <div className="account-menu">
+            <span className="account-avatar">
+              {user.email.slice(0, 1).toUpperCase()}
+            </span>
+            <span className="account-copy">
+              <strong>{user.email}</strong>
+              <small>{user.role}</small>
+            </span>
+            <button
+              className="quiet-button"
+              onClick={() => mutation.mutate()}
+              type="button"
+            >
+              Sign out
+            </button>
+          </div>
+        </header>
+        <div className="app-content">
+          <section className="page-intro">
+            <div>
+              <p className="eyebrow">
+                {view === "projects" ? "Deployments" : "Access"}
+              </p>
+              <h1>{view === "projects" ? "Projects" : "Team"}</h1>
+              <p>
+                {view === "projects"
+                  ? "Connect source, configure builds, and promote releases from one place."
+                  : "Manage the people who can access this Depot instance."}
+              </p>
+            </div>
+            <span className="control-plane-status">
+              <i aria-hidden="true" /> Control plane online
+            </span>
+          </section>
+          {view === "projects" ? <ProjectsPanel /> : <UsersPanel />}
+        </div>
+      </div>
     </main>
+  );
+}
+
+/** Small dependency-free navigation glyphs with currentColor styling. */
+function NavigationIcon({ name }: { name: "projects" | "team" }) {
+  return name === "projects" ? (
+    <svg aria-hidden="true" viewBox="0 0 20 20">
+      <path d="M3.5 4.5h5v5h-5zM11.5 4.5h5v5h-5zM3.5 12.5h5v3h-5zM11.5 12.5h5v3h-5z" />
+    </svg>
+  ) : (
+    <svg aria-hidden="true" viewBox="0 0 20 20">
+      <path d="M7.5 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM2.5 16.5v-2a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v2M13 8.5a2.5 2.5 0 1 0 0-5M13.5 11.5h1a3 3 0 0 1 3 3v2" />
+    </svg>
   );
 }
 

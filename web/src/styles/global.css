@@ -851,3 +851,397 @@ td {
     scroll-behavior: auto;
   }
 }
+
+/* Product shell: the operational dashboard deliberately overrides the early
+   prototype's full-width marketing layout while authentication keeps it. */
+.app-shell {
+  display: grid;
+  grid-template-columns: 248px minmax(0, 1fr);
+  min-height: 100vh;
+  background: #09090b;
+  color: #f4f4f5;
+  --bg: #09090b;
+  --surface: #111114;
+  --surface-raised: #18181b;
+  --border: #27272a;
+  --text: #f4f4f5;
+  --muted: #a1a1aa;
+  --accent: #8b5cf6;
+  --accent-foreground: #fff;
+}
+.app-sidebar {
+  position: sticky;
+  top: 0;
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: 1rem;
+  border-right: 1px solid var(--border);
+  background: #0c0c0f;
+}
+.sidebar-brand {
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
+  height: 44px;
+  padding: 0 0.4rem;
+}
+.brand-mark,
+.workspace-avatar,
+.account-avatar {
+  display: grid;
+  flex: 0 0 auto;
+  place-items: center;
+  background: var(--accent);
+  color: #fff;
+  font-weight: 750;
+}
+.brand-mark {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  box-shadow: 0 0 24px rgb(139 92 246 / 25%);
+}
+.brand-word {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+.workspace-switcher {
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
+  margin: 1rem 0 1.4rem;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--surface);
+}
+.workspace-avatar {
+  width: 30px;
+  height: 30px;
+  border-radius: 6px;
+  background: #27272a;
+  font-size: 0.75rem;
+}
+.workspace-switcher > span:last-child,
+.account-copy {
+  display: grid;
+  min-width: 0;
+}
+.workspace-switcher strong,
+.account-copy strong {
+  overflow: hidden;
+  font-size: 0.75rem;
+  font-weight: 600;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-switcher small,
+.account-copy small {
+  margin-top: 0.18rem;
+  color: var(--muted);
+  font-size: 0.66rem;
+  text-transform: capitalize;
+}
+.app-navigation {
+  display: grid;
+  gap: 0.25rem;
+}
+.app-navigation button {
+  display: flex;
+  gap: 0.7rem;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 0.7rem;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.78rem;
+  font-weight: 550;
+  text-align: left;
+}
+.app-navigation button:hover,
+.app-navigation button.active {
+  background: #1b1b20;
+  color: var(--text);
+}
+.app-navigation button.active {
+  box-shadow: inset 2px 0 var(--accent);
+}
+.app-navigation svg {
+  width: 17px;
+  height: 17px;
+  fill: none;
+  stroke: currentColor;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  stroke-width: 1.35;
+}
+.sidebar-footer {
+  display: grid;
+  gap: 0.45rem;
+  margin-top: auto;
+  padding: 0.8rem 0.65rem 0.2rem;
+  color: var(--muted);
+  font-size: 0.65rem;
+}
+.system-state,
+.control-plane-status {
+  display: inline-flex;
+  gap: 0.45rem;
+  align-items: center;
+}
+.system-state i,
+.control-plane-status i {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #22c55e;
+  box-shadow: 0 0 10px rgb(34 197 94 / 45%);
+}
+.sidebar-version {
+  color: #52525b;
+}
+.app-workspace {
+  min-width: 0;
+}
+.app-header {
+  position: sticky;
+  top: 0;
+  z-index: 10;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  min-height: 64px;
+  padding: 0 2rem;
+  border-bottom: 1px solid var(--border);
+  background: rgb(9 9 11 / 88%);
+  backdrop-filter: blur(16px);
+}
+.breadcrumb {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  font-size: 0.75rem;
+}
+.breadcrumb span,
+.breadcrumb b {
+  color: #71717a;
+  font-weight: 400;
+}
+.breadcrumb strong {
+  font-weight: 600;
+}
+.account-menu {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+.account-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 50%;
+  font-size: 0.7rem;
+}
+.account-copy {
+  width: min(13rem, 22vw);
+}
+.quiet-button {
+  min-height: 32px;
+  margin-left: 0.35rem;
+  padding: 0 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--muted);
+  cursor: pointer;
+  font-size: 0.7rem;
+}
+.quiet-button:hover {
+  border-color: #52525b;
+  color: var(--text);
+}
+.app-content {
+  width: min(1180px, calc(100% - 4rem));
+  margin: 0 auto;
+  padding: 3rem 0 6rem;
+}
+.page-intro {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  margin-bottom: 2rem;
+}
+.page-intro .eyebrow {
+  margin: 0 0 0.55rem;
+  color: #a78bfa;
+  font-size: 0.65rem;
+}
+.page-intro h1 {
+  margin: 0;
+  font-size: clamp(2rem, 4vw, 3rem);
+  line-height: 1;
+  letter-spacing: -0.045em;
+}
+.page-intro p:last-child {
+  margin: 0.8rem 0 0;
+  color: var(--muted);
+  font-size: 0.85rem;
+}
+.control-plane-status {
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+.app-content .projects-panel,
+.app-content .users-panel {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  background: transparent;
+}
+.app-content .section-heading {
+  align-items: center;
+  margin-bottom: 1rem;
+  padding: 0;
+  border: 0;
+}
+.app-content .section-heading .eyebrow {
+  display: none;
+}
+.app-content .section-heading h2 {
+  margin: 0;
+  font-size: 1rem;
+  letter-spacing: -0.01em;
+}
+.app-content .count-block {
+  padding: 0;
+  background: transparent;
+  color: var(--muted);
+  font-size: 0.65rem;
+  font-weight: 500;
+}
+.app-content .github-import,
+.app-content .manual-project,
+.app-content .create-user-grid,
+.app-content .table-scroll {
+  overflow: hidden;
+  margin-bottom: 1rem;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.app-content .github-import > * {
+  background: var(--surface);
+}
+.app-content .github-import-heading,
+.app-content .github-controls,
+.app-content .github-repository {
+  padding: 1rem 1.1rem;
+}
+.app-content .github-connect,
+.app-content .table-action,
+.app-content .primary-action {
+  border-radius: 6px;
+  text-transform: none;
+}
+.app-content .github-connect {
+  border-color: #6d5bd0;
+  background: #6d5bd0;
+  color: #fff;
+}
+.app-content .manual-project {
+  border-bottom: 1px solid var(--border);
+}
+.app-content .project-form {
+  border-top: 1px solid var(--border);
+  border-bottom: 0;
+}
+.app-content .project-grid {
+  grid-template-columns: 1fr;
+  gap: 0.8rem;
+}
+.app-content .project-card {
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--surface);
+}
+.app-content .project-card:hover {
+  border-color: #3f3f46;
+  background: #131317;
+}
+.app-content .project-index {
+  border-radius: 7px;
+  background: #29252f;
+  color: #c4b5fd;
+}
+.app-content .inspection-result,
+.app-content .config-form,
+.app-content .deployment-row,
+.app-content .domain-row,
+.app-content .credential-form textarea,
+.app-content .environment-form input:not([type="checkbox"]) {
+  border-radius: 6px;
+  background: var(--surface-raised);
+}
+.app-content input,
+.app-content select {
+  border-radius: 6px;
+}
+.app-content .primary-action {
+  background: var(--accent);
+  font-weight: 650;
+}
+.app-content .empty-state {
+  border: 1px dashed #3f3f46;
+  border-radius: 10px;
+  background: var(--surface);
+}
+
+@media (max-width: 800px) {
+  .app-shell {
+    grid-template-columns: 1fr;
+  }
+  .app-sidebar {
+    position: static;
+    display: grid;
+    grid-template-columns: auto 1fr;
+    height: auto;
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .workspace-switcher,
+  .sidebar-footer {
+    display: none;
+  }
+  .app-navigation {
+    display: flex;
+    justify-content: flex-end;
+  }
+  .app-header {
+    position: static;
+    padding: 0 1rem;
+  }
+  .breadcrumb,
+  .account-copy {
+    display: none;
+  }
+  .app-header {
+    justify-content: flex-end;
+  }
+  .app-content {
+    width: min(100% - 2rem, 1180px);
+    padding-top: 2rem;
+  }
+  .page-intro {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 1rem;
+  }
+}

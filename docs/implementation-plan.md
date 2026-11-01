@@ -12,6 +12,16 @@ vertical slice kept working as each capability is added.
 4. Verify migrations, security regressions, UI checks, workspace tests, and
    release packaging before publishing the phase.
 
+## Next phase — dashboard product experience
+
+1. Replace the prototype hero and stacked panels with a persistent product
+   shell, workspace navigation, and focused Projects and Team surfaces.
+2. Introduce project-detail navigation for overview, deployments, logs,
+   environment, domains, and settings.
+3. Add deployment logs where work is initiated and a connected-service canvas
+   for multi-service applications.
+4. Add repository-aware templates for common applications and dependencies.
+
 ## Milestone A — foundation and authenticated product shell
 
 1. Create the Rust workspace, frontend workspace, quality tooling, and CI.
