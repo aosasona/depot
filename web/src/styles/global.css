@@ -633,6 +633,9 @@ h1 {
   text-overflow: ellipsis;
   text-transform: lowercase;
 }
+.environment-panel .domain-row code {
+  text-transform: none;
+}
 .deployment-status.active {
   border-color: #8edb91;
   color: #8edb91;
