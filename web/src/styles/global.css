@@ -2279,8 +2279,8 @@ td {
   align-items: center;
   justify-content: space-between;
   gap: 1.5rem;
-  min-height: 96px;
-  padding: 1rem 1.2rem;
+  min-height: 88px;
+  padding: 1rem 1.15rem;
   border: 1px solid var(--border);
   border-left: 3px solid var(--accent);
   background: var(--surface);
@@ -2291,55 +2291,67 @@ td {
 }
 .new-project-banner strong {
   font-family: var(--display-font);
-  font-size: 1.25rem;
-  letter-spacing: -0.035em;
+  font-size: 1.1rem;
+  font-weight: 700;
+  letter-spacing: -0.025em;
 }
 .new-project-banner p {
   color: var(--muted);
   margin: 0;
   max-width: 42rem;
-  font-size: 0.78rem;
+  font-size: 0.76rem;
+  line-height: 1.45;
 }
 .new-project-banner .primary-action {
   width: auto;
-  min-width: 9.5rem;
+  min-width: 9rem;
+  min-height: 40px;
   margin: 0;
   padding: 0 1rem;
 }
 .project-wizard {
-  width: min(760px, calc(100vw - 2rem));
-  max-height: min(800px, calc(100vh - 2rem));
+  width: min(880px, calc(100vw - 2rem));
+  height: min(700px, calc(100vh - 2rem));
+  max-height: calc(100vh - 2rem);
+  overflow: hidden;
   padding: 0;
-  color: var(--text);
-  background: var(--surface);
   border: 1px solid var(--accent);
+  background: #0d0d10;
+  color: var(--text);
+  font-family: var(--ui-font);
+  font-size: 0.82rem;
 }
 .project-wizard::backdrop {
   background: rgb(0 0 0 / 78%);
   backdrop-filter: blur(3px);
 }
 .wizard-shell {
-  min-height: 34rem;
   display: flex;
   flex-direction: column;
+  height: 100%;
+  min-height: 0;
 }
 .wizard-shell > header {
   display: flex;
   justify-content: space-between;
   align-items: flex-start;
-  padding: 1.5rem;
+  flex: 0 0 auto;
+  padding: 1rem 1.25rem;
   border-bottom: 1px solid var(--border);
 }
 .wizard-shell h2 {
-  margin: 0.25rem 0 0;
+  margin: 0.2rem 0 0;
   font-family: var(--display-font);
-  font-size: 2rem;
+  font-size: 1.5rem;
+  font-weight: 700;
+  line-height: 1;
+  letter-spacing: -0.035em;
 }
 .icon-action {
   border: 0;
   background: transparent;
   color: var(--muted);
-  font-size: 2rem;
+  font-size: 1.55rem;
   line-height: 1;
   padding: 0.25rem;
 }
@@ -2351,8 +2363,10 @@ td {
   display: flex;
   flex: 1;
   flex-direction: column;
-  padding: 1.5rem;
-  gap: 1rem;
+  min-height: 0;
+  padding: 1.15rem 1.25rem 1.25rem;
+  gap: 0.8rem;
+  overflow-y: auto;
 }
 .source-toolbar,
 .wizard-configure footer {
@@ -2361,14 +2375,27 @@ td {
   justify-content: space-between;
   gap: 1rem;
 }
+.source-toolbar > .table-action {
+  display: inline-flex;
+  align-items: center;
+  min-height: 38px;
+  padding: 0 0.8rem;
+  font-size: 0.62rem;
+  text-decoration: none;
+}
 .source-tabs {
   display: flex;
 }
 .source-tabs button {
-  padding: 0.7rem 1rem;
+  min-height: 38px;
+  padding: 0 0.9rem;
   border: 1px solid var(--border);
   background: transparent;
   color: var(--muted);
+  font: 0.65rem var(--mono-font);
+  font-weight: 700;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
 }
 .source-tabs button + button {
   border-left: 0;
@@ -2382,25 +2409,26 @@ td {
   display: flex;
   align-items: flex-end;
   justify-content: space-between;
-  gap: 1.5rem;
-  padding: 1.25rem;
+  gap: 1rem;
+  padding: 1rem;
   border: 1px solid var(--border);
   background: var(--surface-raised);
 }
 .github-app-setup > div {
   display: grid;
   gap: 0.4rem;
-  max-width: 32rem;
+  max-width: 35rem;
 }
 .github-app-setup strong {
   font-family: var(--display-font);
-  font-size: 1.15rem;
+  font-size: 1rem;
+  letter-spacing: -0.02em;
 }
 .github-app-setup p {
   margin: 0;
   color: var(--muted);
-  font-size: 0.8rem;
-  line-height: 1.55;
+  font-size: 0.74rem;
+  line-height: 1.5;
 }
 .github-app-setup form,
 .github-app-setup .primary-action {
@@ -2408,18 +2436,46 @@ td {
   width: auto;
   margin: 0;
 }
+.github-app-setup .primary-action {
+  min-height: 40px;
+  padding: 0 0.9rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+}
+.wizard-source .github-controls {
+  display: grid;
+  grid-template-columns: minmax(10rem, 0.35fr) minmax(15rem, 1fr);
+  gap: 0.55rem;
+  padding: 0;
+}
+.wizard-source .github-controls input,
+.wizard-source .github-controls select {
+  width: 100%;
+  min-height: 40px;
+  padding: 0 0.75rem;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-size: 0.78rem;
+}
 .wizard-repositories {
   display: grid;
-  max-height: 22rem;
+  min-height: 8rem;
+  max-height: 23rem;
   overflow: auto;
   border: 1px solid var(--border);
+}
+.wizard-repositories .panel-message {
+  padding: 1rem;
+  font-size: 0.72rem;
 }
 .wizard-repositories > button {
   display: flex;
   justify-content: space-between;
   align-items: center;
   text-align: left;
-  padding: 1rem;
+  min-height: 52px;
+  padding: 0.65rem 0.8rem;
   border: 0;
   border-bottom: 1px solid var(--border);
   background: transparent;
@@ -2435,28 +2491,75 @@ td {
   display: grid;
   gap: 0.25rem;
 }
+.wizard-repositories strong {
+  overflow: hidden;
+  font-size: 0.78rem;
+  font-weight: 650;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 .wizard-repositories small {
   color: var(--muted);
+  font: 0.6rem var(--mono-font);
+  line-height: 1.35;
+  text-transform: uppercase;
 }
 .wizard-repositories i {
   color: var(--accent);
   font-style: normal;
+  padding-left: 1rem;
+  font-family: var(--mono-font);
+  font-size: 0.72rem;
 }
 .wizard-form-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 1rem;
+  gap: 0.85rem;
 }
 .wizard-form-grid label {
   display: grid;
-  gap: 0.45rem;
+  gap: 0.4rem;
   color: var(--muted);
-  font-size: 0.75rem;
+  font: 0.62rem var(--mono-font);
+  font-weight: 700;
   text-transform: uppercase;
   letter-spacing: 0.06em;
 }
+.wizard-form-grid input,
+.wizard-form-grid select {
+  min-height: 42px;
+  padding: 0 0.75rem;
+  font-family: var(--ui-font);
+  font-size: 0.82rem;
+  letter-spacing: normal;
+  text-transform: none;
+}
 .wizard-form-grid .wide {
   grid-column: 1 / -1;
+}
+.wizard-configure > .project-back {
+  align-self: flex-start;
+  margin: 0 0 0.15rem;
+  color: var(--muted);
+  font: 0.62rem var(--mono-font);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.wizard-source > .empty-state {
+  gap: 0.3rem;
+  padding: 1rem;
+  font-size: 0.75rem;
+}
+.wizard-source > .empty-state strong {
+  font-size: 0.82rem;
+}
+.wizard-shell > .notice {
+  flex: 0 0 auto;
+  margin: 0 1.25rem 1.25rem;
+  padding: 0.75rem;
+  font-size: 0.72rem;
 }
 .repository-browser {
   display: grid;
@@ -2469,7 +2572,7 @@ td {
   align-items: center;
   justify-content: space-between;
   gap: 1rem;
-  padding: 0.75rem;
+  padding: 0.65rem 0.75rem;
 }
 .repository-browser > header {
   border-bottom: 1px solid var(--border);
@@ -2483,6 +2586,14 @@ td {
   font-size: 0.82rem;
   text-transform: none;
   letter-spacing: normal;
+}
+.repository-browser .eyebrow {
+  font-size: 0.57rem;
+}
+.repository-browser > header .table-action {
+  min-height: 34px;
+  padding: 0 0.7rem;
+  font-size: 0.58rem;
 }
 .repository-browser > nav {
   display: flex;
@@ -2573,7 +2684,16 @@ td {
 }
 .wizard-configure footer span {
   color: var(--muted);
-  font-size: 0.85rem;
+  font-size: 0.7rem;
+}
+.wizard-configure footer .primary-action {
+  width: auto;
+  min-width: 9rem;
+  min-height: 42px;
+  margin: 0;
+  padding: 0 1rem;
+  font-size: 0.75rem;
+  font-weight: 700;
 }
 .overview-stack {
   display: grid;
@@ -2692,12 +2812,31 @@ td {
   .wizard-form-grid {
     grid-template-columns: 1fr;
   }
+  .wizard-source .github-controls {
+    grid-template-columns: 1fr;
+  }
   .wizard-form-grid .wide {
     grid-column: auto;
   }
   .project-wizard {
     width: calc(100vw - 1rem);
+    height: calc(100vh - 1rem);
     max-height: calc(100vh - 1rem);
+  }
+  .wizard-shell > header,
+  .wizard-source,
+  .wizard-configure {
+    padding-right: 1rem;
+    padding-left: 1rem;
+  }
+  .new-project-banner .primary-action,
+  .github-app-setup form,
+  .github-app-setup .primary-action {
+    width: 100%;
+  }
+  .wizard-shell > .notice {
+    margin-right: 1rem;
+    margin-left: 1rem;
   }
 }
 
