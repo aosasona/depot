@@ -4,7 +4,7 @@ use axum::{
     Json, Router,
     body::Bytes,
     extract::{
-        DefaultBodyLimit, State, WebSocketUpgrade,
+        DefaultBodyLimit, Query, State, WebSocketUpgrade,
         ws::{Message, WebSocket},
     },
     http::{HeaderMap, StatusCode},
@@ -24,7 +24,7 @@ use depot_core::{
     ProjectValidationError, ShellHandshake, validate_domain_hostname, validate_project_slug,
     validate_repository_url,
 };
-use depot_github::{GithubAppClient, GithubError, Repository};
+use depot_github::{GithubAppClient, GithubError, Repository, RepositoryEntry};
 use depot_secrets::SecretCipher;
 use depot_store::{
     Deployment, Domain, GithubInstallation, GithubProjectRepository, JobEvent, JobStatus,
@@ -314,6 +314,15 @@ struct ImportGithubProjectRequest {
     branch: Option<String>,
 }
 
+/// Validated query used to browse one directory at a selected Git reference.
+#[derive(Debug, Deserialize)]
+struct GithubContentsQuery {
+    #[serde(default)]
+    path: String,
+    #[serde(rename = "ref")]
+    reference: String,
+}
+
 /// Durable deployment history returned to authenticated workspace members.
 #[derive(Debug, Serialize)]
 struct DeploymentResponse {
@@ -500,6 +509,10 @@ pub fn router_with_shell(
         .route(
             "/api/v1/integrations/github/installations/{installation_id}/repositories",
             get(list_github_repositories),
+        )
+        .route(
+            "/api/v1/integrations/github/installations/{installation_id}/repositories/{repository_id}/contents",
+            get(list_github_repository_directory),
         )
         .route(
             "/api/v1/integrations/github/projects",
@@ -787,6 +800,43 @@ async fn list_github_repositories(
         github
             .client
             .repositories(installation_id as u64)
+            .await
+            .map_err(ApiError::Github)?,
+    ))
+}
+
+/// Lists one GitHub repository directory after verifying installation ownership.
+async fn list_github_repository_directory(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path((installation_id, repository_id)): axum::extract::Path<(i64, u64)>,
+    Query(query): Query<GithubContentsQuery>,
+) -> Result<Json<Vec<RepositoryEntry>>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    if installation_id <= 0 || !state.store.has_github_installation(installation_id).await? {
+        return Err(ApiError::Forbidden);
+    }
+    if query.reference.trim().is_empty()
+        || query.reference.len() > 255
+        || query.reference.chars().any(char::is_control)
+        || (!query.path.is_empty() && !is_safe_relative_path(&query.path))
+    {
+        return Err(ApiError::InvalidProjectField(
+            "Choose a valid repository directory and branch.",
+        ));
+    }
+    let github = resolved_github(&state)
+        .await?
+        .ok_or(ApiError::GithubUnavailable)?;
+    Ok(Json(
+        github
+            .client
+            .repository_directory(
+                installation_id as u64,
+                repository_id,
+                query.reference.trim(),
+                query.path.trim(),
+            )
             .await
             .map_err(ApiError::Github)?,
     ))

@@ -69,7 +69,7 @@ const dependencies = [
   },
 ] as const;
 
-/** Presents supported starters and an honest blueprint for dependency-heavy apps. */
+/** Presents supported starters and a reusable guide for dependency-heavy apps. */
 export function TemplatesPanel() {
   const projects = useQuery({ queryKey: ["projects"], queryFn: listProjects });
   const [targets, setTargets] = useState<Record<string, string>>({});
@@ -200,29 +200,27 @@ export function TemplatesPanel() {
           })}
         </div>
       </section>
-      <section className="affine-blueprint">
+      <section className="dependency-guide">
         <div className="blueprint-title">
           <span className="template-number">03</span>
           <div>
-            <span className="template-section-kicker">
-              CONNECTED APP BLUEPRINT
-            </span>
-            <h2>Affine</h2>
+            <span className="template-section-kicker">DEPLOYMENT GUIDE</span>
+            <h2>Apps with dependencies</h2>
             <p>
-              A real deployment plan for Affine, including the dependencies
-              Depot does not provision yet.
+              Use the same workflow for any app that needs a database, cache,
+              queue, or object storage.
             </p>
           </div>
-          <span className="plan-badge">Operator assisted</span>
+          <span className="plan-badge">Reusable workflow</span>
         </div>
         <section
           className="blueprint-flow"
-          aria-label="Affine service dependencies"
+          aria-label="Application dependency workflow"
         >
           <div className="blueprint-node primary">
             <span>DEPOT MANAGED</span>
-            <strong>Affine</strong>
-            <small>Web service · port 3010</small>
+            <strong>Your application</strong>
+            <small>Repository folder · HTTP service</small>
           </div>
           <div className="blueprint-connector" aria-hidden="true">
             <span>connects to</span>
@@ -231,33 +229,36 @@ export function TemplatesPanel() {
           <div className="blueprint-dependencies">
             <div className="blueprint-node">
               <span>OPERATOR PROVIDED</span>
-              <strong>PostgreSQL</strong>
-              <small>External database</small>
+              <strong>Database</strong>
+              <small>DATABASE_URL</small>
             </div>
             <div className="blueprint-node">
               <span>OPERATOR PROVIDED</span>
-              <strong>Redis</strong>
-              <small>External cache</small>
+              <strong>Cache / queue</strong>
+              <small>REDIS_URL</small>
             </div>
             <div className="blueprint-node">
               <span>OPERATOR PROVIDED</span>
               <strong>Object storage</strong>
-              <small>External S3-compatible</small>
+              <small>S3_URL</small>
             </div>
           </div>
         </section>
         <div className="blueprint-note">
-          <span>REQUIREMENTS</span>
+          <span>HOW IT WORKS</span>
           <div>
-            <strong>Bring the data services</strong>
+            <strong>
+              Connections create runtime environment automatically
+            </strong>
             <p>
-              Depot deploys the Affine application container. Provide
-              PostgreSQL, Redis, and object storage first, then add their
-              connection values under Environment.
+              Create the app from its repository, provide each external
+              dependency, then use Add connection on the project canvas. Depot
+              stores the value encrypted under the suggested environment key and
+              injects it into the next deployment.
             </p>
           </div>
-          <a className="template-action" href="/projects?template=affine">
-            <span>Configure Affine</span>
+          <a className="template-action" href="/projects">
+            <span>Create an application</span>
             <span aria-hidden="true">→</span>
           </a>
         </div>

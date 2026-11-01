@@ -57,6 +57,15 @@ pub struct Repository {
     pub archived: bool,
 }
 
+/// One file-system entry returned by GitHub's repository contents API.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RepositoryEntry {
+    pub name: String,
+    pub path: String,
+    #[serde(rename = "type")]
+    pub kind: String,
+}
+
 /// One-time credentials returned only by GitHub's App Manifest conversion.
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
 pub struct ManifestApp {
@@ -172,6 +181,45 @@ impl GithubAppClient {
             })
     }
 
+    /// Lists one repository directory without exposing the installation token.
+    pub async fn repository_directory(
+        &self,
+        installation_id: u64,
+        repository_id: u64,
+        reference: &str,
+        path: &str,
+    ) -> Result<Vec<RepositoryEntry>, GithubError> {
+        let token = self.installation_token(installation_id).await?;
+        let repository: Repository = self
+            .installation_get(&token, &format!("/repositories/{repository_id}"))
+            .await?;
+        let mut url = reqwest::Url::parse("https://api.github.com")
+            .map_err(|_| GithubError::InvalidResponse)?;
+        {
+            let mut segments = url
+                .path_segments_mut()
+                .map_err(|_| GithubError::InvalidResponse)?;
+            segments.push("repos");
+            for segment in repository.full_name.split('/') {
+                segments.push(segment);
+            }
+            segments.push("contents");
+            for segment in path.split('/').filter(|segment| !segment.is_empty()) {
+                segments.push(segment);
+            }
+        }
+        url.query_pairs_mut().append_pair("ref", reference);
+        let mut entries: Vec<RepositoryEntry> = self.installation_get_url(&token, url).await?;
+        entries.sort_by(|left, right| {
+            let left_file = left.kind != "dir";
+            let right_file = right.kind != "dir";
+            left_file
+                .cmp(&right_file)
+                .then_with(|| left.name.to_lowercase().cmp(&right.name.to_lowercase()))
+        });
+        Ok(entries)
+    }
+
     /// Mints a short-lived token for private checkout without persisting it.
     pub async fn checkout_token(&self, installation_id: u64) -> Result<String, GithubError> {
         self.installation_token(installation_id).await
@@ -217,6 +265,22 @@ impl GithubAppClient {
         let response = self
             .http
             .get(format!("https://api.github.com{path}"))
+            .headers(api_headers(token)?)
+            .send()
+            .await
+            .map_err(GithubError::Request)?;
+        decode_response(response).await
+    }
+
+    /// Performs an installation-authenticated GET against a pre-built GitHub URL.
+    async fn installation_get_url<T: DeserializeOwned>(
+        &self,
+        token: &str,
+        url: reqwest::Url,
+    ) -> Result<T, GithubError> {
+        let response = self
+            .http
+            .get(url)
             .headers(api_headers(token)?)
             .send()
             .await

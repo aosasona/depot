@@ -149,6 +149,11 @@ const githubRepositorySchema = z.object({
   default_branch: z.string(),
   archived: z.boolean(),
 });
+const githubRepositoryEntrySchema = z.object({
+  name: z.string(),
+  path: z.string(),
+  kind: z.string(),
+});
 const sshCredentialResponseSchema = z.object({ configured: z.literal(true) });
 
 export type User = z.infer<typeof userSchema>;
@@ -165,6 +170,7 @@ export type Domain = z.infer<typeof domainSchema>;
 export type ProjectVariable = z.infer<typeof variableSchema>;
 export type GithubIntegration = z.infer<typeof githubIntegrationSchema>;
 export type GithubRepository = z.infer<typeof githubRepositorySchema>;
+export type GithubRepositoryEntry = z.infer<typeof githubRepositoryEntrySchema>;
 
 /** Represents a safe API failure suitable for inline UI feedback. */
 export class ApiError extends Error {
@@ -383,6 +389,20 @@ export function listGithubRepositories(installationId: number) {
   return request(
     `/api/v1/integrations/github/installations/${installationId}/repositories`,
     z.array(githubRepositorySchema),
+  );
+}
+
+/** Lists one directory in a GitHub repository using Depot's private App credential. */
+export function listGithubRepositoryDirectory(
+  installationId: number,
+  repositoryId: number,
+  reference: string,
+  path: string,
+) {
+  const query = new URLSearchParams({ ref: reference, path });
+  return request(
+    `/api/v1/integrations/github/installations/${installationId}/repositories/${repositoryId}/contents?${query}`,
+    z.array(githubRepositoryEntrySchema),
   );
 }
 

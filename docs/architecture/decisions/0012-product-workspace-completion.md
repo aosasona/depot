@@ -40,7 +40,7 @@ We will complete the workspace as independently releasable vertical slices:
   after import.
 - Overview data may issue three small parallel requests; a server aggregate can
   replace them later without changing the page contract.
-- Affine can be represented honestly as a template requiring operator-provided
-  dependencies, but one-click dependency provisioning remains future work.
+- Dependency-heavy apps can be represented honestly with operator-provided
+  services, but one-click dependency provisioning remains future work.
 - Runtime log access is deliberately bounded and never accepts arbitrary
   container identifiers from the browser.

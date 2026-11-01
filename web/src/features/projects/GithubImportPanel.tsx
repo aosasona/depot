@@ -12,6 +12,7 @@ import {
   type Project,
   updateServiceConfig,
 } from "../../lib/api/client";
+import { RepositoryDirectoryPicker } from "./RepositoryDirectoryPicker";
 
 type Source =
   | { kind: "github"; repository: GithubRepository }
@@ -21,6 +22,7 @@ type ConfigureValues = {
   slug: string;
   branch: string;
   repositoryUrl: string;
+  contextPath: string;
   projectKind: "auto" | "service" | "static";
   builder: "auto" | "dockerfile" | "railpack";
   staticOutput: string;
@@ -31,6 +33,7 @@ const initialValues: ConfigureValues = {
   slug: "",
   branch: "main",
   repositoryUrl: "",
+  contextPath: ".",
   projectKind: "auto",
   builder: "auto",
   staticOutput: "dist",
@@ -258,6 +261,8 @@ function ProjectWizard({
       (!/^\d+$/.test(values.port) || Number(values.port) > 65535)
     )
       return setMessage("Services need a port between 1 and 65535.");
+    if (!validRepositoryPath(values.contextPath))
+      return setMessage("Choose a valid repository source directory.");
     try {
       let project: Project;
       if (source.kind === "github") {
@@ -280,7 +285,7 @@ function ProjectWizard({
       await updateServiceConfig(project.id, {
         project_kind: values.projectKind,
         builder: values.builder,
-        context_path: ".",
+        context_path: values.contextPath.trim(),
         dockerfile_path: "Dockerfile",
         static_output_dir:
           values.projectKind === "static"
@@ -479,6 +484,31 @@ function ProjectWizard({
                 }
               />
             </label>
+            {source.kind === "manual" && (
+              <label>
+                Source directory
+                <input
+                  placeholder=". or apps/web"
+                  value={values.contextPath}
+                  onChange={(event) =>
+                    setValues({ ...values, contextPath: event.target.value })
+                  }
+                />
+              </label>
+            )}
+            {source.kind === "github" && installationId && (
+              <div className="wide">
+                <RepositoryDirectoryPicker
+                  installationId={installationId}
+                  repositoryId={source.repository.id}
+                  reference={values.branch}
+                  value={values.contextPath}
+                  onChange={(contextPath) =>
+                    setValues((current) => ({ ...current, contextPath }))
+                  }
+                />
+              </div>
+            )}
             <label>
               Project type
               <select
@@ -577,6 +607,19 @@ function validSlug(slug: string) {
   return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug);
 }
 
+/** Accepts a bounded repository-relative path without traversal segments. */
+function validRepositoryPath(path: string) {
+  const value = path.trim();
+  return (
+    value.length > 0 &&
+    value.length <= 255 &&
+    !value.startsWith("/") &&
+    !value.startsWith("\\") &&
+    ![...value].some((character) => /[\u0000-\u001f\u007f]/.test(character)) &&
+    !value.split(/[\\/]/).some((segment) => segment === "..")
+  );
+}
+
 /** Generates the callback nonce that binds a GitHub manifest response to this browser tab. */
 function createManifestState() {
   const bytes = window.crypto.getRandomValues(new Uint8Array(32));
@@ -592,16 +635,6 @@ function templateDefaults(
   if (template === "static") return { ...initialValues, projectKind: "static" };
   if (template === "service")
     return { ...initialValues, projectKind: "service" };
-  if (template === "affine")
-    return {
-      ...initialValues,
-      name: "Affine",
-      slug: "affine",
-      repositoryUrl: "https://github.com/toeverything/AFFiNE.git",
-      projectKind: "service",
-      builder: "dockerfile",
-      port: "3010",
-    };
   return undefined;
 }
 /** Converts provider and validation failures into safe dialog feedback. */
