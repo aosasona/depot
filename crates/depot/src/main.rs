@@ -1407,6 +1407,13 @@ async fn serve(config: Config) -> Result<(), AppError> {
         signing_key: Arc::new(shell_key),
     };
     let gateway_store = store.clone();
+    let dashboard_hostname = config
+        .security
+        .public_origin
+        .parse::<Uri>()
+        .ok()
+        .and_then(|origin| origin.host().map(str::to_ascii_lowercase))
+        .map(Arc::<str>::from);
     let app = Router::new()
         .route("/api/v1/system/health", get(system_health))
         .merge(depot_api::router_with_shell_and_domains(
@@ -1416,7 +1423,9 @@ async fn serve(config: Config) -> Result<(), AppError> {
             Some(shell),
             config.domains.default_suffix.clone(),
         ))
-        .fallback(move |request| gateway_or_spa(gateway_store.clone(), request));
+        .fallback(move |request| {
+            gateway_or_spa(gateway_store.clone(), dashboard_hostname.clone(), request)
+        });
     let listener = TcpListener::bind(config.server.bind)
         .await
         .map_err(AppError::Bind)?;
@@ -1486,7 +1495,11 @@ async fn system_health() -> Json<HealthResponse> {
 }
 
 /// Routes exact project hostnames to healthy loopback runtimes, otherwise serves Depot's SPA.
-async fn gateway_or_spa(store: Store, request: Request<Body>) -> Response {
+async fn gateway_or_spa(
+    store: Store,
+    dashboard_hostname: Option<Arc<str>>,
+    request: Request<Body>,
+) -> Response {
     if request.uri().path().starts_with("/api/") {
         return StatusCode::NOT_FOUND.into_response();
     }
@@ -1499,6 +1512,13 @@ async fn gateway_or_spa(store: Store, request: Request<Body>) -> Response {
             Ok(Some(depot_store::GatewayTarget::Static { release_path, .. })) => {
                 return serve_static_release(request.uri(), Path::new(&release_path)).await;
             }
+            Ok(None)
+                if dashboard_hostname
+                    .as_deref()
+                    .is_some_and(|dashboard| hostname != dashboard) =>
+            {
+                return managed_not_found_response();
+            }
             Ok(None) => {}
             Err(error) => {
                 tracing::error!(%error, "gateway target lookup failed");
@@ -1507,6 +1527,40 @@ async fn gateway_or_spa(store: Store, request: Request<Body>) -> Response {
         }
     }
     serve_spa(request.uri()).await
+}
+
+/// Serves a safe branded response when a routed application hostname has no live target.
+fn managed_not_found_response() -> Response {
+    const PAGE: &str = r#"<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Nothing deployed here · Depot</title>
+  <style>
+    :root{color-scheme:dark;font-family:ui-sans-serif,system-ui,sans-serif;background:#0d0d0d;color:#f2f2f2}
+    *{box-sizing:border-box}body{margin:0;min-height:100vh;display:grid;place-items:center;padding:2rem}
+    main{width:min(100%,42rem);border-top:1px solid #c6f547;padding-top:1.5rem}
+    small{color:#c6f547;font:700 .72rem ui-monospace,monospace;letter-spacing:.12em;text-transform:uppercase}
+    h1{margin:1rem 0 .75rem;font-size:clamp(2rem,7vw,4.5rem);line-height:.95;letter-spacing:-.05em}
+    p{max-width:34rem;margin:0;color:#a4a4a4;font-size:1rem;line-height:1.65}
+    footer{margin-top:3rem;color:#666;font:700 .68rem ui-monospace,monospace;text-transform:uppercase}
+  </style>
+</head>
+<body><main><small>404 · Depot</small><h1>Nothing is deployed here.</h1><p>This hostname is managed by Depot, but it does not currently point to a live deployment.</p><footer>Check the project domain and deployment status.</footer></main></body>
+</html>"#;
+    Response::builder()
+        .status(StatusCode::NOT_FOUND)
+        .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
+        .header(header::CACHE_CONTROL, "no-store")
+        .header("x-content-type-options", "nosniff")
+        .header("referrer-policy", "no-referrer")
+        .header(
+            "content-security-policy",
+            "default-src 'none'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'none'",
+        )
+        .body(Body::from(PAGE))
+        .expect("managed not-found response headers are valid")
 }
 
 /// Serves one validated immutable static release with a safe SPA fallback.
@@ -1677,7 +1731,22 @@ fn content_type(asset_name: &str) -> &'static str {
 mod tests {
     use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 
-    use super::{content_type, parse_file_entries, request_hostname, serve_static_release};
+    use super::{
+        content_type, managed_not_found_response, parse_file_entries, request_hostname,
+        serve_static_release,
+    };
+
+    /// Keeps missing managed deployments distinct from the operator dashboard SPA.
+    #[test]
+    fn managed_not_found_page_is_html_and_not_cacheable() {
+        let response = managed_not_found_response();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        assert_eq!(
+            response.headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
+    }
 
     /// Ensures unknown embedded files cannot select an executable content type.
     #[test]
