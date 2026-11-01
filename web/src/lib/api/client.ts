@@ -155,11 +155,16 @@ const githubRepositorySchema = z.object({
   default_branch: z.string(),
   archived: z.boolean(),
 });
-const githubRepositoryEntrySchema = z.object({
-  name: z.string(),
-  path: z.string(),
-  kind: z.string(),
-});
+const githubRepositoryEntrySchema = z
+  .union([
+    z.object({ name: z.string(), path: z.string(), kind: z.string() }),
+    z.object({ name: z.string(), path: z.string(), type: z.string() }),
+  ])
+  .transform((entry) => ({
+    name: entry.name,
+    path: entry.path,
+    kind: "kind" in entry ? entry.kind : entry.type,
+  }));
 const projectGithubSourceSchema = z.object({
   installation_id: z.number().int().positive(),
   repository_id: z.number().int().positive(),

@@ -62,7 +62,7 @@ pub struct Repository {
 pub struct RepositoryEntry {
     pub name: String,
     pub path: String,
-    #[serde(rename = "type")]
+    #[serde(rename(deserialize = "type"))]
     pub kind: String,
 }
 
@@ -402,7 +402,23 @@ async fn decode_response<T: DeserializeOwned>(
 
 #[cfg(test)]
 mod tests {
-    use super::{GithubError, validate_manifest_code};
+    use super::{GithubError, RepositoryEntry, validate_manifest_code};
+
+    /// Keeps GitHub's `type` field private while exposing Depot's stable `kind` contract.
+    #[test]
+    fn repository_entries_translate_github_type_to_depot_kind() {
+        let entry: RepositoryEntry = serde_json::from_value(serde_json::json!({
+            "name": "apps",
+            "path": "apps",
+            "type": "dir"
+        }))
+        .expect("GitHub repository entry decodes");
+        assert_eq!(entry.kind, "dir");
+
+        let response = serde_json::to_value(entry).expect("Depot repository entry encodes");
+        assert_eq!(response["kind"], "dir");
+        assert!(response.get("type").is_none());
+    }
 
     /// Proves untrusted callback values are rejected before constructing a GitHub URL.
     #[test]
