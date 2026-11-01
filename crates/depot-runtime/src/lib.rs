@@ -43,6 +43,8 @@ pub enum RuntimeError {
     NotReady,
     #[error("runtime environment contains an invalid name or value")]
     InvalidEnvironment,
+    #[error("Docker could not read release container logs")]
+    LogsFailed,
 }
 
 /// Starts an image with an ephemeral loopback-only port and resolves its runtime identity.
@@ -185,6 +187,44 @@ pub async fn remove_image(
     }
 }
 
+/// Reads a bounded tail from one server-selected release container without a shell.
+pub async fn container_logs(
+    docker_binary: &str,
+    container_id: &str,
+    tail: u16,
+    timeout: Duration,
+) -> Result<String, RuntimeError> {
+    if container_id.len() < 12
+        || !container_id.bytes().all(|byte| byte.is_ascii_hexdigit())
+        || tail == 0
+        || tail > 5_000
+    {
+        return Err(RuntimeError::InvalidRuntimeIdentity);
+    }
+    let mut command = Command::new(docker_binary);
+    command
+        .args([
+            "logs",
+            "--timestamps",
+            "--tail",
+            &tail.to_string(),
+            container_id,
+        ])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = command_output(&mut command, timeout).await?;
+    if !output.status.success() {
+        return Err(RuntimeError::LogsFailed);
+    }
+    let mut combined = output.stdout;
+    combined.extend_from_slice(&output.stderr);
+    const MAX_LOG_BYTES: usize = 512 * 1024;
+    if combined.len() > MAX_LOG_BYTES {
+        combined.drain(..combined.len() - MAX_LOG_BYTES);
+    }
+    Ok(String::from_utf8_lossy(&combined).into_owned())
+}
+
 /// Executes one bounded Docker command without a shell.
 async fn command_output(
     command: &mut Command,
@@ -250,7 +290,7 @@ fn healthy_http_response(response: &[u8]) -> bool {
 mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
-    use super::{StartContainerRequest, healthy_http_response, start_container};
+    use super::{StartContainerRequest, container_logs, healthy_http_response, start_container};
 
     /// Proves runtime identity and ephemeral port mappings are strictly parsed.
     #[tokio::test]
@@ -323,5 +363,27 @@ mod tests {
         assert!(!healthy_http_response(
             b"HTTP/1.1 503 Service Unavailable\r\n"
         ));
+    }
+
+    /// Proves runtime logs use the fixed Docker argument shape and return output.
+    #[tokio::test]
+    async fn runtime_logs_are_read_from_a_valid_container() {
+        let root =
+            std::env::temp_dir().join(format!("depot-runtime-logs-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        fs::write(&fake, "#!/bin/sh\nprintf '2026-01-01T00:00:00Z ready\\n'\n")
+            .expect("fake Docker writes");
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        let logs = container_logs(
+            fake.to_str().expect("path is UTF-8"),
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            1_000,
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("logs load");
+        assert!(logs.contains("ready"));
+        fs::remove_dir_all(root).expect("test root is removed");
     }
 }

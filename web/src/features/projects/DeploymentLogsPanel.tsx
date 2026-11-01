@@ -1,8 +1,15 @@
-import { useQuery } from "@tanstack/react-query";
-import { getJobStatus, listDeployments } from "../../lib/api/client";
+import { type UseQueryResult, useQuery } from "@tanstack/react-query";
+import { useState } from "react";
+import {
+  type Deployment,
+  getJobStatus,
+  getRuntimeLogs,
+  listDeployments,
+} from "../../lib/api/client";
 
 /** Shows durable deployment events and bounded builder output beside deployment work. */
 export function DeploymentLogsPanel({ projectId }: { projectId: string }) {
+  const [view, setView] = useState<"runtime" | "build">("runtime");
   const deployments = useQuery({
     queryKey: ["projects", projectId, "deployments"],
     queryFn: () => listDeployments(projectId),
@@ -17,10 +24,87 @@ export function DeploymentLogsPanel({ projectId }: { projectId: string }) {
     <div className="deployment-logs">
       <div className="surface-heading">
         <div>
-          <strong>Deployment logs</strong>
-          <span>Worker events and bounded output retained with each job.</span>
+          <strong>Logs</strong>
+          <span>Live service output and durable build history.</span>
         </div>
+        <fieldset className="log-view-tabs">
+          <legend>Log type</legend>
+          <button
+            className={view === "runtime" ? "active" : undefined}
+            type="button"
+            onClick={() => setView("runtime")}
+          >
+            Runtime
+          </button>
+          <button
+            className={view === "build" ? "active" : undefined}
+            type="button"
+            onClick={() => setView("build")}
+          >
+            Build
+          </button>
+        </fieldset>
       </div>
+      {view === "runtime" && <RuntimeLogs projectId={projectId} />}
+      {view === "build" && <BuildLogs deployments={deployments} />}
+    </div>
+  );
+}
+
+/** Polls recent output for the active service while the runtime view is open. */
+function RuntimeLogs({ projectId }: { projectId: string }) {
+  const runtime = useQuery({
+    queryKey: ["projects", projectId, "runtime-logs"],
+    queryFn: () => getRuntimeLogs(projectId),
+    refetchInterval: 5_000,
+  });
+  if (runtime.isPending)
+    return <p className="surface-empty">Connecting to the active service…</p>;
+  if (runtime.isError)
+    return (
+      <p className="inspection-error">
+        Runtime logs are unavailable. Check that the Depot API can access
+        Docker.
+      </p>
+    );
+  if (runtime.data.status === "static")
+    return (
+      <p className="surface-empty">
+        Static sites have no running process. Build output is available under
+        Build.
+      </p>
+    );
+  if (runtime.data.status === "not_deployed")
+    return (
+      <p className="surface-empty">
+        Deploy this project to start collecting runtime output.
+      </p>
+    );
+  return (
+    <div className="runtime-console">
+      <div>
+        <span>ACTIVE RELEASE</span>
+        <code>{runtime.data.deployment_id?.slice(0, 12)}</code>
+        <time>
+          Updated{" "}
+          {new Date(runtime.data.fetched_at * 1_000).toLocaleTimeString()}
+        </time>
+      </div>
+      <pre>
+        {runtime.data.logs || "The service has not written any output yet."}
+      </pre>
+    </div>
+  );
+}
+
+/** Renders retained worker events and build output for all deployment attempts. */
+function BuildLogs({
+  deployments,
+}: {
+  deployments: UseQueryResult<Deployment[], Error>;
+}) {
+  return (
+    <>
       {deployments.isPending && <p className="surface-empty">Loading logs…</p>}
       {deployments.isError && (
         <p className="inspection-error">Deployment logs are unavailable.</p>
@@ -40,7 +124,7 @@ export function DeploymentLogsPanel({ projectId }: { projectId: string }) {
           />
         ))}
       </div>
-    </div>
+    </>
   );
 }
 

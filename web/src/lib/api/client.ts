@@ -94,6 +94,12 @@ const deploymentSchema = z.object({
   finished_at: z.number().nullable(),
   active: z.boolean(),
 });
+const runtimeLogsSchema = z.object({
+  status: z.enum(["available", "not_deployed", "static"]),
+  deployment_id: z.string().nullable(),
+  logs: z.string(),
+  fetched_at: z.number(),
+});
 const domainSchema = z.object({
   id: z.string(),
   project_id: z.string(),
@@ -405,6 +411,14 @@ export function listDeployments(projectId: string) {
   return request(
     `/api/v1/projects/${projectId}/deployments`,
     z.array(deploymentSchema),
+  );
+}
+
+/** Reads the bounded recent output of a project's active service container. */
+export function getRuntimeLogs(projectId: string) {
+  return request(
+    `/api/v1/projects/${projectId}/runtime-logs`,
+    runtimeLogsSchema,
   );
 }
 
