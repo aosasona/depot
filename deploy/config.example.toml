@@ -8,6 +8,10 @@ url = "sqlite:///var/lib/depot/depot.db"
 public_origin = "https://depot.example.com"
 master_key_file = "/etc/depot/master.key"
 
+[domains]
+# New projects automatically receive <project-slug>.apps.example.com.
+default_suffix = "apps.example.com"
+
 [worker]
 workspace_root = "/var/lib/depot/workspaces"
 static_root = "/var/lib/depot/static"

@@ -1380,11 +1380,12 @@ async fn serve(config: Config) -> Result<(), AppError> {
     let gateway_store = store.clone();
     let app = Router::new()
         .route("/api/v1/system/health", get(system_health))
-        .merge(depot_api::router_with_shell(
+        .merge(depot_api::router_with_shell_and_domains(
             store.clone(),
             Some(secrets),
             github,
             Some(shell),
+            config.domains.default_suffix.clone(),
         ))
         .fallback(move |request| gateway_or_spa(gateway_store.clone(), request));
     let listener = TcpListener::bind(config.server.bind)

@@ -581,6 +581,17 @@ impl Store {
         input: NewProject<'_>,
         repository: &GithubProjectRepository,
     ) -> Result<ProjectSummary, StoreError> {
+        self.create_github_project_with_domain(input, repository, None)
+            .await
+    }
+
+    /// Creates a GitHub project and optional generated hostname atomically.
+    pub async fn create_github_project_with_domain(
+        &self,
+        input: NewProject<'_>,
+        repository: &GithubProjectRepository,
+        default_hostname: Option<&str>,
+    ) -> Result<ProjectSummary, StoreError> {
         let mut transaction = self.pool.begin().await?;
         let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE slug = ?")
             .bind(input.slug)
@@ -627,6 +638,16 @@ impl Store {
         .bind(input.now_unix)
         .execute(&mut *transaction)
         .await?;
+        if let Some(hostname) = default_hostname {
+            insert_project_domain(
+                &mut transaction,
+                &id,
+                hostname,
+                input.owner_user_id,
+                input.now_unix,
+            )
+            .await?;
+        }
         insert_project_audit(
             &mut transaction,
             input.owner_user_id,
@@ -1451,6 +1472,15 @@ impl Store {
         &self,
         input: NewProject<'_>,
     ) -> Result<ProjectSummary, StoreError> {
+        self.create_project_with_domain(input, None).await
+    }
+
+    /// Creates a project and optional generated hostname atomically.
+    pub async fn create_project_with_domain(
+        &self,
+        input: NewProject<'_>,
+        default_hostname: Option<&str>,
+    ) -> Result<ProjectSummary, StoreError> {
         let mut transaction = self.pool.begin().await?;
         let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE slug = ?")
             .bind(input.slug)
@@ -1484,6 +1514,16 @@ impl Store {
         .bind(input.now_unix)
         .execute(&mut *transaction)
         .await?;
+        if let Some(hostname) = default_hostname {
+            insert_project_domain(
+                &mut transaction,
+                &id,
+                hostname,
+                input.owner_user_id,
+                input.now_unix,
+            )
+            .await?;
+        }
         insert_project_audit(
             &mut transaction,
             input.owner_user_id,
@@ -2564,6 +2604,45 @@ fn project_variable_from_row(row: SqliteRow) -> Result<ProjectVariable, StoreErr
     })
 }
 
+/// Adds a generated project hostname inside the project-creation transaction.
+async fn insert_project_domain(
+    transaction: &mut Transaction<'_, Sqlite>,
+    project_id: &str,
+    hostname: &str,
+    actor_user_id: &str,
+    now_unix: i64,
+) -> Result<(), StoreError> {
+    let exists = sqlx::query_scalar::<_, i64>(
+        "SELECT COUNT(*) FROM domains WHERE hostname = ? COLLATE NOCASE",
+    )
+    .bind(hostname)
+    .fetch_one(&mut **transaction)
+    .await?;
+    if exists > 0 {
+        return Err(StoreError::DomainAlreadyExists);
+    }
+    sqlx::query(
+        "INSERT INTO domains
+         (id, project_id, hostname, routing_status, created_at, updated_at)
+         VALUES (?, ?, ?, 'pending', ?, ?)",
+    )
+    .bind(Uuid::now_v7().to_string())
+    .bind(project_id)
+    .bind(hostname)
+    .bind(now_unix)
+    .bind(now_unix)
+    .execute(&mut **transaction)
+    .await?;
+    insert_project_audit(
+        transaction,
+        actor_user_id,
+        "domain.create",
+        project_id,
+        now_unix,
+    )
+    .await
+}
+
 /// Appends a project lifecycle audit event inside the caller's transaction.
 async fn insert_project_audit(
     transaction: &mut Transaction<'_, Sqlite>,
@@ -2609,6 +2688,30 @@ mod tests {
             })
             .await
             .expect("admin is created")
+    }
+
+    /// Ensures generated domains cannot be omitted or partially persisted.
+    #[tokio::test]
+    async fn project_and_default_domain_are_created_atomically() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let project = store
+            .create_project_with_domain(
+                NewProject {
+                    slug: "notes",
+                    name: "Notes",
+                    owner_user_id: &admin_id,
+                    repository_url: "https://github.com/example/notes.git",
+                    branch: "main",
+                    now_unix: 200,
+                },
+                Some("notes.apps.example.com"),
+            )
+            .await
+            .expect("project is created");
+        let domains = store.list_domains(&project.id).await.expect("domains load");
+        assert_eq!(domains.len(), 1);
+        assert_eq!(domains[0].hostname, "notes.apps.example.com");
     }
 
     /// Proves a setup token can initialize an instance exactly once.

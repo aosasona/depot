@@ -88,6 +88,18 @@ with owner `root`, group `depot`, and mode `0640` before starting either service
 
 Edit `/etc/depot/config.toml`, then initialize and check storage:
 
+To give every newly created project a predictable hostname, configure an
+optional default suffix. The guided setup asks for this value automatically:
+
+```toml
+[domains]
+default_suffix = "apps.example.com"
+```
+
+A project with slug `notes` then receives `notes.apps.example.com`. This adds
+the Caddy route; configure wildcard DNS (or equivalent individual records) to
+point that zone at the Caddy host. Existing projects are not changed.
+
 ```sh
 sudo -u depot sh -c 'umask 0007; /usr/local/bin/depot migrate --config /etc/depot/config.toml'
 sudo -u depot /usr/local/bin/depot doctor --config /etc/depot/config.toml

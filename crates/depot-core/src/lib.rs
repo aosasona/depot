@@ -15,9 +15,19 @@ pub struct Config {
     pub server: ServerConfig,
     pub database: DatabaseConfig,
     pub security: SecurityConfig,
+    #[serde(default)]
+    pub domains: DomainConfig,
     pub worker: WorkerConfig,
     #[serde(default)]
     pub github: Option<GithubAppConfig>,
+}
+
+/// Optional installation-wide defaults for newly created project hostnames.
+#[derive(Clone, Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DomainConfig {
+    #[serde(default)]
+    pub default_suffix: Option<String>,
 }
 
 /// Operator-owned GitHub App configuration shared by API and workers.
@@ -311,6 +321,8 @@ pub enum ConfigError {
     InvalidPublicOrigin,
     #[error("security.master_key_file must not be empty")]
     InvalidMasterKeyFile,
+    #[error("domains.default_suffix must be a valid public DNS suffix")]
+    InvalidDefaultDomainSuffix,
     #[error("worker workspace and timeout configuration is invalid")]
     InvalidWorkerConfig,
     #[error("github app configuration is invalid")]
@@ -447,6 +459,7 @@ impl Config {
                 public_origin: "http://127.0.0.1:8080".to_owned(),
                 master_key_file: ".tmp/master.key".to_owned(),
             },
+            domains: DomainConfig::default(),
             worker: WorkerConfig {
                 workspace_root: ".tmp/workspaces".to_owned(),
                 static_root: ".tmp/static".to_owned(),
@@ -478,6 +491,12 @@ impl Config {
         }
         if self.security.master_key_file.trim().is_empty() {
             return Err(ConfigError::InvalidMasterKeyFile);
+        }
+        if self.domains.default_suffix.as_ref().is_some_and(|suffix| {
+            !matches!(validate_domain_hostname(suffix), Ok(normalized) if normalized == *suffix)
+                || validate_domain_hostname(&format!("{}.{}", "a".repeat(63), suffix)).is_err()
+        }) {
+            return Err(ConfigError::InvalidDefaultDomainSuffix);
         }
         if self.worker.workspace_root.trim().is_empty()
             || self.worker.static_root.trim().is_empty()
@@ -575,6 +594,19 @@ mod tests {
         Config::local_default()
             .validate()
             .expect("defaults are valid");
+    }
+
+    #[test]
+    fn default_domain_suffix_is_normalized_and_public() {
+        let mut config = Config::local_default();
+        config.domains.default_suffix = Some("apps.example.com".to_owned());
+        config.validate().expect("public suffix is valid");
+
+        config.domains.default_suffix = Some("Apps.Example.com.".to_owned());
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidDefaultDomainSuffix)
+        ));
     }
 
     /// Prevents the stale-socket cleanup from ever targeting Docker or system sockets.

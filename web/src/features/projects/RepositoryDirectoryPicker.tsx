@@ -1,6 +1,6 @@
 import { useQuery } from "@tanstack/react-query";
 import { useEffect, useState } from "react";
-import { listGithubRepositoryDirectory } from "../../lib/api/client";
+import { ApiError, listGithubRepositoryDirectory } from "../../lib/api/client";
 
 type RepositoryDirectoryPickerProps = {
   installationId: number;
@@ -75,7 +75,7 @@ export function RepositoryDirectoryPicker({
         )}
         {entries.isError && (
           <span className="notice danger">
-            This directory could not be loaded from GitHub.
+            {repositoryErrorMessage(entries.error)}
           </span>
         )}
         {entries.data?.map((entry) =>
@@ -111,4 +111,11 @@ export function RepositoryDirectoryPicker({
       </footer>
     </section>
   );
+}
+
+/** Keeps safe API diagnostics while retaining a useful fallback for network failures. */
+function repositoryErrorMessage(reason: unknown) {
+  return reason instanceof ApiError || reason instanceof Error
+    ? reason.message
+    : "This directory could not be loaded from GitHub.";
 }

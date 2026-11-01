@@ -52,6 +52,7 @@ struct ApiState {
     secrets: Option<SecretCipher>,
     github_fallback: Option<GithubIntegration>,
     public_origin: Option<std::sync::Arc<str>>,
+    default_domain_suffix: Option<std::sync::Arc<str>>,
     shell: Option<ShellBroker>,
 }
 
@@ -520,6 +521,17 @@ pub fn router_with_shell(
     github: Option<GithubIntegration>,
     shell: Option<ShellBroker>,
 ) -> Router {
+    router_with_shell_and_domains(store, secrets, github, shell, None)
+}
+
+/// Builds API routes with shell access and an optional generated domain suffix.
+pub fn router_with_shell_and_domains(
+    store: Store,
+    secrets: Option<SecretCipher>,
+    github: Option<GithubIntegration>,
+    shell: Option<ShellBroker>,
+    default_domain_suffix: Option<String>,
+) -> Router {
     let public_origin = shell.as_ref().map(|broker| broker.public_origin.clone());
     Router::new()
         .route(
@@ -653,6 +665,7 @@ pub fn router_with_shell(
             secrets,
             github_fallback: github,
             public_origin,
+            default_domain_suffix: default_domain_suffix.map(std::sync::Arc::from),
             shell,
         })
 }
@@ -934,9 +947,10 @@ async fn import_github_project(
         branch,
     )?;
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let default_hostname = default_project_hostname(&state, &request.slug);
     let project = state
         .store
-        .create_github_project(
+        .create_github_project_with_domain(
             NewProject {
                 slug: &request.slug,
                 name: request.name.trim(),
@@ -953,8 +967,12 @@ async fn import_github_project(
                 repository_full_name: repository.full_name,
                 private: repository.private,
             },
+            default_hostname.as_deref(),
         )
         .await?;
+    if default_hostname.is_some() {
+        state.store.enqueue_domain_reconciliation(now).await?;
+    }
     Ok((StatusCode::CREATED, Json(project_response(project))))
 }
 
@@ -2162,18 +2180,33 @@ async fn create_project(
         &request.branch,
     )?;
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let default_hostname = default_project_hostname(&state, &request.slug);
     let project = state
         .store
-        .create_project(NewProject {
-            slug: &request.slug,
-            name: request.name.trim(),
-            owner_user_id: &actor.id,
-            repository_url: &request.repository_url,
-            branch: request.branch.trim(),
-            now_unix: now,
-        })
+        .create_project_with_domain(
+            NewProject {
+                slug: &request.slug,
+                name: request.name.trim(),
+                owner_user_id: &actor.id,
+                repository_url: &request.repository_url,
+                branch: request.branch.trim(),
+                now_unix: now,
+            },
+            default_hostname.as_deref(),
+        )
         .await?;
+    if default_hostname.is_some() {
+        state.store.enqueue_domain_reconciliation(now).await?;
+    }
     Ok((StatusCode::CREATED, Json(project_response(project))))
+}
+
+/// Derives the configured default hostname from an already validated project slug.
+fn default_project_hostname(state: &ApiState, slug: &str) -> Option<String> {
+    state
+        .default_domain_suffix
+        .as_ref()
+        .map(|suffix| format!("{slug}.{suffix}"))
 }
 
 /// Updates mutable Git source metadata after session-bound CSRF validation.
@@ -2829,6 +2862,26 @@ impl IntoResponse for ApiError {
                 StatusCode::SERVICE_UNAVAILABLE,
                 "github_unavailable",
                 "GitHub integration is not configured on this Depot instance.",
+            ),
+            Self::Github(GithubError::RepositoryUnavailable) => (
+                StatusCode::BAD_GATEWAY,
+                "github_repository_unavailable",
+                "This repository is no longer accessible to the linked GitHub App installation.",
+            ),
+            Self::Github(GithubError::DirectoryUnavailable) => (
+                StatusCode::BAD_GATEWAY,
+                "github_directory_unavailable",
+                "That branch or directory is unavailable. Check the path and grant the GitHub App Contents: read permission.",
+            ),
+            Self::Github(GithubError::ContentsForbidden) => (
+                StatusCode::BAD_GATEWAY,
+                "github_contents_forbidden",
+                "The GitHub App cannot read repository contents. Grant it Contents: read permission, approve the installation update, then try again.",
+            ),
+            Self::Github(GithubError::EmptyRepository) => (
+                StatusCode::BAD_GATEWAY,
+                "github_repository_empty",
+                "This repository is empty and has no folders to inspect yet.",
             ),
             Self::Github(error) => {
                 error!(?error, "GitHub integration request failed");

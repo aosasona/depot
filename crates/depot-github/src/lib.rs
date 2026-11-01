@@ -110,6 +110,12 @@ pub enum GithubError {
     InvalidResponse,
     #[error("repository is not accessible to this GitHub App installation")]
     RepositoryUnavailable,
+    #[error("repository directory or Git reference does not exist")]
+    DirectoryUnavailable,
+    #[error("GitHub App cannot read repository contents")]
+    ContentsForbidden,
+    #[error("repository is empty and has no contents to browse")]
+    EmptyRepository,
 }
 
 impl GithubAppClient {
@@ -192,7 +198,13 @@ impl GithubAppClient {
         let token = self.installation_token(installation_id).await?;
         let repository: Repository = self
             .installation_get(&token, &format!("/repositories/{repository_id}"))
-            .await?;
+            .await
+            .map_err(|error| match error {
+                GithubError::Rejected(StatusCode::NOT_FOUND | StatusCode::FORBIDDEN) => {
+                    GithubError::RepositoryUnavailable
+                }
+                error => error,
+            })?;
         let mut url = reqwest::Url::parse("https://api.github.com")
             .map_err(|_| GithubError::InvalidResponse)?;
         {
@@ -209,7 +221,15 @@ impl GithubAppClient {
             }
         }
         url.query_pairs_mut().append_pair("ref", reference);
-        let mut entries: Vec<RepositoryEntry> = self.installation_get_url(&token, url).await?;
+        let mut entries: Vec<RepositoryEntry> = self
+            .installation_get_url(&token, url)
+            .await
+            .map_err(|error| match error {
+                GithubError::Rejected(StatusCode::NOT_FOUND) => GithubError::DirectoryUnavailable,
+                GithubError::Rejected(StatusCode::FORBIDDEN) => GithubError::ContentsForbidden,
+                GithubError::Rejected(StatusCode::CONFLICT) => GithubError::EmptyRepository,
+                error => error,
+            })?;
         entries.sort_by(|left, right| {
             let left_file = left.kind != "dir";
             let right_file = right.kind != "dir";

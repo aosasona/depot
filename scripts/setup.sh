@@ -287,6 +287,25 @@ configure_vm() {
     validate_safe_value "$public_origin" "Public origin"
     refuse_wildcard_bind "$bind" "Depot listen address"
     case "$public_origin" in https://*) ;; *) die "Public dashboard origin must use HTTPS in guided production setup." ;; esac
+    prompt "Default app domain suffix (leave blank to add domains manually)" ""
+    default_domain_suffix=$(printf '%s' "$REPLY" | tr '[:upper:]' '[:lower:]')
+    default_domain_suffix=${default_domain_suffix%.}
+    domains_section=
+    if [ -n "$default_domain_suffix" ]; then
+        validate_safe_value "$default_domain_suffix" "Default app domain suffix"
+        case "$default_domain_suffix" in
+            *.*) ;;
+            *) die "Default app domain suffix must be a public DNS name such as apps.example.com." ;;
+        esac
+        case "$default_domain_suffix" in
+            *[!a-z0-9.-]*|.*|*.|*-.*|*.-*|*..*)
+                die "Default app domain suffix must contain valid lowercase DNS labels."
+                ;;
+        esac
+        domains_section="
+[domains]
+default_suffix = \"$default_domain_suffix\""
+    fi
     prompt "Caddy agent address (leave blank to configure later)" ""
     agent_address=$REPLY
     agent_section=
@@ -331,6 +350,11 @@ webhook_secret_file = \"/etc/depot/github-webhook-secret\""
     say "  role: Depot VM"
     say "  listen: $bind"
     say "  public origin: $public_origin"
+    if [ -n "$default_domain_suffix" ]; then
+        say "  default app domain: <project>.$default_domain_suffix"
+    else
+        say "  default app domain: not configured"
+    fi
     say "  Caddy agent: ${agent_address:-not configured}"
     [ -n "$github_section" ] && say "  GitHub App: $github_app_slug"
     confirm "Write and validate this configuration?" || die "Configuration was not changed."
@@ -340,6 +364,7 @@ webhook_secret_file = \"/etc/depot/github-webhook-secret\""
         printf '[server]\nbind = "%s"\n\n' "$bind"
         printf '[database]\nurl = "sqlite:///var/lib/depot/depot.db"\n\n'
         printf '[security]\npublic_origin = "%s"\nmaster_key_file = "/etc/depot/master.key"\n\n' "$public_origin"
+        printf '%s\n' "$domains_section"
         printf '[worker]\nworkspace_root = "/var/lib/depot/workspaces"\nstatic_root = "/var/lib/depot/static"\ngit_timeout_seconds = 120\ndocker_binary = "docker"\nrailpack_binary = "/usr/local/bin/railpack"\nshell_socket = "/var/lib/depot/worker-shell.sock"\ndocker_timeout_seconds = 1800\n'
         printf '%s\n' "$agent_section"
         printf '%s\n' "$github_section"
