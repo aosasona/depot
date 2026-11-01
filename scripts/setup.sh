@@ -208,6 +208,25 @@ install_dependencies() {
         docker version >/dev/null 2>&1 || die "Docker is installed but the daemon is unavailable."
         say "[ok] Docker daemon is reachable."
         git --version
+        if ! command -v railpack >/dev/null 2>&1; then
+            confirm "Install the Railpack static/service builder from railpack.com?" || die "Install Railpack, then rerun setup."
+            railpack_installer=$(mktemp /tmp/depot-railpack-install.XXXXXX)
+            curl --fail --location --silent --show-error https://railpack.com/install.sh --output "$railpack_installer"
+            sh "$railpack_installer" --bin-dir /usr/local/bin
+            rm -f "$railpack_installer"
+        fi
+        railpack --version >/dev/null 2>&1 || die "Railpack was installed but could not run."
+        say "[ok] Railpack is available."
+        if docker inspect depot-buildkit >/dev/null 2>&1; then
+            if [ "$(docker inspect --format '{{.State.Running}}' depot-buildkit)" != true ]; then
+                confirm "Start the existing Depot BuildKit container?" || die "BuildKit must run for Railpack builds."
+                docker start depot-buildkit >/dev/null
+            fi
+        else
+            confirm "Create the isolated Depot BuildKit container for Railpack?" || die "BuildKit is required for Railpack builds."
+            docker run --detach --privileged --restart unless-stopped --name depot-buildkit moby/buildkit >/dev/null
+        fi
+        say "[ok] Depot BuildKit is running."
     else
         caddy version
         systemctl is-active --quiet caddy.service || warn "Caddy is installed but caddy.service is not currently active."
@@ -320,7 +339,7 @@ webhook_secret_file = \"/etc/depot/github-webhook-secret\""
         printf '[server]\nbind = "%s"\n\n' "$bind"
         printf '[database]\nurl = "sqlite:///var/lib/depot/depot.db"\n\n'
         printf '[security]\npublic_origin = "%s"\nmaster_key_file = "/etc/depot/master.key"\n\n' "$public_origin"
-        printf '[worker]\nworkspace_root = "/var/lib/depot/workspaces"\nstatic_root = "/var/lib/depot/static"\ngit_timeout_seconds = 120\ndocker_binary = "docker"\ndocker_timeout_seconds = 1800\n'
+        printf '[worker]\nworkspace_root = "/var/lib/depot/workspaces"\nstatic_root = "/var/lib/depot/static"\ngit_timeout_seconds = 120\ndocker_binary = "docker"\nrailpack_binary = "railpack"\ndocker_timeout_seconds = 1800\n'
         printf '%s\n' "$agent_section"
         printf '%s\n' "$github_section"
     } > "$config_temp"

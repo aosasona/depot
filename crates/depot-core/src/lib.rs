@@ -60,6 +60,8 @@ pub struct WorkerConfig {
     pub git_timeout_seconds: u64,
     #[serde(default = "default_docker_binary")]
     pub docker_binary: String,
+    #[serde(default = "default_railpack_binary")]
+    pub railpack_binary: String,
     #[serde(default = "default_docker_timeout_seconds")]
     pub docker_timeout_seconds: u64,
     pub caddy_agent: Option<CaddyAgentClientConfig>,
@@ -78,6 +80,11 @@ pub struct CaddyAgentClientConfig {
 /// Returns the conventional Docker CLI name for operator PATH resolution.
 fn default_docker_binary() -> String {
     "docker".to_owned()
+}
+
+/// Returns the conventional Railpack CLI name for operator PATH resolution.
+fn default_railpack_binary() -> String {
+    "railpack".to_owned()
 }
 
 /// Returns the production static artifact root used by packaged installations.
@@ -253,6 +260,7 @@ impl Config {
                 static_root: ".tmp/static".to_owned(),
                 git_timeout_seconds: 120,
                 docker_binary: default_docker_binary(),
+                railpack_binary: default_railpack_binary(),
                 docker_timeout_seconds: default_docker_timeout_seconds(),
                 caddy_agent: None,
             },
@@ -284,6 +292,7 @@ impl Config {
             || self.worker.git_timeout_seconds == 0
             || self.worker.git_timeout_seconds > 1_800
             || self.worker.docker_binary.trim().is_empty()
+            || self.worker.railpack_binary.trim().is_empty()
             || self.worker.docker_timeout_seconds == 0
             || self.worker.docker_timeout_seconds > 7_200
         {

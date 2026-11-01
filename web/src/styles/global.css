@@ -1,6 +1,6 @@
 :root {
   color-scheme: dark;
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--ui-font);
   background: #0d0d0d;
   color: #f2f2f2;
   font-synthesis: none;
@@ -12,6 +12,9 @@
   --accent: #c6f547;
   --accent-foreground: #101010;
   --radius: 0;
+  --display-font: Inter, ui-sans-serif, system-ui, sans-serif;
+  --ui-font: Inter, ui-sans-serif, system-ui, sans-serif;
+  --mono-font: "SFMono-Regular", Consolas, "Liberation Mono", monospace;
 }
 
 * {
@@ -70,7 +73,7 @@ a {
 .technical-label,
 code,
 .eyebrow {
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   text-transform: uppercase;
   letter-spacing: 0.08em;
 }
@@ -166,7 +169,7 @@ h1 {
 .step-label {
   margin: 0;
   color: var(--accent);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.1em;
@@ -181,7 +184,7 @@ h1 {
   gap: 0.55rem;
   margin: 1rem 0;
   color: var(--muted);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.06em;
@@ -194,7 +197,7 @@ h1 {
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--ui-font);
   font-size: 1rem;
   letter-spacing: normal;
   text-transform: none;
@@ -237,7 +240,7 @@ h1 {
   background: transparent;
   color: var(--accent);
   cursor: pointer;
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.72rem;
   font-weight: 700;
   text-transform: uppercase;
@@ -342,7 +345,7 @@ h1 {
   padding: 0.9rem 1.2rem;
   color: var(--muted);
   cursor: pointer;
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.68rem;
   text-transform: uppercase;
 }
@@ -380,7 +383,7 @@ h1 {
   height: 42px;
   background: var(--accent);
   color: var(--accent-foreground);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-weight: 900;
 }
 .project-card h3 {
@@ -391,7 +394,7 @@ h1 {
   overflow: hidden;
   margin: 0.45rem 0 0;
   color: var(--muted);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.68rem;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -404,7 +407,7 @@ h1 {
 }
 .project-card dt {
   color: var(--muted);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.62rem;
   text-transform: uppercase;
 }
@@ -433,7 +436,7 @@ h1 {
 }
 .inspection-result strong {
   color: var(--accent);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.7rem;
   text-transform: uppercase;
 }
@@ -482,7 +485,7 @@ h1 {
   display: grid;
   gap: 0.4rem;
   color: var(--muted);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.62rem;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -495,7 +498,7 @@ h1 {
   border: 1px solid var(--border);
   background: var(--bg);
   color: var(--text);
-  font-family: Inter, ui-sans-serif, system-ui, sans-serif;
+  font-family: var(--ui-font);
   font-size: 0.82rem;
   letter-spacing: normal;
   text-transform: none;
@@ -559,7 +562,7 @@ h1 {
 .deployment-status {
   padding: 0.25rem 0.4rem;
   border: 1px solid var(--border);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   text-transform: uppercase;
 }
 .deployment-status.succeeded {
@@ -666,7 +669,7 @@ h1 {
   display: grid;
   gap: 0.4rem;
   color: var(--muted);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.62rem;
   letter-spacing: 0.06em;
 }
@@ -677,7 +680,7 @@ h1 {
   border: 1px solid var(--border);
   background: var(--surface);
   color: var(--text);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.68rem;
   line-height: 1.45;
 }
@@ -730,7 +733,7 @@ h1 {
   padding: 0.7rem;
   background: var(--accent);
   color: var(--accent-foreground);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.7rem;
   font-weight: 900;
 }
@@ -775,7 +778,7 @@ td {
 }
 th {
   color: var(--muted);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.68rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
@@ -788,7 +791,7 @@ td {
   background: transparent;
   color: var(--text);
   cursor: pointer;
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.7rem;
   text-transform: uppercase;
 }
@@ -866,8 +869,9 @@ td {
   --border: #27272a;
   --text: #f4f4f5;
   --muted: #a1a1aa;
-  --accent: #8b5cf6;
-  --accent-foreground: #fff;
+  --accent: #c6f547;
+  --accent-foreground: #101010;
+  font-family: var(--ui-font);
 }
 .app-sidebar {
   position: sticky;
@@ -893,14 +897,14 @@ td {
   flex: 0 0 auto;
   place-items: center;
   background: var(--accent);
-  color: #fff;
+  color: var(--accent-foreground);
   font-weight: 750;
 }
 .brand-mark {
   width: 28px;
   height: 28px;
-  border-radius: 7px;
-  box-shadow: 0 0 24px rgb(139 92 246 / 25%);
+  border-radius: 0;
+  box-shadow: none;
 }
 .brand-word {
   font-size: 1rem;
@@ -914,13 +918,13 @@ td {
   margin: 1rem 0 1.4rem;
   padding: 0.65rem;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 0;
   background: var(--surface);
 }
 .workspace-avatar {
   width: 30px;
   height: 30px;
-  border-radius: 6px;
+  border-radius: 0;
   background: #27272a;
   font-size: 0.75rem;
 }
@@ -955,7 +959,7 @@ td {
   min-height: 38px;
   padding: 0 0.7rem;
   border: 0;
-  border-radius: 6px;
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -999,9 +1003,9 @@ td {
 .control-plane-status i {
   width: 7px;
   height: 7px;
-  border-radius: 50%;
+  border-radius: 0;
   background: #22c55e;
-  box-shadow: 0 0 10px rgb(34 197 94 / 45%);
+  box-shadow: none;
 }
 .sidebar-version {
   color: #52525b;
@@ -1044,7 +1048,7 @@ td {
 .account-avatar {
   width: 28px;
   height: 28px;
-  border-radius: 50%;
+  border-radius: 0;
   font-size: 0.7rem;
 }
 .account-copy {
@@ -1055,7 +1059,7 @@ td {
   margin-left: 0.35rem;
   padding: 0 0.7rem;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 0;
   background: transparent;
   color: var(--muted);
   cursor: pointer;
@@ -1078,7 +1082,7 @@ td {
 }
 .page-intro .eyebrow {
   margin: 0 0 0.55rem;
-  color: #a78bfa;
+  color: var(--accent);
   font-size: 0.65rem;
 }
 .page-intro h1 {
@@ -1095,7 +1099,7 @@ td {
 .control-plane-status {
   padding: 0.55rem 0.75rem;
   border: 1px solid var(--border);
-  border-radius: 999px;
+  border-radius: 0;
   background: var(--surface);
   color: var(--muted);
   font-size: 0.68rem;
@@ -1135,7 +1139,7 @@ td {
   overflow: hidden;
   margin-bottom: 1rem;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--surface);
 }
 .app-content .github-import > * {
@@ -1149,13 +1153,13 @@ td {
 .app-content .github-connect,
 .app-content .table-action,
 .app-content .primary-action {
-  border-radius: 6px;
+  border-radius: 0;
   text-transform: none;
 }
 .app-content .github-connect {
-  border-color: #6d5bd0;
-  background: #6d5bd0;
-  color: #fff;
+  border-color: var(--accent);
+  background: var(--accent);
+  color: var(--accent-foreground);
 }
 .app-content .manual-project {
   border-bottom: 1px solid var(--border);
@@ -1170,7 +1174,7 @@ td {
 }
 .app-content .project-card {
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--surface);
 }
 .app-content .project-card:hover {
@@ -1178,9 +1182,9 @@ td {
   background: #131317;
 }
 .app-content .project-index {
-  border-radius: 7px;
-  background: #29252f;
-  color: #c4b5fd;
+  border-radius: 0;
+  background: var(--accent);
+  color: var(--accent-foreground);
 }
 .app-content .inspection-result,
 .app-content .config-form,
@@ -1188,12 +1192,12 @@ td {
 .app-content .domain-row,
 .app-content .credential-form textarea,
 .app-content .environment-form input:not([type="checkbox"]) {
-  border-radius: 6px;
+  border-radius: 0;
   background: var(--surface-raised);
 }
 .app-content input,
 .app-content select {
-  border-radius: 6px;
+  border-radius: 0;
 }
 .app-content .primary-action {
   background: var(--accent);
@@ -1201,7 +1205,7 @@ td {
 }
 .app-content .empty-state {
   border: 1px dashed #3f3f46;
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--surface);
 }
 
@@ -1257,7 +1261,7 @@ td {
   min-height: 76px;
   padding: 1rem;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--surface);
   color: var(--text);
   cursor: pointer;
@@ -1285,9 +1289,9 @@ td {
 .project-branch {
   padding: 0.3rem 0.5rem;
   border: 1px solid var(--border);
-  border-radius: 5px;
+  border-radius: 0;
   color: var(--muted);
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.63rem;
 }
 .project-readiness {
@@ -1301,7 +1305,7 @@ td {
 .project-readiness i {
   width: 6px;
   height: 6px;
-  border-radius: 50%;
+  border-radius: 0;
   background: #71717a;
 }
 .project-readiness.ready i {
@@ -1374,12 +1378,12 @@ td {
   max-width: 34rem;
   padding: 3rem;
   border: 1px solid var(--border);
-  border-radius: 12px;
+  border-radius: 0;
   background: var(--surface);
 }
 .project-not-found > span {
-  color: #a78bfa;
-  font-family: "SFMono-Regular", Consolas, monospace;
+  color: var(--accent);
+  font-family: var(--mono-font);
   font-size: 0.72rem;
 }
 .app-content .project-not-found h2 {
@@ -1395,7 +1399,7 @@ td {
 .project-not-found a {
   padding: 0.55rem 0.75rem;
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 0;
   color: var(--text);
   font-size: 0.72rem;
   text-decoration: none;
@@ -1429,7 +1433,7 @@ td {
   min-width: 0;
   padding: 1.2rem;
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: 0;
   background: var(--surface);
 }
 .surface-heading {
@@ -1456,7 +1460,7 @@ td {
   margin: 0;
   padding: 1rem;
   border: 1px dashed var(--border);
-  border-radius: 7px;
+  border-radius: 0;
 }
 .project-source-card dl {
   display: grid;
@@ -1475,7 +1479,7 @@ td {
 .project-source-card dd {
   overflow: hidden;
   margin: 0;
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.68rem;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1509,7 +1513,7 @@ td {
 .deployment-log {
   overflow: hidden;
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 0;
   background: #0c0c0f;
 }
 .deployment-log summary {
@@ -1538,13 +1542,13 @@ td {
   border-top: 1px solid var(--border);
   background: #070709;
   color: #d4d4d8;
-  font-family: "SFMono-Regular", Consolas, monospace;
+  font-family: var(--mono-font);
   font-size: 0.66rem;
   line-height: 1.6;
 }
 .log-line {
   display: grid;
-  grid-template-columns: 5.5rem 4rem minmax(0, 1fr);
+  grid-template-columns: 11rem 4rem minmax(0, 1fr);
   gap: 0.7rem;
 }
 .log-line time,
@@ -1589,7 +1593,7 @@ td {
     flex-direction: column;
   }
   .log-line {
-    grid-template-columns: 4rem minmax(0, 1fr);
+    grid-template-columns: 8.5rem minmax(0, 1fr);
   }
   .log-line > span {
     display: none;
@@ -2019,7 +2023,7 @@ td {
 }
 .canvas-node.live > div > i {
   background: var(--accent);
-  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
+  box-shadow: none;
 }
 .canvas-node ul {
   margin: 0;

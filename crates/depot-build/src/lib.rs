@@ -36,8 +36,11 @@ pub struct DockerBuildResult {
 #[derive(Debug)]
 pub struct StaticBuildRequest<'a> {
     pub docker_binary: &'a str,
+    pub railpack_binary: &'a str,
     pub checkout_path: &'a Path,
     pub context_path: &'a str,
+    pub dockerfile_path: &'a str,
+    pub builder: &'a str,
     pub output_directory: &'a str,
     pub static_root: &'a Path,
     pub project_id: &'a str,
@@ -67,7 +70,7 @@ pub enum BuildError {
     ImageId(#[source] std::io::Error),
     #[error("Docker build paths must remain inside the verified repository checkout")]
     UnsafePath,
-    #[error("static output requires a supported npm, pnpm, or Yarn project")]
+    #[error("static output requires a package.json, Dockerfile, or Railpack project")]
     UnsupportedStaticProject,
     #[error("static artifact extraction failed: {0}")]
     StaticArtifact(String),
@@ -142,7 +145,12 @@ pub async fn build_static(
     if !context.starts_with(&checkout) || !safe_relative_path(request.output_directory) {
         return Err(BuildError::UnsafePath);
     }
-    let package_command = static_package_command(&context)?;
+    let builder = resolve_static_builder(
+        request.builder,
+        &checkout,
+        &context,
+        request.dockerfile_path,
+    )?;
     let project_root = request.static_root.join(request.project_id);
     let releases_root = project_root.join("releases");
     fs::create_dir_all(&releases_root)
@@ -156,15 +164,23 @@ pub async fn build_static(
     }
     fs::create_dir_all(&staging).map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
 
-    let result = build_and_extract_static_image(
-        request.docker_binary,
-        &context,
-        request.output_directory,
-        package_command,
-        &staging,
-        request.timeout,
-    )
-    .await;
+    let result = match builder {
+        StaticBuilder::Node(package_command) => {
+            build_and_extract_static_image(
+                request.docker_binary,
+                &context,
+                request.output_directory,
+                package_command,
+                &staging,
+                request.timeout,
+            )
+            .await
+        }
+        StaticBuilder::Dockerfile => {
+            build_and_extract_dockerfile_static(&request, &context, &staging).await
+        }
+        StaticBuilder::Railpack => build_and_extract_railpack(&request, &context, &staging).await,
+    };
     let logs = match result {
         Ok(logs) => logs,
         Err(error) => {
@@ -181,6 +197,29 @@ pub async fn build_static(
     })
 }
 
+/// Supported static build engines after resolving the user's explicit or automatic choice.
+enum StaticBuilder {
+    Node(&'static str),
+    Dockerfile,
+    Railpack,
+}
+
+/// Resolves auto to a Dockerfile first and then the deterministic Node builder.
+fn resolve_static_builder(
+    configured: &str,
+    checkout: &Path,
+    context: &Path,
+    dockerfile_path: &str,
+) -> Result<StaticBuilder, BuildError> {
+    match configured {
+        "dockerfile" => Ok(StaticBuilder::Dockerfile),
+        "railpack" => Ok(StaticBuilder::Railpack),
+        "auto" if checkout.join(dockerfile_path).is_file() => Ok(StaticBuilder::Dockerfile),
+        "auto" => static_package_command(context).map(StaticBuilder::Node),
+        _ => Err(BuildError::UnsupportedStaticProject),
+    }
+}
+
 /// Selects a deterministic install/build command from a committed Node lockfile.
 fn static_package_command(context: &Path) -> Result<&'static str, BuildError> {
     if context.join("pnpm-lock.yaml").is_file() {
@@ -189,8 +228,192 @@ fn static_package_command(context: &Path) -> Result<&'static str, BuildError> {
         Ok("corepack enable && yarn install --immutable && yarn build")
     } else if context.join("package-lock.json").is_file() {
         Ok("npm ci && npm run build")
+    } else if context.join("package.json").is_file() {
+        Ok("npm install --no-audit --no-fund && npm run build")
     } else {
         Err(BuildError::UnsupportedStaticProject)
+    }
+}
+
+/// Builds a configured Dockerfile and extracts the static tree from its final image.
+async fn build_and_extract_dockerfile_static(
+    request: &StaticBuildRequest<'_>,
+    _context: &Path,
+    staging: &Path,
+) -> Result<String, BuildError> {
+    let image_tag = format!("depot/{}:static-{}", request.project_id, request.release_id);
+    let built = build_dockerfile(DockerBuildRequest {
+        docker_binary: request.docker_binary,
+        checkout_path: request.checkout_path,
+        context_path: request.context_path,
+        dockerfile_path: request.dockerfile_path,
+        image_tag: &image_tag,
+        timeout: request.timeout,
+    })
+    .await?;
+    let artifact_path = dockerfile_artifact_path(
+        request.checkout_path,
+        request.dockerfile_path,
+        request.output_directory,
+    );
+    let extraction = extract_image_directory(
+        request.docker_binary,
+        &built.image_id,
+        &artifact_path,
+        staging,
+        request.timeout,
+    )
+    .await;
+    let mut remove_image = Command::new(request.docker_binary);
+    let _ = remove_image
+        .args(["image", "rm", &built.image_id])
+        .output()
+        .await;
+    extraction.map(|()| built.logs)
+}
+
+/// Follows a simple multi-stage COPY when the final image relocates the configured output.
+fn dockerfile_artifact_path(checkout: &Path, dockerfile_path: &str, output: &str) -> String {
+    let Ok(contents) = fs::read_to_string(checkout.join(dockerfile_path)) else {
+        return output.to_owned();
+    };
+    for line in contents.lines().rev() {
+        let fields = line.split_whitespace().collect::<Vec<_>>();
+        if fields.len() < 4
+            || !fields[0].eq_ignore_ascii_case("COPY")
+            || !fields[1].starts_with("--from=")
+        {
+            continue;
+        }
+        let source = fields[fields.len() - 2].trim_end_matches('/');
+        let destination = fields[fields.len() - 1].trim_end_matches('/');
+        let source_matches = source == output.trim_matches('/')
+            || source.ends_with(&format!("/{}", output.trim_matches('/')));
+        let destination_is_safe = destination.starts_with('/')
+            && destination.len() <= 255
+            && !destination.split('/').any(|segment| segment == "..");
+        if source_matches && destination_is_safe {
+            return destination.trim_start_matches('/').to_owned();
+        }
+    }
+    output.to_owned()
+}
+
+/// Exports a Railpack final filesystem and copies the configured artifact directory.
+async fn build_and_extract_railpack(
+    request: &StaticBuildRequest<'_>,
+    context: &Path,
+    staging: &Path,
+) -> Result<String, BuildError> {
+    let export = staging.with_extension("railpack-rootfs");
+    fs::create_dir_all(&export).map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
+    let mut command = Command::new(request.railpack_binary);
+    command
+        .args(["build", "--progress", "plain", "--output"])
+        .arg(&export)
+        .arg(context)
+        .env("BUILDKIT_HOST", "docker-container://depot-buildkit")
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = tokio::time::timeout(request.timeout, command.output())
+        .await
+        .map_err(|_| BuildError::Timeout)?
+        .map_err(BuildError::Spawn)?;
+    let logs = bounded_logs(&output.stdout, &output.stderr);
+    if !output.status.success() {
+        let _ = fs::remove_dir_all(&export);
+        return Err(BuildError::Failed(logs));
+    }
+    let artifact_result = locate_exported_artifact(&export, request.output_directory)
+        .and_then(|artifact| copy_artifact_tree(&artifact, staging));
+    let _ = fs::remove_dir_all(&export);
+    artifact_result?;
+    Ok(logs)
+}
+
+/// Finds the configured path in common Railpack application roots without ambiguity.
+fn locate_exported_artifact(root: &Path, output_directory: &str) -> Result<PathBuf, BuildError> {
+    for prefix in ["", "app", "workspace"] {
+        let candidate = if prefix.is_empty() {
+            root.join(output_directory)
+        } else {
+            root.join(prefix).join(output_directory)
+        };
+        if candidate.is_dir() {
+            return Ok(candidate);
+        }
+    }
+    Err(BuildError::StaticArtifact(format!(
+        "configured output directory '{output_directory}' was not present in the Railpack filesystem"
+    )))
+}
+
+/// Copies a verified regular-file directory tree without following symbolic links.
+fn copy_artifact_tree(source: &Path, destination: &Path) -> Result<(), BuildError> {
+    for entry in
+        fs::read_dir(source).map_err(|error| BuildError::StaticArtifact(error.to_string()))?
+    {
+        let entry = entry.map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
+        let metadata = fs::symlink_metadata(entry.path())
+            .map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
+        let target = destination.join(entry.file_name());
+        if metadata.is_dir() {
+            fs::create_dir_all(&target)
+                .map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
+            copy_artifact_tree(&entry.path(), &target)?;
+        } else if metadata.is_file() {
+            fs::copy(entry.path(), target)
+                .map_err(|error| BuildError::StaticArtifact(error.to_string()))?;
+        } else {
+            return Err(BuildError::StaticArtifact(
+                "static output contains a symbolic link or special file".to_owned(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Copies one directory from an immutable image into the release staging tree.
+async fn extract_image_directory(
+    docker_binary: &str,
+    image_id: &str,
+    output_directory: &str,
+    staging: &Path,
+    timeout: Duration,
+) -> Result<(), BuildError> {
+    let mut create = Command::new(docker_binary);
+    create
+        .args(["create", image_id, "/bin/true"])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let created = tokio::time::timeout(timeout, create.output())
+        .await
+        .map_err(|_| BuildError::Timeout)?
+        .map_err(BuildError::Spawn)?;
+    if !created.status.success() {
+        return Err(BuildError::StaticArtifact(
+            "could not create artifact extraction container".to_owned(),
+        ));
+    }
+    let container_id = String::from_utf8_lossy(&created.stdout).trim().to_owned();
+    let container_path = format!("{container_id}:/{}/.", output_directory.trim_matches('/'));
+    let mut copy = Command::new(docker_binary);
+    copy.args(["cp", &container_path])
+        .arg(staging)
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let copied = tokio::time::timeout(timeout, copy.output())
+        .await
+        .map_err(|_| BuildError::Timeout)?
+        .map_err(BuildError::Spawn)?;
+    let mut remove = Command::new(docker_binary);
+    let _ = remove.args(["rm", "--force", &container_id]).output().await;
+    if copied.status.success() {
+        Ok(())
+    } else {
+        Err(BuildError::StaticArtifact(format!(
+            "configured output directory '{output_directory}' was not present in the final Docker image"
+        )))
     }
 }
 
@@ -348,8 +571,8 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
     use super::{
-        BuildError, DockerBuildRequest, build_dockerfile, safe_relative_path,
-        validate_artifact_tree,
+        BuildError, DockerBuildRequest, build_dockerfile, dockerfile_artifact_path,
+        safe_relative_path, static_package_command, validate_artifact_tree,
     };
 
     /// Proves the adapter passes paths as arguments and accepts canonical image IDs.
@@ -389,6 +612,39 @@ mod tests {
         assert!(!safe_relative_path("/tmp/dist"));
         assert!(!safe_relative_path("../dist"));
         assert!(!safe_relative_path("dist/../public"));
+    }
+
+    /// Proves a conventional package.json can build without a committed lockfile.
+    #[test]
+    fn static_node_builder_accepts_package_json_without_lockfile() {
+        let root =
+            std::env::temp_dir().join(format!("depot-static-package-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("test root is created");
+        fs::write(root.join("package.json"), "{}").expect("package manifest writes");
+        assert!(
+            static_package_command(&root)
+                .expect("command resolves")
+                .contains("npm install")
+        );
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Follows the final image location used by Chimney-style multi-stage builds.
+    #[test]
+    fn dockerfile_static_output_follows_multistage_copy() {
+        let root =
+            std::env::temp_dir().join(format!("depot-static-dockerfile-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("test root is created");
+        fs::write(
+            root.join("Dockerfile"),
+            "FROM node AS build\nFROM ghcr.io/aosasona/chimney:latest\nCOPY --from=build /app/dist /var/www/html/example\n",
+        )
+        .expect("Dockerfile writes");
+        assert_eq!(
+            dockerfile_artifact_path(&root, "Dockerfile", "dist"),
+            "var/www/html/example"
+        );
+        fs::remove_dir_all(root).expect("test root is removed");
     }
 
     /// Rejects symlinks so a promoted artifact cannot escape its immutable root.

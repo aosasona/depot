@@ -50,6 +50,7 @@ packages. Verify the daemon before granting Depot access:
 ```sh
 sudo docker version
 git --version
+railpack --version
 ```
 
 Download a release asset named `depot-linux-x86_64`, verify its provenance,
@@ -67,6 +68,13 @@ adds only `depot-worker` to that group. Docker daemon access is effectively
 root-equivalent; use a dedicated VM. It also creates `/etc/depot/master.key`
 once with restricted permissions. Back up that key separately from SQLite;
 stored runtime values cannot be recovered without it.
+
+The guided VM setup installs Railpack from its official installer when absent
+and creates a restartable `depot-buildkit` container. Railpack builds use
+`BUILDKIT_HOST=docker-container://depot-buildkit`; Dockerfile and contained Node
+static builds do not depend on that container. Manual installations must
+provide the same Railpack CLI and BuildKit endpoint before selecting that
+builder.
 
 Never store `master.key` beside an unencrypted SQLite backup. A minimal backup
 set contains `/var/lib/depot/depot.db` (captured with SQLite's backup command)

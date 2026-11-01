@@ -158,6 +158,8 @@ enum AppError {
     KeyWrite(#[source] std::io::Error),
     #[error("GitHub App configuration could not be loaded: {0}")]
     GithubConfig(String),
+    #[error("required dependency check failed: {0}")]
+    Dependency(String),
 }
 
 /// Parses the command line and runs the selected Depot process mode.
@@ -298,8 +300,31 @@ async fn doctor(config: Config) -> Result<(), AppError> {
         .map_err(AppError::Bind)?;
     drop(listener);
     println!("[ok] listener {} is available", config.server.bind);
+    verify_command(&config.worker.docker_binary, &["--version"]).await?;
+    println!("[ok] Docker CLI is available");
+    verify_command(&config.worker.railpack_binary, &["--version"]).await?;
+    println!("[ok] Railpack CLI is available");
     println!("Depot {} is ready to start.", env!("CARGO_PKG_VERSION"));
     Ok(())
+}
+
+/// Verifies one configured dependency using fixed non-shell arguments.
+async fn verify_command(binary: &str, arguments: &[&str]) -> Result<(), AppError> {
+    let status = tokio::process::Command::new(binary)
+        .args(arguments)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .await
+        .map_err(|error| AppError::Dependency(format!("{binary}: {error}")))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(AppError::Dependency(format!(
+            "{binary} exited unsuccessfully"
+        )))
+    }
 }
 
 /// Runs the durable worker claim loop with bounded polling and graceful shutdown.
@@ -589,7 +614,7 @@ async fn execute_deployment(
         .service_config(project_id)
         .await
         .map_err(|_| "Deployment configuration is unavailable.".to_owned())?;
-    if config.builder == "railpack" {
+    if config.builder == "railpack" && config.project_kind != "static" {
         return Err("Railpack builds are not implemented yet.".to_owned());
     }
     let mut ssh =
@@ -628,8 +653,11 @@ async fn execute_deployment(
             .ok_or_else(|| "Static projects require an output directory.".to_owned())?;
         let built = depot_build::build_static(depot_build::StaticBuildRequest {
             docker_binary: &worker_config.docker_binary,
+            railpack_binary: &worker_config.railpack_binary,
             checkout_path: checkout.path(),
             context_path: &config.context_path,
+            dockerfile_path: &config.dockerfile_path,
+            builder: &config.builder,
             output_directory,
             static_root: Path::new(&worker_config.static_root),
             project_id,

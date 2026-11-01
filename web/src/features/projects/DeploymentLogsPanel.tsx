@@ -86,8 +86,7 @@ function RuntimeLogs({ projectId }: { projectId: string }) {
         <span>ACTIVE RELEASE</span>
         <code>{runtime.data.deployment_id?.slice(0, 12)}</code>
         <time>
-          Updated{" "}
-          {new Date(runtime.data.fetched_at * 1_000).toLocaleTimeString()}
+          Updated {new Date(runtime.data.fetched_at * 1_000).toLocaleString()}
         </time>
       </div>
       <pre>
@@ -181,7 +180,10 @@ function DeploymentLog({
 }
 
 function formatTime(timestamp: number) {
-  return new Date(timestamp * 1_000).toLocaleTimeString([], {
+  return new Date(timestamp * 1_000).toLocaleString([], {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
     hour: "2-digit",
     minute: "2-digit",
     second: "2-digit",

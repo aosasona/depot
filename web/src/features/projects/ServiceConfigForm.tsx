@@ -198,9 +198,14 @@ function LoadedConfigForm({ config }: { config: ServiceConfig }) {
       <form.Field name="static_output_dir">
         {(field) => (
           <label>
-            Static output
+            Static output{" "}
+            {config.builder === "dockerfile"
+              ? "(path inside final image)"
+              : "directory"}
             <input
-              placeholder="dist"
+              placeholder={
+                config.builder === "dockerfile" ? "var/www/html/site" : "dist"
+              }
               value={field.state.value}
               onChange={(event) => field.handleChange(event.target.value)}
             />
