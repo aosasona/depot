@@ -361,10 +361,21 @@ mod tests {
         fs,
         os::unix::fs::PermissionsExt,
         path::PathBuf,
-        time::{SystemTime, UNIX_EPOCH},
+        sync::atomic::{AtomicU64, Ordering},
     };
 
     use super::{CaddyAgentConfig, CaddyError, check, generate_routes, reconcile};
+
+    static TEST_DIRECTORY_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    /// Returns a process-unique root so parallel and retried CI tests cannot share backups.
+    fn isolated_root(label: &str) -> PathBuf {
+        std::env::temp_dir().join(format!(
+            "depot-caddy-{label}-{}-{}",
+            std::process::id(),
+            TEST_DIRECTORY_SEQUENCE.fetch_add(1, Ordering::Relaxed)
+        ))
+    }
 
     /// Builds a safe isolated configuration for pure generation tests.
     fn config() -> CaddyAgentConfig {
@@ -425,11 +436,7 @@ mod tests {
     /// Proves a setup check validates Caddy without rewriting managed routes.
     #[tokio::test]
     async fn configuration_check_does_not_reconcile_routes() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock follows epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("depot-caddy-check-{nonce}"));
+        let root = isolated_root("check");
         let managed_directory = root.join("managed");
         fs::create_dir_all(&managed_directory).expect("managed directory is created");
         let routes = managed_directory.join("routes.caddy");
@@ -453,11 +460,7 @@ mod tests {
     /// Proves a failed reload restores the exact previously managed route file.
     #[tokio::test]
     async fn failed_reload_restores_previous_configuration() {
-        let nonce = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .expect("clock follows epoch")
-            .as_nanos();
-        let root = std::env::temp_dir().join(format!("depot-caddy-test-{nonce}"));
+        let root = isolated_root("reload");
         let managed_directory = root.join("managed");
         fs::create_dir_all(&managed_directory).expect("managed directory is created");
         fs::write(managed_directory.join("routes.caddy"), "previous contents")
@@ -477,7 +480,10 @@ mod tests {
         let error = reconcile(&config, &["app.example.com".to_owned()])
             .await
             .expect_err("reload fails");
-        assert!(matches!(error, CaddyError::ReloadFailed));
+        assert!(
+            matches!(error, CaddyError::ReloadFailed),
+            "unexpected reconciliation error: {error:?}"
+        );
         assert_eq!(
             fs::read_to_string(managed_directory.join("routes.caddy"))
                 .expect("restored config reads"),
