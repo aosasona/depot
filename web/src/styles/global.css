@@ -667,6 +667,36 @@ h1 {
   gap: 0.6rem;
   align-items: center;
 }
+.environment-entry-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: min(100%, 24rem);
+  min-width: 0;
+  margin: 0;
+  padding: 0;
+  border: 1px solid var(--border);
+  background: var(--border);
+  gap: 1px;
+}
+.environment-entry-switch button {
+  min-height: 36px;
+  padding: 0 0.8rem;
+  border: 0;
+  background: #090909;
+  color: var(--muted);
+  font: 0.64rem var(--mono-font);
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  cursor: pointer;
+}
+.environment-entry-switch button:hover {
+  color: var(--text);
+}
+.environment-entry-switch button[aria-pressed="true"] {
+  background: var(--text);
+  color: var(--bg);
+}
 .environment-bulk {
   display: grid;
   gap: 0.65rem;

@@ -22,6 +22,7 @@ const variableSchema = z.object({
 export function EnvironmentPanel({ projectId }: { projectId: string }) {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string>();
+  const [entryMode, setEntryMode] = useState<"single" | "bulk">("single");
   const [bulkText, setBulkText] = useState("");
   const [bulkSecrets, setBulkSecrets] = useState(true);
   const [bulkSaving, setBulkSaving] = useState(false);
@@ -85,87 +86,109 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
         Values are encrypted and cannot be viewed again. Saving an existing name
         replaces it.
       </p>
-      <div className="environment-bulk">
-        <label>
-          Paste environment block
-          <textarea
-            spellCheck={false}
-            placeholder={"DATABASE_URL=postgres://…\nREDIS_URL=redis://…"}
-            value={bulkText}
-            onChange={(event) => setBulkText(event.target.value)}
-          />
-        </label>
-        <div>
-          <label className="environment-secret">
-            <input
-              type="checkbox"
-              checked={bulkSecrets}
-              onChange={(event) => setBulkSecrets(event.target.checked)}
-            />
-            Mark pasted values as secrets
-          </label>
-          <button
-            className="table-action"
-            type="button"
-            disabled={bulkSaving}
-            onClick={() => void saveEnvironmentBlock()}
-          >
-            {bulkSaving ? "Encrypting…" : "Save environment block"}
-          </button>
-        </div>
-      </div>
-      <form
-        className="environment-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void form.handleSubmit();
-        }}
+      <fieldset
+        className="environment-entry-switch"
+        aria-label="Variable entry mode"
       >
-        <form.Field name="name">
-          {(field) => (
-            <input
-              aria-label="Environment variable name"
-              placeholder="DATABASE_URL"
-              autoCapitalize="characters"
-              value={field.state.value}
-              onChange={(event) =>
-                field.handleChange(event.target.value.toUpperCase())
-              }
+        <button
+          type="button"
+          aria-pressed={entryMode === "single"}
+          onClick={() => setEntryMode("single")}
+        >
+          One at a time
+        </button>
+        <button
+          type="button"
+          aria-pressed={entryMode === "bulk"}
+          onClick={() => setEntryMode("bulk")}
+        >
+          Paste multiple
+        </button>
+      </fieldset>
+      {entryMode === "bulk" ? (
+        <div className="environment-bulk">
+          <label>
+            Paste environment block
+            <textarea
+              spellCheck={false}
+              placeholder={"DATABASE_URL=postgres://…\nREDIS_URL=redis://…"}
+              value={bulkText}
+              onChange={(event) => setBulkText(event.target.value)}
             />
-          )}
-        </form.Field>
-        <form.Field name="value">
-          {(field) => (
-            <input
-              aria-label="Environment variable value"
-              placeholder="Write-only value"
-              type="password"
-              autoComplete="new-password"
-              value={field.state.value}
-              onChange={(event) => field.handleChange(event.target.value)}
-            />
-          )}
-        </form.Field>
-        <form.Field name="is_secret">
-          {(field) => (
+          </label>
+          <div>
             <label className="environment-secret">
               <input
                 type="checkbox"
-                checked={field.state.value}
-                onChange={(event) => field.handleChange(event.target.checked)}
+                checked={bulkSecrets}
+                onChange={(event) => setBulkSecrets(event.target.checked)}
               />
-              Mark as secret
+              Mark pasted values as secrets
             </label>
-          )}
-        </form.Field>
-        <button
-          className="table-action"
-          type="submit"
-          disabled={save.isPending}
+            <button
+              className="table-action"
+              type="button"
+              disabled={bulkSaving}
+              onClick={() => void saveEnvironmentBlock()}
+            >
+              {bulkSaving ? "Encrypting…" : "Save all values"}
+            </button>
+          </div>
+        </div>
+      ) : (
+        <form
+          className="environment-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void form.handleSubmit();
+          }}
         >
-          {save.isPending ? "Encrypting…" : "Save value"}
-        </button>
-      </form>
+          <form.Field name="name">
+            {(field) => (
+              <input
+                aria-label="Environment variable name"
+                placeholder="DATABASE_URL"
+                autoCapitalize="characters"
+                value={field.state.value}
+                onChange={(event) =>
+                  field.handleChange(event.target.value.toUpperCase())
+                }
+              />
+            )}
+          </form.Field>
+          <form.Field name="value">
+            {(field) => (
+              <input
+                aria-label="Environment variable value"
+                placeholder="Write-only value"
+                type="password"
+                autoComplete="new-password"
+                value={field.state.value}
+                onChange={(event) => field.handleChange(event.target.value)}
+              />
+            )}
+          </form.Field>
+          <form.Field name="is_secret">
+            {(field) => (
+              <label className="environment-secret">
+                <input
+                  type="checkbox"
+                  checked={field.state.value}
+                  onChange={(event) => field.handleChange(event.target.checked)}
+                />
+                Mark as secret
+              </label>
+            )}
+          </form.Field>
+          <button
+            className="table-action"
+            type="submit"
+            disabled={save.isPending}
+          >
+            {save.isPending ? "Encrypting…" : "Save value"}
+          </button>
+        </form>
+      )}
       {error && <p className="inspection-error">{error}</p>}
       {remove.error && (
         <p className="inspection-error">{variableError(remove.error)}</p>
