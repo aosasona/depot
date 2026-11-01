@@ -50,7 +50,7 @@ packages. Verify the daemon before granting Depot access:
 ```sh
 sudo docker version
 git --version
-railpack --version
+/usr/local/bin/railpack --version
 ```
 
 Download a release asset named `depot-linux-x86_64`, verify its provenance,

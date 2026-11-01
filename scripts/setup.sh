@@ -147,7 +147,7 @@ install_dependencies() {
     case "$(uname -m)" in x86_64|amd64) ;; *) die "This release supports x86-64 hosts only." ;; esac
     command -v systemctl >/dev/null 2>&1 || die "systemd is required but systemctl is unavailable."
     detect_package_manager
-    common_commands="curl tar sha256sum awk grep install mktemp runuser getent id chown chmod cp date od tr rm mkdir useradd"
+    common_commands="curl tar sha256sum awk grep sed install mktemp runuser getent id chown chmod cp date od tr rm mkdir useradd"
     if [ "$ROLE" = vm ]; then
         required_commands="$common_commands groupadd usermod sqlite3 git docker"
     else
@@ -170,6 +170,7 @@ install_dependencies() {
         esac
         case " $MISSING " in *" awk "*) packages="$packages gawk" ;; esac
         case " $MISSING " in *" grep "*) packages="$packages grep" ;; esac
+        case " $MISSING " in *" sed "*) packages="$packages sed" ;; esac
         case " $MISSING " in *" mktemp "*|*" runuser "*) packages="$packages util-linux" ;; esac
         case " $MISSING " in *" getent "*)
             if [ "$PACKAGE_MANAGER" = apt ]; then packages="$packages libc-bin"; else packages="$packages glibc-common"; fi
@@ -208,15 +209,15 @@ install_dependencies() {
         docker version >/dev/null 2>&1 || die "Docker is installed but the daemon is unavailable."
         say "[ok] Docker daemon is reachable."
         git --version
-        if ! command -v railpack >/dev/null 2>&1; then
+        if [ ! -x /usr/local/bin/railpack ]; then
             confirm "Install the Railpack static/service builder from railpack.com?" || die "Install Railpack, then rerun setup."
             railpack_installer=$(mktemp /tmp/depot-railpack-install.XXXXXX)
             curl --fail --location --silent --show-error https://railpack.com/install.sh --output "$railpack_installer"
             sh "$railpack_installer" --bin-dir /usr/local/bin
             rm -f "$railpack_installer"
         fi
-        railpack --version >/dev/null 2>&1 || die "Railpack was installed but could not run."
-        say "[ok] Railpack is available."
+        /usr/local/bin/railpack --version >/dev/null 2>&1 || die "Railpack was installed but could not run from /usr/local/bin/railpack."
+        say "[ok] Railpack is available at /usr/local/bin/railpack."
         if docker inspect depot-buildkit >/dev/null 2>&1; then
             if [ "$(docker inspect --format '{{.State.Running}}' depot-buildkit)" != true ]; then
                 confirm "Start the existing Depot BuildKit container?" || die "BuildKit must run for Railpack builds."
@@ -339,7 +340,7 @@ webhook_secret_file = \"/etc/depot/github-webhook-secret\""
         printf '[server]\nbind = "%s"\n\n' "$bind"
         printf '[database]\nurl = "sqlite:///var/lib/depot/depot.db"\n\n'
         printf '[security]\npublic_origin = "%s"\nmaster_key_file = "/etc/depot/master.key"\n\n' "$public_origin"
-        printf '[worker]\nworkspace_root = "/var/lib/depot/workspaces"\nstatic_root = "/var/lib/depot/static"\ngit_timeout_seconds = 120\ndocker_binary = "docker"\nrailpack_binary = "railpack"\ndocker_timeout_seconds = 1800\n'
+        printf '[worker]\nworkspace_root = "/var/lib/depot/workspaces"\nstatic_root = "/var/lib/depot/static"\ngit_timeout_seconds = 120\ndocker_binary = "docker"\nrailpack_binary = "/usr/local/bin/railpack"\ndocker_timeout_seconds = 1800\n'
         printf '%s\n' "$agent_section"
         printf '%s\n' "$github_section"
     } > "$config_temp"
@@ -449,6 +450,27 @@ run_agent_checks() {
     runuser -u depot-caddy -- /usr/local/bin/depot caddy-agent --config /etc/depot/caddy-agent.toml --check
 }
 
+normalize_vm_dependency_paths() {
+    [ -f /etc/depot/config.toml ] || return 0
+    configured=$(toml_value /etc/depot/config.toml worker railpack_binary)
+    [ "$configured" = railpack ] || return 0
+    config_temp=$(mktemp /etc/depot/config.toml.dependencies.XXXXXX)
+    sed 's|^[[:space:]]*railpack_binary[[:space:]]*=.*$|railpack_binary = "/usr/local/bin/railpack"|' \
+        /etc/depot/config.toml > "$config_temp"
+    chown depot:depot "$config_temp"
+    chmod 0640 "$config_temp"
+    mv "$config_temp" /etc/depot/config.toml
+    say "[ok] Migrated Railpack configuration to /usr/local/bin/railpack."
+}
+
+preflight_vm_dependencies() {
+    /usr/local/bin/railpack --version >/dev/null 2>&1 ||
+        die "Railpack preflight failed before services were stopped."
+    runuser -u depot-worker -- docker version >/dev/null 2>&1 ||
+        die "Docker preflight failed for depot-worker before services were stopped."
+    say "[ok] Worker dependencies pass pre-update checks."
+}
+
 toml_value() {
     file=$1
     section=$2
@@ -504,6 +526,7 @@ fresh_install() {
         say "Preserved existing configuration: $config_path"
     fi
     if [ "$ROLE" = vm ]; then
+        normalize_vm_dependency_paths
         run_vm_checks
         systemctl enable --now depot.service depot-worker.service
         systemctl is-active --quiet depot.service || die "depot.service did not start. Check its journal."
@@ -543,6 +566,7 @@ update_installation() {
     [ -x /usr/local/bin/depot ] || die "Depot is not installed; run depot-setup install."
     download_package
     if [ "$ROLE" = vm ]; then
+        preflight_vm_dependencies
         systemctl stop depot-worker.service depot.service
         backup_vm_state
     else
@@ -551,6 +575,7 @@ update_installation() {
     fi
     install_release_files
     if [ "$ROLE" = vm ]; then
+        normalize_vm_dependency_paths
         if ! run_vm_checks; then
             warn "Update checks failed. Services remain stopped; restore from $BACKUP_DIRECTORY after diagnosing the failure."
             exit 1

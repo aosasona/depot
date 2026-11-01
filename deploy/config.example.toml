@@ -13,7 +13,7 @@ workspace_root = "/var/lib/depot/workspaces"
 static_root = "/var/lib/depot/static"
 git_timeout_seconds = 120
 docker_binary = "docker"
-railpack_binary = "railpack"
+railpack_binary = "/usr/local/bin/railpack"
 docker_timeout_seconds = 1800
 
 [worker.caddy_agent]
