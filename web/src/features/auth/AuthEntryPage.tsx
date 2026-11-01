@@ -359,7 +359,7 @@ function Dashboard({
           <span className="system-state">
             <i aria-hidden="true" /> All systems operational
           </span>
-          <span className="sidebar-version">Depot v0.2.0</span>
+          <span className="sidebar-version">Depot v0.3.0</span>
         </div>
       </aside>
       <div className="app-workspace">
