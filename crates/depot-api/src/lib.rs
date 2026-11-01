@@ -577,6 +577,10 @@ pub fn router_with_shell_and_domains(
             post(enqueue_project_inspection),
         )
         .route(
+            "/api/v1/projects/{project_id}/launch",
+            post(enqueue_project_launch),
+        )
+        .route(
             "/api/v1/projects/{project_id}/config",
             get(get_service_config).put(update_service_config),
         )
@@ -1390,6 +1394,39 @@ async fn enqueue_project_inspection(
             kind: "inspect_repository",
             project_id: Some(&project.id),
             payload_json: "{}",
+            deduplication_key: &deduplication_key,
+            max_attempts: 3,
+            now_unix: now,
+        })
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(EnqueuedJobResponse { job_id: job.id }),
+    ))
+}
+
+/// Durably inspects the current branch and deploys the immutable resolved commit.
+async fn enqueue_project_launch(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<(StatusCode, Json<EnqueuedJobResponse>), ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let project = state.store.project_by_id(&project_id).await?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let deduplication_key = format!("inspect:{}:{}:launch", project.id, project.updated_at);
+    let payload = serde_json::json!({
+        "deploy_after_inspection": true,
+        "requested_by_user_id": actor.id,
+    })
+    .to_string();
+    let job = state
+        .store
+        .enqueue_job(NewJob {
+            kind: "inspect_repository",
+            project_id: Some(&project.id),
+            payload_json: &payload,
             deduplication_key: &deduplication_key,
             max_attempts: 3,
             now_unix: now,

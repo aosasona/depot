@@ -1943,6 +1943,42 @@ impl Store {
         self.deployment_by_id(&deployment_id).await
     }
 
+    /// Creates at most one initial deployment for a resolved project commit.
+    ///
+    /// Inspection jobs may be retried after their deployment was queued. Reusing
+    /// the durable record keeps that retry from producing duplicate builds.
+    pub async fn create_initial_deployment(
+        &self,
+        project_id: &str,
+        commit_sha: &str,
+        actor_user_id: &str,
+        now_unix: i64,
+    ) -> Result<Deployment, StoreError> {
+        let existing = sqlx::query(
+            "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
+                    failure_reason, image_id, container_id, host_port,
+                    static_release_path, created_at, updated_at, finished_at, active
+             FROM deployments
+             WHERE project_id = ? AND commit_sha = ? AND trigger_kind = 'manual'
+             ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(project_id)
+        .bind(commit_sha)
+        .fetch_optional(&self.pool)
+        .await?;
+        if let Some(row) = existing {
+            return deployment_from_row(row);
+        }
+        self.create_deployment(NewDeployment {
+            project_id,
+            commit_sha,
+            created_by_user_id: actor_user_id,
+            trigger_kind: "manual",
+            now_unix,
+        })
+        .await
+    }
+
     /// Lists deployment history for one project from newest to oldest.
     pub async fn list_deployments(&self, project_id: &str) -> Result<Vec<Deployment>, StoreError> {
         self.project_by_id(project_id).await?;
@@ -3066,6 +3102,43 @@ mod tests {
                 deployment_id: deployment.id,
                 host_port: 43123,
             }
+        );
+    }
+
+    /// Proves a retried launch inspection cannot duplicate its first deployment.
+    #[tokio::test]
+    async fn initial_deployment_is_idempotent_per_commit() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let project = store
+            .create_project(NewProject {
+                slug: "first-launch",
+                name: "First launch",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/project.git",
+                branch: "main",
+                now_unix: 200,
+            })
+            .await
+            .expect("project is created");
+        let commit_sha = "0123456789abcdef0123456789abcdef01234567";
+        let first = store
+            .create_initial_deployment(&project.id, commit_sha, &admin_id, 210)
+            .await
+            .expect("first deployment queues");
+        let retry = store
+            .create_initial_deployment(&project.id, commit_sha, &admin_id, 211)
+            .await
+            .expect("retry reuses deployment");
+
+        assert_eq!(retry.id, first.id);
+        assert_eq!(
+            store
+                .list_deployments(&project.id)
+                .await
+                .expect("deployments load")
+                .len(),
+            1
         );
     }
 

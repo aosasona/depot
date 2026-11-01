@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useNavigate } from "@tanstack/react-router";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
@@ -8,10 +9,13 @@ import {
   getGithubIntegration,
   importGithubProject,
   linkGithubInstallation,
+  launchProject,
   listGithubRepositories,
   type Project,
   updateServiceConfig,
+  upsertVariable,
 } from "../../lib/api/client";
+import { parseEnvironmentText } from "./environmentText";
 import { RepositoryDirectoryPicker } from "./RepositoryDirectoryPicker";
 
 type Source =
@@ -27,6 +31,9 @@ type ConfigureValues = {
   builder: "auto" | "dockerfile" | "railpack";
   staticOutput: string;
   port: string;
+  environmentText: string;
+  environmentSecrets: boolean;
+  deployLatest: boolean;
 };
 const initialValues: ConfigureValues = {
   name: "",
@@ -38,7 +45,17 @@ const initialValues: ConfigureValues = {
   builder: "auto",
   staticOutput: "dist",
   port: "",
+  environmentText: "",
+  environmentSecrets: true,
+  deployLatest: true,
 };
+
+type CreationStage =
+  | "idle"
+  | "creating"
+  | "configuring"
+  | "environment"
+  | "launching";
 
 /** Launches a guided GitHub-first project creation flow. */
 export function GithubImportPanel() {
@@ -169,6 +186,7 @@ function ProjectWizard({
   onClose: () => void;
 }) {
   const client = useQueryClient();
+  const navigate = useNavigate();
   const integration = useQuery({
     queryKey: ["github-integration"],
     queryFn: getGithubIntegration,
@@ -179,6 +197,8 @@ function ProjectWizard({
   const [search, setSearch] = useState("");
   const [message, setMessage] = useState<string | undefined>(initialMessage);
   const [manifestState] = useState(createManifestState);
+  const [stage, setStage] = useState<CreationStage>("idle");
+  const [createdProject, setCreatedProject] = useState<Project>();
   const linkedCallback = useRef(false);
   const link = useMutation({ mutationFn: linkGithubInstallation });
   const create = useMutation({ mutationFn: createProject });
@@ -263,10 +283,20 @@ function ProjectWizard({
       return setMessage("Services need a port between 1 and 65535.");
     if (!validRepositoryPath(values.contextPath))
       return setMessage("Choose a valid repository source directory.");
+    let environment: ReturnType<typeof parseEnvironmentText>;
     try {
-      let project: Project;
-      if (source.kind === "github") {
+      environment = parseEnvironmentText(
+        values.environmentText,
+        values.environmentSecrets,
+      );
+    } catch (reason) {
+      return setMessage(errorMessage(reason));
+    }
+    try {
+      let project = createdProject;
+      if (!project && source.kind === "github") {
         if (!installationId) throw new Error("Choose a GitHub installation.");
+        setStage("creating");
         project = await importProject.mutateAsync({
           installation_id: installationId,
           repository_id: source.repository.id,
@@ -274,7 +304,8 @@ function ProjectWizard({
           slug: values.slug,
           branch: values.branch.trim(),
         });
-      } else {
+      } else if (!project) {
+        setStage("creating");
         project = await create.mutateAsync({
           name: values.name.trim(),
           slug: values.slug,
@@ -282,6 +313,8 @@ function ProjectWizard({
           repository_url: values.repositoryUrl.trim(),
         });
       }
+      setCreatedProject(project);
+      setStage("configuring");
       await updateServiceConfig(project.id, {
         project_kind: values.projectKind,
         builder: values.builder,
@@ -295,10 +328,28 @@ function ProjectWizard({
           values.projectKind === "service" ? Number(values.port) : null,
         healthcheck_path: null,
       });
+      if (environment.length > 0) {
+        setStage("environment");
+        for (const variable of environment)
+          await upsertVariable(project.id, variable);
+      }
+      if (values.deployLatest) {
+        setStage("launching");
+        await launchProject(project.id);
+      }
       await client.invalidateQueries({ queryKey: ["projects"] });
       onClose();
+      await navigate({
+        to: "/projects/$projectId/$tab",
+        params: {
+          projectId: project.id,
+          tab: values.deployLatest ? "deployments" : "overview",
+        },
+      });
     } catch (reason) {
       setMessage(errorMessage(reason));
+    } finally {
+      setStage("idle");
     }
   }
 
@@ -318,6 +369,17 @@ function ProjectWizard({
           ×
         </button>
       </header>
+      <ol className="wizard-progress" aria-label="Project creation progress">
+        <li className={source ? "complete" : "active"}>1. Source</li>
+        <li
+          className={
+            source ? (stage === "launching" ? "complete" : "active") : ""
+          }
+        >
+          2. Configure
+        </li>
+        <li className={stage === "launching" ? "active" : ""}>3. Launch</li>
+      </ol>
       {!source ? (
         <div className="wizard-source">
           <div className="source-toolbar">
@@ -441,6 +503,10 @@ function ProjectWizard({
             ← Change source
           </button>
           <div className="wizard-form-grid">
+            <div className="wizard-section-heading wide">
+              <strong>Project identity</strong>
+              <span>Name the project and choose its stable URL slug.</span>
+            </div>
             <label>
               Project name
               <input
@@ -509,6 +575,10 @@ function ProjectWizard({
                 />
               </div>
             )}
+            <div className="wizard-section-heading wide">
+              <strong>Build and runtime</strong>
+              <span>Auto-detect works for most repositories.</span>
+            </div>
             <label>
               Project type
               <select
@@ -568,18 +638,84 @@ function ProjectWizard({
                 />
               </label>
             )}
+            <div className="wizard-section-heading wide">
+              <strong>Environment</strong>
+              <span>
+                Paste dotenv-style values. Comments and export prefixes are
+                accepted.
+              </span>
+            </div>
+            <label className="wide environment-textarea">
+              Environment values
+              <textarea
+                spellCheck={false}
+                placeholder={
+                  "DATABASE_URL=postgres://…\nREDIS_URL=redis://…\n# Blank lines and comments are ignored"
+                }
+                value={values.environmentText}
+                onChange={(event) =>
+                  setValues({ ...values, environmentText: event.target.value })
+                }
+              />
+              <small>
+                {environmentCount(values.environmentText)} value(s) ready to
+                encrypt
+              </small>
+            </label>
+            <label className="wide wizard-checkbox">
+              <input
+                type="checkbox"
+                checked={values.environmentSecrets}
+                onChange={(event) =>
+                  setValues({
+                    ...values,
+                    environmentSecrets: event.target.checked,
+                  })
+                }
+              />
+              <span>
+                <strong>Mark pasted values as secrets</strong>
+                <small>
+                  Values are encrypted either way and are never shown again.
+                </small>
+              </span>
+            </label>
+            <div className="wizard-section-heading wide">
+              <strong>First launch</strong>
+              <span>
+                Depot can inspect and deploy the latest commit immediately.
+              </span>
+            </div>
+            <label className="wide wizard-checkbox launch-choice">
+              <input
+                type="checkbox"
+                checked={values.deployLatest}
+                onChange={(event) =>
+                  setValues({ ...values, deployLatest: event.target.checked })
+                }
+              />
+              <span>
+                <strong>Create and deploy the latest commit</strong>
+                <small>
+                  Resolves {values.branch || "the selected branch"} to an exact
+                  SHA, then opens live deployment progress.
+                </small>
+              </span>
+            </label>
           </div>
           <footer>
-            <span>Settings remain editable after creation.</span>
+            <span>
+              {createdProject
+                ? "Project created. Retry continues the remaining setup safely."
+                : "All settings remain editable after creation."}
+            </span>
             <button
               className="primary-action"
               type="button"
-              disabled={create.isPending || importProject.isPending}
+              disabled={stage !== "idle"}
               onClick={() => void finish()}
             >
-              {create.isPending || importProject.isPending
-                ? "Creating…"
-                : "Create project →"}
+              {creationActionLabel(stage, values.deployLatest)}
             </button>
           </footer>
         </div>
@@ -621,6 +757,22 @@ function validRepositoryPath(path: string) {
     }) &&
     !value.split(/[\\/]/).some((segment) => segment === "..")
   );
+}
+
+/** Counts non-comment dotenv lines for immediate, non-sensitive feedback. */
+function environmentCount(input: string) {
+  return input
+    .split(/\r?\n/)
+    .filter((line) => line.trim() && !line.trim().startsWith("#")).length;
+}
+
+/** Describes the current durable creation step on the primary action. */
+function creationActionLabel(stage: CreationStage, deployLatest: boolean) {
+  if (stage === "creating") return "Creating project…";
+  if (stage === "configuring") return "Saving configuration…";
+  if (stage === "environment") return "Encrypting environment…";
+  if (stage === "launching") return "Queueing deployment…";
+  return deployLatest ? "Create & deploy →" : "Create project →";
 }
 
 /** Generates the callback nonce that binds a GitHub manifest response to this browser tab. */

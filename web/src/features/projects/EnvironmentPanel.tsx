@@ -8,6 +8,7 @@ import {
   listVariables,
   upsertVariable,
 } from "../../lib/api/client";
+import { parseEnvironmentText } from "./environmentText";
 
 const variableSchema = z.object({
   name: z
@@ -21,6 +22,9 @@ const variableSchema = z.object({
 export function EnvironmentPanel({ projectId }: { projectId: string }) {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string>();
+  const [bulkText, setBulkText] = useState("");
+  const [bulkSecrets, setBulkSecrets] = useState(true);
+  const [bulkSaving, setBulkSaving] = useState(false);
   const variables = useQuery({
     queryKey: ["projects", projectId, "variables"],
     queryFn: () => listVariables(projectId),
@@ -54,6 +58,26 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
     },
   });
 
+  /** Validates and encrypts a pasted dotenv block one write-only value at a time. */
+  async function saveEnvironmentBlock() {
+    setError(undefined);
+    try {
+      const entries = parseEnvironmentText(bulkText, bulkSecrets);
+      if (entries.length === 0)
+        return setError("Paste at least one KEY=value entry.");
+      setBulkSaving(true);
+      for (const entry of entries) await upsertVariable(projectId, entry);
+      setBulkText("");
+      await queryClient.invalidateQueries({
+        queryKey: ["projects", projectId, "variables"],
+      });
+    } catch (reason) {
+      setError(variableError(reason));
+    } finally {
+      setBulkSaving(false);
+    }
+  }
+
   return (
     <div className="domain-panel environment-panel">
       <strong>Environment</strong>
@@ -61,6 +85,35 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
         Values are encrypted and cannot be viewed again. Saving an existing name
         replaces it.
       </p>
+      <div className="environment-bulk">
+        <label>
+          Paste environment block
+          <textarea
+            spellCheck={false}
+            placeholder={"DATABASE_URL=postgres://…\nREDIS_URL=redis://…"}
+            value={bulkText}
+            onChange={(event) => setBulkText(event.target.value)}
+          />
+        </label>
+        <div>
+          <label className="environment-secret">
+            <input
+              type="checkbox"
+              checked={bulkSecrets}
+              onChange={(event) => setBulkSecrets(event.target.checked)}
+            />
+            Mark pasted values as secrets
+          </label>
+          <button
+            className="table-action"
+            type="button"
+            disabled={bulkSaving}
+            onClick={() => void saveEnvironmentBlock()}
+          >
+            {bulkSaving ? "Encrypting…" : "Save environment block"}
+          </button>
+        </div>
+      </div>
       <form
         className="environment-form"
         onSubmit={(event) => {
@@ -143,7 +196,7 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
 
 /** Converts variable API failures into safe inline feedback. */
 function variableError(reason: unknown) {
-  return reason instanceof ApiError
+  return reason instanceof ApiError || reason instanceof Error
     ? reason.message
     : "Depot could not update this runtime value.";
 }

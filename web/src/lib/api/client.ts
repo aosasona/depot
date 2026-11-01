@@ -44,6 +44,7 @@ const inspectionResultSchema = z.object({
   builder: z.enum(["dockerfile", "railpack", "static", "unknown"]),
   reason: z.string(),
   has_mise_config: z.boolean(),
+  initial_deployment_id: z.string().optional(),
 });
 const dockerBuildResultSchema = z.object({
   image_id: z.string(),
@@ -442,6 +443,15 @@ export function importGithubProject(input: {
 export function inspectProject(projectId: string) {
   return request(
     `/api/v1/projects/${projectId}/inspect`,
+    z.object({ job_id: z.string() }),
+    { method: "POST", headers: csrfHeaders() },
+  );
+}
+
+/** Inspects the current branch and durably deploys its resolved latest commit. */
+export function launchProject(projectId: string) {
+  return request(
+    `/api/v1/projects/${projectId}/launch`,
     z.object({ job_id: z.string() }),
     { method: "POST", headers: csrfHeaders() },
   );

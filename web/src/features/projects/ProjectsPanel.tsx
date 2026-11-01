@@ -267,7 +267,14 @@ function ProjectWorkspace({
                 deploymentId={deploymentId}
               />
             ) : (
-              <DeploymentPanel projectId={project.id} />
+              <DeploymentPanel
+                projectId={project.id}
+                awaitingInitialDeployment={
+                  job.data?.state === "queued" ||
+                  job.data?.state === "running" ||
+                  Boolean(inspectionResult?.initial_deployment_id)
+                }
+              />
             )}
           </section>
         )}

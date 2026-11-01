@@ -127,6 +127,15 @@ struct DeploymentJobPayload {
     deployment_id: String,
 }
 
+/// Durable intent optionally chaining repository inspection into a first deployment.
+#[derive(Debug, Default, Deserialize)]
+struct InspectionJobPayload {
+    #[serde(default)]
+    deploy_after_inspection: bool,
+    #[serde(default)]
+    requested_by_user_id: Option<String>,
+}
+
 /// Embeds the production Vite output into the release executable.
 #[derive(Embed)]
 #[folder = "../../web/dist"]
@@ -1083,6 +1092,8 @@ async fn execute_inspection(
     github: Option<&depot_github::GithubAppClient>,
     job: &depot_store::Job,
 ) -> Result<String, String> {
+    let payload: InspectionJobPayload = serde_json::from_str(&job.payload_json)
+        .map_err(|_| "Inspection job payload is invalid.".to_owned())?;
     let project_id = job
         .project_id
         .as_deref()
@@ -1119,7 +1130,25 @@ async fn execute_inspection(
         token.zeroize();
     }
     let inspection = inspection.map_err(|error| error.to_string())?;
-    serde_json::to_string(&inspection)
+    let mut result = serde_json::to_value(&inspection)
+        .map_err(|_| "Repository inspection result could not be encoded.".to_owned())?;
+    if payload.deploy_after_inspection {
+        let actor = payload
+            .requested_by_user_id
+            .as_deref()
+            .ok_or_else(|| "Initial deployment has no requesting user.".to_owned())?;
+        let deployment = store
+            .create_initial_deployment(
+                project_id,
+                &inspection.commit_sha,
+                actor,
+                time::OffsetDateTime::now_utc().unix_timestamp(),
+            )
+            .await
+            .map_err(|_| "Initial deployment could not be queued.".to_owned())?;
+        result["initial_deployment_id"] = serde_json::Value::String(deployment.id);
+    }
+    serde_json::to_string(&result)
         .map_err(|_| "Repository inspection result could not be encoded.".to_owned())
 }
 

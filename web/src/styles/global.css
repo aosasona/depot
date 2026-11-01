@@ -634,6 +634,39 @@ h1 {
   gap: 0.6rem;
   align-items: center;
 }
+.environment-bulk {
+  display: grid;
+  gap: 0.65rem;
+  padding: 0.8rem;
+  border: 1px solid var(--border);
+  background: #090909;
+}
+.environment-bulk > label {
+  display: grid;
+  gap: 0.45rem;
+  color: var(--muted);
+  font: 0.62rem var(--mono-font);
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+.environment-bulk textarea {
+  min-height: 110px;
+  padding: 0.65rem 0.7rem;
+  resize: vertical;
+  border: 1px solid var(--border);
+  background: #050505;
+  color: var(--text);
+  font: 0.74rem / 1.5 var(--mono-font);
+  letter-spacing: normal;
+  text-transform: none;
+}
+.environment-bulk > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
 
 .environment-form input:not([type="checkbox"]) {
   min-width: 0;
@@ -656,6 +689,10 @@ h1 {
 @media (max-width: 760px) {
   .environment-form {
     grid-template-columns: 1fr;
+  }
+  .environment-bulk > div {
+    align-items: stretch;
+    flex-direction: column;
   }
 }
 .domain-form {
@@ -2310,8 +2347,8 @@ td {
   padding: 0 1rem;
 }
 .project-wizard {
-  width: min(880px, calc(100vw - 2rem));
-  height: min(700px, calc(100vh - 2rem));
+  width: min(940px, calc(100vw - 2rem));
+  height: min(780px, calc(100vh - 2rem));
   max-height: calc(100vh - 2rem);
   overflow: hidden;
   padding: 0;
@@ -2346,6 +2383,34 @@ td {
   font-weight: 700;
   line-height: 1;
   letter-spacing: -0.035em;
+}
+.wizard-progress {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 0;
+  border-bottom: 1px solid var(--border);
+  list-style: none;
+}
+.wizard-progress li {
+  padding: 0.55rem 1.25rem;
+  border-right: 1px solid var(--border);
+  color: #666;
+  font: 0.57rem var(--mono-font);
+  font-weight: 700;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+}
+.wizard-progress li:last-child {
+  border-right: 0;
+}
+.wizard-progress li.complete {
+  color: var(--text);
+}
+.wizard-progress li.active {
+  background: rgb(198 245 71 / 8%);
+  color: var(--accent);
 }
 .icon-action {
   border: 0;
@@ -2537,6 +2602,87 @@ td {
 }
 .wizard-form-grid .wide {
   grid-column: 1 / -1;
+}
+.wizard-section-heading {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-top: 0.35rem;
+  padding: 0.7rem 0 0.45rem;
+  border-bottom: 1px solid var(--border);
+}
+.wizard-section-heading:first-child {
+  margin-top: 0;
+}
+.wizard-section-heading strong {
+  color: var(--text);
+  font-family: var(--display-font);
+  font-size: 0.9rem;
+  letter-spacing: -0.015em;
+}
+.wizard-section-heading span {
+  color: var(--muted);
+  font-size: 0.66rem;
+}
+.wizard-form-grid .environment-textarea textarea {
+  min-height: 118px;
+  padding: 0.7rem 0.75rem;
+  resize: vertical;
+  border: 1px solid var(--border);
+  background: #090909;
+  color: var(--text);
+  font: 0.75rem / 1.55 var(--mono-font);
+  letter-spacing: normal;
+  text-transform: none;
+}
+.wizard-form-grid .environment-textarea textarea:focus {
+  border-color: var(--accent);
+  outline: 1px solid var(--accent);
+  outline-offset: 1px;
+}
+.environment-textarea > small {
+  color: var(--muted);
+  font-size: 0.58rem;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+}
+.wizard-form-grid .wizard-checkbox {
+  display: flex;
+  grid-template-columns: none;
+  align-items: flex-start;
+  gap: 0.65rem;
+  padding: 0.75rem;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--text);
+  font-family: var(--ui-font);
+  letter-spacing: normal;
+  text-transform: none;
+  cursor: pointer;
+}
+.wizard-checkbox input {
+  width: 16px;
+  height: 16px;
+  flex: none;
+  margin: 0.1rem 0 0;
+  accent-color: var(--accent);
+}
+.wizard-checkbox > span {
+  display: grid;
+  gap: 0.25rem;
+}
+.wizard-checkbox strong {
+  font-size: 0.75rem;
+}
+.wizard-checkbox small {
+  color: var(--muted);
+  font-size: 0.66rem;
+  line-height: 1.45;
+}
+.wizard-checkbox.launch-choice {
+  border-color: #526326;
+  background: rgb(198 245 71 / 6%);
 }
 .wizard-configure > .project-back {
   align-self: flex-start;

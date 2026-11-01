@@ -10,12 +10,19 @@ import {
 } from "../../lib/api/client";
 
 /** Provides manual deployment control and live durable history for one project. */
-export function DeploymentPanel({ projectId }: { projectId: string }) {
+export function DeploymentPanel({
+  projectId,
+  awaitingInitialDeployment = false,
+}: {
+  projectId: string;
+  awaitingInitialDeployment?: boolean;
+}) {
   const queryClient = useQueryClient();
   const deployments = useQuery({
     queryKey: ["projects", projectId, "deployments"],
     queryFn: () => listDeployments(projectId),
     refetchInterval: (query) =>
+      (awaitingInitialDeployment && query.state.data?.length === 0) ||
       query.state.data?.some((item) =>
         ["queued", "building"].includes(item.status),
       )
@@ -59,7 +66,9 @@ export function DeploymentPanel({ projectId }: { projectId: string }) {
       )}
       {deployments.data?.length === 0 && (
         <p className="config-message">
-          Inspect this repository, then deploy its immutable commit.
+          {awaitingInitialDeployment
+            ? "Inspecting the repository before queueing its first deployment…"
+            : "Inspect this repository, then deploy its immutable commit."}
         </p>
       )}
       <div className="deployment-list">
