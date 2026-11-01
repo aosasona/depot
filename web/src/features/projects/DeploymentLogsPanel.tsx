@@ -1,6 +1,13 @@
 import { type UseQueryResult, useQuery } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useEffect, useRef, useState } from "react";
+import {
+  Fragment,
+  type CSSProperties,
+  type ReactNode,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 import {
   type Deployment,
   getJobStatus,
@@ -163,7 +170,9 @@ function RuntimeConsole({ runtime }: { runtime: RuntimeLogResult }) {
             48;
         }}
       >
-        {runtime.logs || "The service has not written any output yet."}
+        <ConsoleText
+          value={runtime.logs || "The service has not written any output yet."}
+        />
       </pre>
     </div>
   );
@@ -252,9 +261,15 @@ function DeploymentLog({
             <p>{event.message}</p>
           </div>
         ))}
-        {output && <pre>{output}</pre>}
+        {output && (
+          <pre>
+            <ConsoleText value={output} />
+          </pre>
+        )}
         {job.data?.last_error && (
-          <pre className="log-error">{job.data.last_error}</pre>
+          <pre className="log-error">
+            <ConsoleText value={job.data.last_error} />
+          </pre>
         )}
         {!job.isPending && job.data?.events.length === 0 && !output && (
           <span>No output was retained for this job.</span>
@@ -262,6 +277,164 @@ function DeploymentLog({
       </div>
     </details>
   );
+}
+
+const ANSI_COLORS = [
+  "#18181b",
+  "#f87171",
+  "#4ade80",
+  "#facc15",
+  "#60a5fa",
+  "#d4d4d8",
+  "#22d3ee",
+  "#e4e4e7",
+  "#71717a",
+  "#fca5a5",
+  "#86efac",
+  "#fde047",
+  "#93c5fd",
+  "#fafafa",
+  "#67e8f9",
+  "#ffffff",
+] as const;
+const ESCAPE = String.fromCharCode(27);
+const BELL = String.fromCharCode(7);
+
+/** Renders terminal SGR colours as safe React spans and highlights plain structured logs. */
+function ConsoleText({ value }: { value: string }) {
+  const lines = value.split("\n");
+  return lines.map((line, index) => (
+    <Fragment key={`${index}-${line.slice(0, 24)}`}>
+      <ConsoleLine value={line} />
+      {index < lines.length - 1 && "\n"}
+    </Fragment>
+  ));
+}
+
+/** Chooses terminal rendering when escape codes exist, with a plain-log fallback. */
+function ConsoleLine({ value }: { value: string }) {
+  if (value.includes(`${ESCAPE}[`)) return renderAnsiLine(value);
+  const tokens = value.split(
+    /(\d{4}-\d{2}-\d{2}T\S+Z|\b(?:TRACE|DEBUG|INFO|WARN|WARNING|ERROR|FATAL)\b|\b[1-5]\d{2}\b|\b(?:GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)\b)/g,
+  );
+  return tokens.map((token, index) => {
+    const kind = plainLogTokenKind(token);
+    return kind ? (
+      <span className={`console-${kind}`} key={`${index}-${token}`}>
+        {token}
+      </span>
+    ) : (
+      token
+    );
+  });
+}
+
+/** Maps common structured-log fields to restrained terminal colours. */
+function plainLogTokenKind(token: string) {
+  if (/^\d{4}-\d{2}-\d{2}T\S+Z$/.test(token)) return "timestamp";
+  if (/^(ERROR|FATAL)$/.test(token) || /^5\d\d$/.test(token)) return "error";
+  if (/^(WARN|WARNING)$/.test(token) || /^4\d\d$/.test(token)) return "warning";
+  if (/^(INFO|GET|POST|PUT|PATCH|DELETE|HEAD|OPTIONS)$/.test(token))
+    return "info";
+  if (/^(TRACE|DEBUG)$/.test(token)) return "debug";
+  if (/^[1-3]\d\d$/.test(token)) return "success";
+}
+
+/** Interprets bounded ANSI SGR sequences without inserting application-owned HTML. */
+function renderAnsiLine(value: string): ReactNode[] {
+  const output: ReactNode[] = [];
+  const style: CSSProperties = {};
+  const expression = new RegExp(`${ESCAPE}\\[([0-9;]*)m`, "g");
+  let start = 0;
+  let match = expression.exec(value);
+  while (match) {
+    pushAnsiText(output, value.slice(start, match.index), style);
+    applySgr(style, match[1]);
+    start = expression.lastIndex;
+    match = expression.exec(value);
+  }
+  pushAnsiText(output, value.slice(start), style);
+  return output;
+}
+
+/** Appends one styled terminal segment while discarding unsupported control sequences. */
+function pushAnsiText(output: ReactNode[], text: string, style: CSSProperties) {
+  const operatingSystemCommand = new RegExp(
+    `${ESCAPE}\\][^${BELL}]*(?:${BELL}|${ESCAPE}\\\\)`,
+    "g",
+  );
+  const controlSequence = new RegExp(`${ESCAPE}\\[[0-?]*[ -/]*[@-~]`, "g");
+  const clean = text
+    .replace(operatingSystemCommand, "")
+    .replace(controlSequence, "");
+  if (!clean) return;
+  output.push(
+    Object.keys(style).length ? (
+      <span style={{ ...style }} key={output.length}>
+        {clean}
+      </span>
+    ) : (
+      clean
+    ),
+  );
+}
+
+/** Applies the common foreground, background, weight, and decoration SGR codes. */
+function applySgr(style: CSSProperties, encoded: string) {
+  const codes = (encoded || "0").split(";").map(Number);
+  for (let index = 0; index < codes.length; index += 1) {
+    const code = codes[index];
+    if (code === 0) {
+      for (const property of Object.keys(style) as (keyof CSSProperties)[])
+        delete style[property];
+    } else if (code === 1) style.fontWeight = 700;
+    else if (code === 2) style.opacity = 0.65;
+    else if (code === 3) style.fontStyle = "italic";
+    else if (code === 4) style.textDecoration = "underline";
+    else if (code === 22) {
+      delete style.fontWeight;
+      delete style.opacity;
+    } else if (code === 23) delete style.fontStyle;
+    else if (code === 24) delete style.textDecoration;
+    else if (code === 39) delete style.color;
+    else if (code === 49) delete style.backgroundColor;
+    else if (code >= 30 && code <= 37) style.color = ANSI_COLORS[code - 30];
+    else if (code >= 90 && code <= 97) style.color = ANSI_COLORS[code - 82];
+    else if (code >= 40 && code <= 47)
+      style.backgroundColor = ANSI_COLORS[code - 40];
+    else if (code >= 100 && code <= 107)
+      style.backgroundColor = ANSI_COLORS[code - 92];
+    else if (code === 38 || code === 48) {
+      const property = code === 38 ? "color" : "backgroundColor";
+      const mode = codes[index + 1];
+      if (mode === 5 && codes[index + 2] !== undefined) {
+        style[property] = ansi256Color(codes[index + 2]);
+        index += 2;
+      } else if (mode === 2 && codes.slice(index + 2, index + 5).length === 3) {
+        const [red, green, blue] = codes
+          .slice(index + 2, index + 5)
+          .map((part) => Math.max(0, Math.min(255, part)));
+        style[property] = `rgb(${red} ${green} ${blue})`;
+        index += 4;
+      }
+    }
+  }
+}
+
+/** Converts an xterm 256-colour index to a browser colour. */
+function ansi256Color(value: number) {
+  const index = Math.max(0, Math.min(255, value));
+  if (index < 16) return ANSI_COLORS[index];
+  if (index >= 232) {
+    const channel = 8 + (index - 232) * 10;
+    return `rgb(${channel} ${channel} ${channel})`;
+  }
+  const cube = index - 16;
+  const levels = [0, 95, 135, 175, 215, 255];
+  const red = levels[Math.floor(cube / 36)];
+  const green = levels[Math.floor((cube % 36) / 6)];
+  const blue = levels[cube % 6];
+  return `rgb(${red} ${green} ${blue})`;
 }
 
 function formatTime(timestamp: number) {

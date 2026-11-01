@@ -2411,6 +2411,23 @@ td {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+.console-timestamp,
+.console-debug {
+  color: #71717a;
+}
+.console-info {
+  color: #60a5fa;
+}
+.console-success {
+  color: #4ade80;
+}
+.console-warning {
+  color: #facc15;
+}
+.console-error {
+  color: #f87171;
+  font-weight: 650;
+}
 
 .visually-hidden {
   position: absolute;
