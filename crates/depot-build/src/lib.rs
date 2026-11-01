@@ -626,13 +626,29 @@ fn valid_image_id(value: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
+    use std::{
+        fs::{self, File},
+        io::Write,
+        os::unix::fs::PermissionsExt,
+        path::Path,
+        time::Duration,
+    };
 
     use super::{
         BuildError, DockerBuildRequest, StaticBuildRequest, build_and_extract_railpack,
         build_dockerfile, build_static, dockerfile_artifact_path, safe_relative_path,
         static_package_command, validate_artifact_tree,
     };
+
+    fn write_executable(path: &Path, contents: &str) {
+        let mut file = File::create(path).expect("fake executable is created");
+        file.write_all(contents.as_bytes())
+            .expect("fake executable writes");
+        file.sync_all().expect("fake executable is flushed");
+        drop(file);
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700))
+            .expect("fake executable is executable");
+    }
 
     /// Proves the adapter passes paths as arguments and accepts canonical image IDs.
     #[tokio::test]
@@ -671,24 +687,18 @@ mod tests {
         fs::create_dir_all(&staging).expect("staging directory is created");
         let arguments = root.join("railpack-arguments");
         let fake_railpack = root.join("fake-railpack");
-        fs::write(
+        write_executable(
             &fake_railpack,
-            format!(
+            &format!(
                 "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\nprintf 'railpack complete'\n",
                 arguments.display()
             ),
-        )
-        .expect("fake Railpack writes");
+        );
         let fake_docker = root.join("fake-docker");
-        fs::write(
+        write_executable(
             &fake_docker,
             "#!/bin/sh\ncase \"$1\" in\ncreate) printf 'container\\n' ;;\ncp) mkdir -p \"$3\"; printf 'ok' > \"$3/index.html\" ;;\nrm|image) ;;\n*) exit 1 ;;\nesac\n",
-        )
-        .expect("fake Docker writes");
-        fs::set_permissions(&fake_railpack, fs::Permissions::from_mode(0o700))
-            .expect("fake Railpack is executable");
-        fs::set_permissions(&fake_docker, fs::Permissions::from_mode(0o700))
-            .expect("fake Docker is executable");
+        );
         let request = StaticBuildRequest {
             docker_binary: fake_docker.to_str().expect("Docker path is UTF-8"),
             railpack_binary: fake_railpack.to_str().expect("Railpack path is UTF-8"),
