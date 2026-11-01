@@ -29,8 +29,8 @@ use depot_secrets::SecretCipher;
 use depot_store::{
     Deployment, Domain, GithubInstallation, GithubProjectRepository, JobEvent, JobStatus,
     NewDeployment, NewJob, NewProject, ProjectSummary, ProjectVariable, ServiceConfig, SessionUser,
-    Store, StoreError, UpdateServiceConfig, UpsertGithubWebhook, UpsertProjectSshCredential,
-    UpsertProjectVariable, UserRole, UserSummary,
+    Store, StoreError, UpdateServiceConfig, UpsertGithubAppConfiguration, UpsertGithubWebhook,
+    UpsertProjectSshCredential, UpsertProjectVariable, UserRole, UserSummary,
 };
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, KeyInit, Mac};
@@ -42,13 +42,16 @@ const SESSION_COOKIE: &str = "depot_session";
 const CSRF_COOKIE: &str = "depot_csrf";
 const CSRF_HEADER: &str = "x-csrf-token";
 const SESSION_HOURS: i64 = 12;
+const GITHUB_PRIVATE_KEY_CONTEXT: &[u8] = b"depot:github-app:v1:private-key";
+const GITHUB_WEBHOOK_SECRET_CONTEXT: &[u8] = b"depot:github-app:v1:webhook-secret";
 
 /// Shared dependencies available to API request handlers.
 #[derive(Clone, Debug)]
 struct ApiState {
     store: Store,
     secrets: Option<SecretCipher>,
-    github: Option<GithubIntegration>,
+    github_fallback: Option<GithubIntegration>,
+    public_origin: Option<std::sync::Arc<str>>,
     shell: Option<ShellBroker>,
 }
 
@@ -283,7 +286,15 @@ struct LinkGithubInstallationRequest {
 struct GithubIntegrationResponse {
     configured: bool,
     install_url: Option<String>,
+    setup_available: bool,
+    manifest_url: Option<String>,
+    manifest: Option<String>,
     installations: Vec<GithubInstallationResponse>,
+}
+
+#[derive(Debug, Deserialize)]
+struct CompleteGithubManifestRequest {
+    code: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -464,6 +475,7 @@ pub fn router_with_shell(
     github: Option<GithubIntegration>,
     shell: Option<ShellBroker>,
 ) -> Router {
+    let public_origin = shell.as_ref().map(|broker| broker.public_origin.clone());
     Router::new()
         .route(
             "/api/v1/auth/bootstrap",
@@ -477,6 +489,10 @@ pub fn router_with_shell(
         .route("/api/v1/users/{user_id}", axum::routing::patch(update_user))
         .route("/api/v1/projects", get(list_projects).post(create_project))
         .route("/api/v1/integrations/github", get(github_integration))
+        .route(
+            "/api/v1/integrations/github/manifest",
+            post(complete_github_manifest),
+        )
         .route(
             "/api/v1/integrations/github/installations",
             post(link_github_installation),
@@ -567,7 +583,8 @@ pub fn router_with_shell(
         .with_state(ApiState {
             store,
             secrets,
-            github,
+            github_fallback: github,
+            public_origin,
             shell,
         })
 }
@@ -577,7 +594,8 @@ async fn github_integration(
     State(state): State<ApiState>,
     jar: CookieJar,
 ) -> Result<Json<GithubIntegrationResponse>, ApiError> {
-    require_user(&state.store, &jar).await?;
+    let actor = require_user(&state.store, &jar).await?;
+    let github = resolved_github(&state).await?;
     let installations = state
         .store
         .github_installations()
@@ -585,14 +603,138 @@ async fn github_integration(
         .into_iter()
         .map(github_installation_response)
         .collect();
-    Ok(Json(GithubIntegrationResponse {
-        configured: state.github.is_some(),
-        install_url: state
-            .github
-            .as_ref()
-            .map(|github| github.client.installation_url()),
+    Ok(Json(github_integration_response(
+        &state,
+        github.as_ref(),
+        actor.role == UserRole::Admin,
         installations,
+    )))
+}
+
+/// Exchanges GitHub's one-time manifest code and encrypts the generated credentials.
+async fn complete_github_manifest(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Json(request): Json<CompleteGithubManifestRequest>,
+) -> Result<Json<GithubIntegrationResponse>, ApiError> {
+    let actor = require_admin_mutation(&state.store, &jar, &headers).await?;
+    let secrets = state.secrets.as_ref().ok_or(ApiError::SecretsUnavailable)?;
+    let manifest = depot_github::convert_manifest(&request.code)
+        .await
+        .map_err(ApiError::Github)?;
+    if manifest.webhook_secret.len() < 32 {
+        return Err(ApiError::GithubUnavailable);
+    }
+    GithubAppClient::new(manifest.id, &manifest.slug, manifest.pem.as_bytes())
+        .map_err(ApiError::Github)?;
+    let private_key = secrets
+        .encrypt(&manifest.pem, GITHUB_PRIVATE_KEY_CONTEXT)
+        .map_err(|_| ApiError::SecretsUnavailable)?;
+    let webhook_secret = secrets
+        .encrypt(&manifest.webhook_secret, GITHUB_WEBHOOK_SECRET_CONTEXT)
+        .map_err(|_| ApiError::SecretsUnavailable)?;
+    let app_id = i64::try_from(manifest.id).map_err(|_| ApiError::GithubUnavailable)?;
+    state
+        .store
+        .upsert_github_app_configuration(UpsertGithubAppConfiguration {
+            app_id,
+            app_slug: &manifest.slug,
+            private_key_ciphertext: &private_key.ciphertext,
+            private_key_nonce: &private_key.nonce,
+            webhook_secret_ciphertext: &webhook_secret.ciphertext,
+            webhook_secret_nonce: &webhook_secret.nonce,
+            actor_user_id: &actor.id,
+            now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
+        })
+        .await?;
+    let github = resolved_github(&state)
+        .await?
+        .ok_or(ApiError::GithubUnavailable)?;
+    let installations = state
+        .store
+        .github_installations()
+        .await?
+        .into_iter()
+        .map(github_installation_response)
+        .collect();
+    Ok(Json(github_integration_response(
+        &state,
+        Some(&github),
+        true,
+        installations,
+    )))
+}
+
+/// Resolves dashboard-managed credentials first, retaining host configuration as a fallback.
+async fn resolved_github(state: &ApiState) -> Result<Option<GithubIntegration>, ApiError> {
+    let Some(configuration) = state.store.github_app_configuration().await? else {
+        return Ok(state.github_fallback.clone());
+    };
+    let secrets = state.secrets.as_ref().ok_or(ApiError::GithubUnavailable)?;
+    let private_key = secrets
+        .decrypt(
+            &configuration.private_key_ciphertext,
+            &configuration.private_key_nonce,
+            GITHUB_PRIVATE_KEY_CONTEXT,
+        )
+        .map_err(|_| ApiError::GithubUnavailable)?;
+    let webhook_secret = secrets
+        .decrypt(
+            &configuration.webhook_secret_ciphertext,
+            &configuration.webhook_secret_nonce,
+            GITHUB_WEBHOOK_SECRET_CONTEXT,
+        )
+        .map_err(|_| ApiError::GithubUnavailable)?;
+    let app_id = u64::try_from(configuration.app_id).map_err(|_| ApiError::GithubUnavailable)?;
+    let client = GithubAppClient::new(app_id, &configuration.app_slug, private_key.as_bytes())
+        .map_err(ApiError::Github)?;
+    Ok(Some(GithubIntegration {
+        client,
+        webhook_secret: std::sync::Arc::from(webhook_secret.into_bytes()),
     }))
+}
+
+/// Produces the safe provider state and, for administrators, a prefilled App manifest.
+fn github_integration_response(
+    state: &ApiState,
+    github: Option<&GithubIntegration>,
+    administrator: bool,
+    installations: Vec<GithubInstallationResponse>,
+) -> GithubIntegrationResponse {
+    let setup_available = administrator && state.secrets.is_some() && state.public_origin.is_some();
+    let (manifest_url, manifest) = if setup_available {
+        let origin = state.public_origin.as_deref().expect("checked above");
+        let callback = format!("{origin}/projects");
+        let webhook = format!("{origin}/api/v1/webhooks/github-app");
+        let manifest = serde_json::json!({
+            "name": "Depot self-hosted",
+            "url": origin,
+            "hook_attributes": { "url": webhook, "active": true },
+            "redirect_url": callback,
+            "callback_urls": [callback],
+            "setup_url": callback,
+            "public": false,
+            "default_permissions": { "contents": "read", "metadata": "read" },
+            "default_events": ["push"],
+            "request_oauth_on_install": false,
+            "setup_on_update": true
+        });
+        (
+            Some("https://github.com/settings/apps/new".to_owned()),
+            Some(manifest.to_string()),
+        )
+    } else {
+        (None, None)
+    };
+    GithubIntegrationResponse {
+        configured: github.is_some(),
+        install_url: github.map(|integration| integration.client.installation_url()),
+        setup_available,
+        manifest_url,
+        manifest,
+        installations,
+    }
 }
 
 /// Verifies a GitHub callback installation before making it available to Depot.
@@ -603,7 +745,9 @@ async fn link_github_installation(
     Json(request): Json<LinkGithubInstallationRequest>,
 ) -> Result<Json<GithubInstallationResponse>, ApiError> {
     let actor = require_mutation(&state.store, &jar, &headers).await?;
-    let github = state.github.as_ref().ok_or(ApiError::GithubUnavailable)?;
+    let github = resolved_github(&state)
+        .await?
+        .ok_or(ApiError::GithubUnavailable)?;
     let remote = github
         .client
         .installation(request.installation_id)
@@ -636,7 +780,9 @@ async fn list_github_repositories(
     if installation_id <= 0 || !state.store.has_github_installation(installation_id).await? {
         return Err(ApiError::Forbidden);
     }
-    let github = state.github.as_ref().ok_or(ApiError::GithubUnavailable)?;
+    let github = resolved_github(&state)
+        .await?
+        .ok_or(ApiError::GithubUnavailable)?;
     Ok(Json(
         github
             .client
@@ -659,7 +805,9 @@ async fn import_github_project(
     if !state.store.has_github_installation(installation_id).await? {
         return Err(ApiError::Forbidden);
     }
-    let github = state.github.as_ref().ok_or(ApiError::GithubUnavailable)?;
+    let github = resolved_github(&state)
+        .await?
+        .ok_or(ApiError::GithubUnavailable)?;
     let repository = github
         .client
         .repository(request.installation_id, request.repository_id)
@@ -896,7 +1044,9 @@ async fn receive_github_app_webhook(
     headers: HeaderMap,
     body: Bytes,
 ) -> Result<Response, ApiError> {
-    let github = state.github.as_ref().ok_or(ApiError::GithubUnavailable)?;
+    let github = resolved_github(&state)
+        .await?
+        .ok_or(ApiError::GithubUnavailable)?;
     verify_github_signature(&headers, &body, &github.webhook_secret)?;
     let event = required_header(&headers, "x-github-event")?;
     if event == "ping" {

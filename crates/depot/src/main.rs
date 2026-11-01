@@ -352,11 +352,18 @@ async fn worker(config: Config, once: bool) -> Result<(), AppError> {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let claimed = store.claim_job(&worker_id, now, 60).await?;
         if let Some(job) = claimed {
+            let dashboard_github = match load_dashboard_github_client(&store, &secrets).await {
+                Ok(client) => client,
+                Err(error) => {
+                    tracing::error!(%error, "dashboard-managed GitHub App is unavailable");
+                    None
+                }
+            };
             process_job(
                 &store,
                 &config.worker,
                 &secrets,
-                github.as_ref(),
+                dashboard_github.as_ref().or(github.as_ref()),
                 &worker_id,
                 job,
             )
@@ -1171,6 +1178,33 @@ fn load_github_integration(
         client,
         webhook_secret: std::sync::Arc::from(webhook_secret.as_bytes()),
     }))
+}
+
+/// Decrypts dashboard-managed App credentials for the job currently being claimed.
+async fn load_dashboard_github_client(
+    store: &Store,
+    secrets: &depot_secrets::SecretCipher,
+) -> Result<Option<depot_github::GithubAppClient>, String> {
+    const PRIVATE_KEY_CONTEXT: &[u8] = b"depot:github-app:v1:private-key";
+    let Some(configuration) = store
+        .github_app_configuration()
+        .await
+        .map_err(|error| error.to_string())?
+    else {
+        return Ok(None);
+    };
+    let private_key = secrets
+        .decrypt(
+            &configuration.private_key_ciphertext,
+            &configuration.private_key_nonce,
+            PRIVATE_KEY_CONTEXT,
+        )
+        .map_err(|error| error.to_string())?;
+    let app_id = u64::try_from(configuration.app_id)
+        .map_err(|_| "dashboard GitHub App ID is invalid".to_owned())?;
+    depot_github::GithubAppClient::new(app_id, &configuration.app_slug, private_key.as_bytes())
+        .map(Some)
+        .map_err(|error| error.to_string())
 }
 
 /// Reports API process liveness; dependency readiness will use a separate endpoint.

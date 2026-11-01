@@ -316,6 +316,30 @@ pub struct GithubInstallation {
     pub repository_selection: String,
 }
 
+/// Encrypted singleton GitHub App credentials configured through the dashboard.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GithubAppConfiguration {
+    pub app_id: i64,
+    pub app_slug: String,
+    pub private_key_ciphertext: Vec<u8>,
+    pub private_key_nonce: Vec<u8>,
+    pub webhook_secret_ciphertext: Vec<u8>,
+    pub webhook_secret_nonce: Vec<u8>,
+}
+
+/// Values used to atomically create or rotate the dashboard-managed GitHub App.
+#[derive(Debug)]
+pub struct UpsertGithubAppConfiguration<'a> {
+    pub app_id: i64,
+    pub app_slug: &'a str,
+    pub private_key_ciphertext: &'a [u8],
+    pub private_key_nonce: &'a [u8],
+    pub webhook_secret_ciphertext: &'a [u8],
+    pub webhook_secret_nonce: &'a [u8],
+    pub actor_user_id: &'a str,
+    pub now_unix: i64,
+}
+
 /// Repository identity bound to a project without any persisted access token.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GithubProjectRepository {
@@ -431,6 +455,65 @@ pub enum StoreError {
 }
 
 impl Store {
+    /// Loads dashboard-managed GitHub App credentials without decrypting them.
+    pub async fn github_app_configuration(
+        &self,
+    ) -> Result<Option<GithubAppConfiguration>, StoreError> {
+        let row = sqlx::query(
+            "SELECT app_id, app_slug, private_key_ciphertext, private_key_nonce,
+                    webhook_secret_ciphertext, webhook_secret_nonce
+             FROM github_app_configuration WHERE singleton = 1",
+        )
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(GithubAppConfiguration {
+                app_id: row.try_get("app_id")?,
+                app_slug: row.try_get("app_slug")?,
+                private_key_ciphertext: row.try_get("private_key_ciphertext")?,
+                private_key_nonce: row.try_get("private_key_nonce")?,
+                webhook_secret_ciphertext: row.try_get("webhook_secret_ciphertext")?,
+                webhook_secret_nonce: row.try_get("webhook_secret_nonce")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Atomically stores encrypted GitHub App material and its configuring actor.
+    pub async fn upsert_github_app_configuration(
+        &self,
+        input: UpsertGithubAppConfiguration<'_>,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO github_app_configuration
+             (singleton, app_id, app_slug, private_key_ciphertext, private_key_nonce,
+              webhook_secret_ciphertext, webhook_secret_nonce,
+              configured_by_user_id, created_at, updated_at)
+             VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(singleton) DO UPDATE SET
+               app_id = excluded.app_id,
+               app_slug = excluded.app_slug,
+               private_key_ciphertext = excluded.private_key_ciphertext,
+               private_key_nonce = excluded.private_key_nonce,
+               webhook_secret_ciphertext = excluded.webhook_secret_ciphertext,
+               webhook_secret_nonce = excluded.webhook_secret_nonce,
+               configured_by_user_id = excluded.configured_by_user_id,
+               updated_at = excluded.updated_at",
+        )
+        .bind(input.app_id)
+        .bind(input.app_slug)
+        .bind(input.private_key_ciphertext)
+        .bind(input.private_key_nonce)
+        .bind(input.webhook_secret_ciphertext)
+        .bind(input.webhook_secret_nonce)
+        .bind(input.actor_user_id)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     /// Links a verified GitHub App installation while retaining its original actor.
     pub async fn upsert_github_installation(
         &self,
@@ -2506,7 +2589,8 @@ async fn insert_project_audit(
 mod tests {
     use super::{
         BootstrapAdmin, GatewayTarget, NewDeployment, NewJob, NewProject, NewUser, Store,
-        StoreError, UpdateServiceConfig, UpsertGithubWebhook, UpsertProjectVariable, UserRole,
+        StoreError, UpdateServiceConfig, UpsertGithubAppConfiguration, UpsertGithubWebhook,
+        UpsertProjectVariable, UserRole,
     };
 
     /// Creates one administrator in a fresh store for project-focused tests.
@@ -3088,6 +3172,43 @@ mod tests {
             .expect("worker payload loads");
         assert_eq!(encrypted[0].ciphertext, ciphertext);
         assert_eq!(encrypted[0].nonce, [7_u8; 24]);
+    }
+
+    /// Proves only encrypted GitHub App material is persisted and rotations replace it.
+    #[tokio::test]
+    async fn github_app_configuration_round_trips_encrypted_material() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        store
+            .upsert_github_app_configuration(UpsertGithubAppConfiguration {
+                app_id: 42,
+                app_slug: "depot-test",
+                private_key_ciphertext: b"encrypted private key",
+                private_key_nonce: &[3_u8; 24],
+                webhook_secret_ciphertext: b"encrypted webhook secret",
+                webhook_secret_nonce: &[4_u8; 24],
+                actor_user_id: &admin_id,
+                now_unix: 200,
+            })
+            .await
+            .expect("GitHub App configuration stores");
+        let configuration = store
+            .github_app_configuration()
+            .await
+            .expect("configuration loads")
+            .expect("configuration exists");
+        assert_eq!(configuration.app_id, 42);
+        assert_eq!(configuration.app_slug, "depot-test");
+        assert_eq!(
+            configuration.private_key_ciphertext,
+            b"encrypted private key"
+        );
+        assert_eq!(configuration.private_key_nonce, [3_u8; 24]);
+        assert_eq!(
+            configuration.webhook_secret_ciphertext,
+            b"encrypted webhook secret"
+        );
+        assert_eq!(configuration.webhook_secret_nonce, [4_u8; 24]);
     }
 
     /// Proves verified GitHub delivery IDs enqueue at most one deployment.

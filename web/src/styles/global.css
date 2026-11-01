@@ -2136,6 +2136,36 @@ td {
   color: var(--accent-foreground);
   border-color: var(--accent);
 }
+.github-app-setup {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1.5rem;
+  padding: 1.25rem;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+.github-app-setup > div {
+  display: grid;
+  gap: 0.4rem;
+  max-width: 32rem;
+}
+.github-app-setup strong {
+  font-family: var(--display-font);
+  font-size: 1.15rem;
+}
+.github-app-setup p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.8rem;
+  line-height: 1.55;
+}
+.github-app-setup form,
+.github-app-setup .primary-action {
+  flex: none;
+  width: auto;
+  margin: 0;
+}
 .wizard-repositories {
   display: grid;
   max-height: 22rem;
@@ -2293,6 +2323,7 @@ td {
 
 @media (max-width: 760px) {
   .new-project-banner,
+  .github-app-setup,
   .source-toolbar,
   .wizard-configure footer,
   .danger-zone {

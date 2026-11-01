@@ -135,6 +135,9 @@ const githubInstallationSchema = z.object({
 const githubIntegrationSchema = z.object({
   configured: z.boolean(),
   install_url: z.string().url().nullable(),
+  setup_available: z.boolean(),
+  manifest_url: z.string().url().nullable(),
+  manifest: z.string().nullable(),
   installations: z.array(githubInstallationSchema),
 });
 const githubRepositorySchema = z.object({
@@ -347,6 +350,19 @@ export async function deleteProject(projectId: string) {
 /** Returns configured GitHub App state and installations linked to Depot. */
 export function getGithubIntegration() {
   return request("/api/v1/integrations/github", githubIntegrationSchema);
+}
+
+/** Completes GitHub's one-time manifest exchange and stores the generated App securely. */
+export function completeGithubManifest(code: string) {
+  return request(
+    "/api/v1/integrations/github/manifest",
+    githubIntegrationSchema,
+    {
+      method: "POST",
+      headers: csrfHeaders(),
+      body: JSON.stringify({ code }),
+    },
+  );
 }
 
 /** Verifies and links the installation returned by GitHub's setup callback. */

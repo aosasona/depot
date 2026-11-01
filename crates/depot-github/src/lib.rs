@@ -57,6 +57,15 @@ pub struct Repository {
     pub archived: bool,
 }
 
+/// One-time credentials returned only by GitHub's App Manifest conversion.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq)]
+pub struct ManifestApp {
+    pub id: u64,
+    pub slug: String,
+    pub pem: String,
+    pub webhook_secret: String,
+}
+
 /// Short-lived installation credential retained only in process memory.
 #[derive(Debug, Deserialize)]
 struct InstallationToken {
@@ -231,6 +240,34 @@ impl GithubAppClient {
     }
 }
 
+/// Exchanges a bounded one-time manifest code at GitHub's fixed API origin.
+pub async fn convert_manifest(code: &str) -> Result<ManifestApp, GithubError> {
+    validate_manifest_code(code)?;
+    let http = Client::builder()
+        .user_agent("depot-self-hosted")
+        .build()
+        .map_err(GithubError::Request)?;
+    let response = http
+        .post(format!(
+            "https://api.github.com/app-manifests/{code}/conversions"
+        ))
+        .headers(api_headers_without_auth())
+        .json(&serde_json::json!({}))
+        .send()
+        .await
+        .map_err(GithubError::Request)?;
+    decode_response(response).await
+}
+
+/// Prevents callback values from influencing any part of GitHub's fixed API origin.
+fn validate_manifest_code(code: &str) -> Result<(), GithubError> {
+    if code.is_empty() || code.len() > 128 || !code.bytes().all(|byte| byte.is_ascii_alphanumeric())
+    {
+        return Err(GithubError::InvalidResponse);
+    }
+    Ok(())
+}
+
 /// Builds GitHub's versioned API headers without logging the bearer credential.
 fn api_headers(token: &str) -> Result<reqwest::header::HeaderMap, GithubError> {
     use reqwest::header::{ACCEPT, AUTHORIZATION, HeaderMap, HeaderValue};
@@ -251,6 +288,21 @@ fn api_headers(token: &str) -> Result<reqwest::header::HeaderMap, GithubError> {
     Ok(headers)
 }
 
+/// Builds GitHub's public version headers for the unauthenticated manifest exchange.
+fn api_headers_without_auth() -> reqwest::header::HeaderMap {
+    use reqwest::header::{ACCEPT, HeaderMap, HeaderValue};
+    let mut headers = HeaderMap::new();
+    headers.insert(
+        ACCEPT,
+        HeaderValue::from_static("application/vnd.github+json"),
+    );
+    headers.insert(
+        "x-github-api-version",
+        HeaderValue::from_static(API_VERSION),
+    );
+    headers
+}
+
 /// Decodes only successful JSON responses and discards rejected response bodies.
 async fn decode_response<T: DeserializeOwned>(
     response: reqwest::Response,
@@ -262,4 +314,22 @@ async fn decode_response<T: DeserializeOwned>(
         .json()
         .await
         .map_err(|_| GithubError::InvalidResponse)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{GithubError, validate_manifest_code};
+
+    /// Proves untrusted callback values are rejected before constructing a GitHub URL.
+    #[test]
+    fn manifest_codes_are_strictly_bounded() {
+        assert!(matches!(
+            validate_manifest_code("../../credentials"),
+            Err(GithubError::InvalidResponse)
+        ));
+        assert!(matches!(
+            validate_manifest_code(&"a".repeat(129)),
+            Err(GithubError::InvalidResponse)
+        ));
+    }
 }

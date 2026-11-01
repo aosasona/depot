@@ -2,6 +2,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
+  completeGithubManifest,
   createProject,
   type GithubRepository,
   getGithubIntegration,
@@ -39,7 +40,10 @@ const initialValues: ConfigureValues = {
 /** Launches a guided GitHub-first project creation flow. */
 export function GithubImportPanel() {
   const dialog = useRef<HTMLDialogElement>(null);
+  const manifestCallback = useRef(false);
   const [open, setOpen] = useState(false);
+  const [setupMessage, setSetupMessage] = useState<string>();
+  const client = useQueryClient();
   const integration = useQuery({
     queryKey: ["github-integration"],
     queryFn: getGithubIntegration,
@@ -52,6 +56,47 @@ export function GithubImportPanel() {
     )
       setOpen(true);
   }, [template]);
+  useEffect(() => {
+    if (manifestCallback.current) return;
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    if (!code) return;
+    manifestCallback.current = true;
+    setOpen(true);
+    const returnedState = params.get("state");
+    const expectedState = window.sessionStorage.getItem(
+      "depot_github_manifest_state",
+    );
+    const clearCallback = () => {
+      params.delete("code");
+      params.delete("state");
+      window.history.replaceState(
+        {},
+        "",
+        `${window.location.pathname}${params.size ? `?${params}` : ""}`,
+      );
+      window.sessionStorage.removeItem("depot_github_manifest_state");
+    };
+    if (!expectedState || returnedState !== expectedState) {
+      clearCallback();
+      setSetupMessage(
+        "GitHub setup could not be verified. Start the setup again from Depot.",
+      );
+      return;
+    }
+    setSetupMessage("Securing the GitHub App credentials…");
+    void completeGithubManifest(code).then(
+      async () => {
+        clearCallback();
+        setSetupMessage("GitHub App created. Install it on an account to browse repositories.");
+        await client.invalidateQueries({ queryKey: ["github-integration"] });
+      },
+      (reason: unknown) => {
+        clearCallback();
+        setSetupMessage(errorMessage(reason));
+      },
+    );
+  }, [client]);
   useEffect(() => {
     if (open && !dialog.current?.open) dialog.current?.showModal();
     if (!open && dialog.current?.open) dialog.current.close();
@@ -72,7 +117,7 @@ export function GithubImportPanel() {
           type="button"
           onClick={() => setOpen(true)}
         >
-          New project →
+          {integration.data?.configured ? "Browse GitHub →" : "Set up GitHub →"}
         </button>
       </div>
       <dialog
@@ -85,6 +130,10 @@ export function GithubImportPanel() {
           <ProjectWizard
             configured={integration.data?.configured ?? false}
             installUrl={integration.data?.install_url ?? null}
+            setupAvailable={integration.data?.setup_available ?? false}
+            manifestUrl={integration.data?.manifest_url ?? null}
+            manifest={integration.data?.manifest ?? null}
+            initialMessage={setupMessage}
             template={template}
             onClose={() => setOpen(false)}
           />
@@ -98,11 +147,19 @@ export function GithubImportPanel() {
 function ProjectWizard({
   configured,
   installUrl,
+  setupAvailable,
+  manifestUrl,
+  manifest,
+  initialMessage,
   template,
   onClose,
 }: {
   configured: boolean;
   installUrl: string | null;
+  setupAvailable: boolean;
+  manifestUrl: string | null;
+  manifest: string | null;
+  initialMessage?: string;
   template: string | null;
   onClose: () => void;
 }) {
@@ -115,11 +172,14 @@ function ProjectWizard({
   const [source, setSource] = useState<Source>();
   const [values, setValues] = useState<ConfigureValues>(initialValues);
   const [search, setSearch] = useState("");
-  const [message, setMessage] = useState<string>();
+  const [message, setMessage] = useState<string | undefined>(initialMessage);
+  const [manifestState] = useState(createManifestState);
   const linkedCallback = useRef(false);
   const link = useMutation({ mutationFn: linkGithubInstallation });
   const create = useMutation({ mutationFn: createProject });
   const importProject = useMutation({ mutationFn: importGithubProject });
+
+  useEffect(() => setMessage(initialMessage), [initialMessage]);
 
   useEffect(() => {
     const preset = templateDefaults(template);
@@ -270,16 +330,42 @@ function ProjectWizard({
             </div>
             {installUrl && (
               <a className="table-action" href={installUrl}>
-                Connect account
+                Install GitHub App
               </a>
             )}
           </div>
           {!configured && (
-            <div className="empty-state">
-              <strong>GitHub App is not configured.</strong>
-              <span>
-                Use Git URL now, or configure the GitHub App on the Depot host.
-              </span>
+            <div className="github-app-setup">
+              <div>
+                <span className="eyebrow">ONE-TIME SETUP</span>
+                <strong>Connect this Depot to GitHub</strong>
+                <p>
+                  Create a private GitHub App with the callback, webhook, and
+                  read permissions already filled in. Depot encrypts the
+                  generated credentials on this server.
+                </p>
+              </div>
+              {setupAvailable && manifestUrl && manifest ? (
+                <form
+                  action={`${manifestUrl}?state=${encodeURIComponent(manifestState)}`}
+                  method="post"
+                  onSubmit={() =>
+                    window.sessionStorage.setItem(
+                      "depot_github_manifest_state",
+                      manifestState,
+                    )
+                  }
+                >
+                  <input type="hidden" name="manifest" value={manifest} />
+                  <button className="primary-action" type="submit">
+                    Create GitHub App →
+                  </button>
+                </form>
+              ) : (
+                <span className="panel-message">
+                  Ask a Depot administrator to complete GitHub setup.
+                </span>
+              )}
             </div>
           )}
           {integration.data?.installations.length ? (
@@ -487,6 +573,14 @@ function projectSlug(name: string) {
 /** Checks the backend-compatible project slug shape. */
 function validSlug(slug: string) {
   return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug);
+}
+
+/** Generates the callback nonce that binds a GitHub manifest response to this browser tab. */
+function createManifestState() {
+  const bytes = window.crypto.getRandomValues(new Uint8Array(32));
+  return Array.from(bytes, (byte) => byte.toString(16).padStart(2, "0")).join(
+    "",
+  );
 }
 
 /** Maps supported template links to editable project defaults. */

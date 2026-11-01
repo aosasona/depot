@@ -4,7 +4,25 @@ Depot uses one operator-owned GitHub App to browse repositories, check out
 private sources with short-lived credentials, and receive automatic push
 deployments. Depot never stores an installation token.
 
-## 1. Create the GitHub App
+## Recommended: connect from the dashboard
+
+Sign in as a Depot administrator, open **Projects**, choose **Set up GitHub**,
+then select **Create GitHub App**. GitHub opens a prefilled, private App form;
+review it and create the App. When GitHub returns to Depot, the generated
+private key and webhook secret are encrypted with Depot's master key and stored
+locally. Select **Install GitHub App**, choose the repositories Depot may use,
+and return to the project wizard to browse them.
+
+This flow requires `security.public_origin` to be the externally reachable
+HTTPS origin for Depot. The API and worker pick up dashboard-managed App
+credentials without a service restart.
+
+## Manual host configuration
+
+The file-based configuration remains available for operators who manage secrets
+outside Depot. Dashboard-managed credentials take precedence when both exist.
+
+### 1. Create the GitHub App
 
 In GitHub, create a GitHub App owned by the account or organization that will
 install it. Set:
@@ -21,7 +39,7 @@ install it. Set:
 Generate a private key for the App. Record the numeric App ID and the App slug
 from its public URL. Install the App only on repositories Depot should deploy.
 
-## 2. Install the credentials on the Depot VM
+### 2. Install the credentials on the Depot VM
 
 Keep both values outside SQLite and readable only by the Depot service account:
 
@@ -49,9 +67,9 @@ sudo systemctl restart depot-api depot-worker
 sudo systemctl --no-pager --full status depot-api depot-worker
 ```
 
-## 3. Import a repository
+## Import a repository
 
-Sign into Depot, open Projects, and select **Connect GitHub**. GitHub will ask
+Sign into Depot, open Projects, and select **Install GitHub App**. GitHub will ask
 which account and repositories the App may access, then return to Depot. Search
 the resulting repository list and select **Create project**.
 
@@ -62,5 +80,5 @@ exits. Pushes to the configured project branch are verified with the App webhook
 secret and deduplicated by GitHub delivery ID.
 
 If a repository is missing, update the App installation's repository access in
-GitHub and use **Connect GitHub** again. Archived repositories are visible but
+GitHub and use **Install GitHub App** again. Archived repositories are visible but
 cannot be imported.
