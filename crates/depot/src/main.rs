@@ -1674,12 +1674,13 @@ mod tests {
     /// Parses whitespace-bearing file names without treating them as command structure.
     #[test]
     fn container_file_records_are_nul_delimited() {
-        let entries = parse_file_entries(b"directory\0\0my folder\0file\012\0notes.txt\0")
-            .expect("records are valid");
+        let entries =
+            parse_file_entries(b"directory\x00\x00my folder\x00file\x0012\x00notes.txt\x00")
+                .expect("records are valid");
         assert_eq!(entries.len(), 2);
         assert_eq!(entries[0]["name"], "my folder");
         assert_eq!(entries[1]["size"], 12);
-        assert!(parse_file_entries(b"file\01\0missing terminator").is_err());
+        assert!(parse_file_entries(b"file\x001\x00missing terminator").is_err());
     }
 
     /// Serves files and SPA routes only from the selected immutable release root.
