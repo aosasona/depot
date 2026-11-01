@@ -20,6 +20,11 @@ surface; administrator-only access management is a distinct Team view. Visual
 styling will use restrained neutral surfaces, one violet accent, consistent
 spacing and radii, and status color only where it carries operational meaning.
 
+Workspace destinations and project sections use typed client routes. Project
+overview, deployments, logs, environment, domains, and settings each have a
+stable URL so refresh, history navigation, bookmarks, and shared links preserve
+the active working context.
+
 The first redesign phase changes the shell and hierarchy without hiding or
 rewriting existing deployment controls. Later phases will split project detail
 into overview, deployments, logs, variables, domains, and settings, and add the
@@ -30,5 +35,5 @@ connected-service canvas and templates on top of that structure.
 - Routine work starts in a product workspace rather than a landing-page hero.
 - Navigation can grow without adding another full-width panel to one page.
 - Existing capabilities remain available during incremental redesign.
-- URL-backed nested project routes remain follow-up work; the initial shell
-  keeps view selection local to avoid coupling visual work to API changes.
+- Unknown project tabs normalize to the overview route rather than creating a
+  second implicit navigation state.

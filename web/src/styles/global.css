@@ -948,7 +948,7 @@ td {
   display: grid;
   gap: 0.25rem;
 }
-.app-navigation button {
+.app-navigation a {
   display: flex;
   gap: 0.7rem;
   align-items: center;
@@ -962,13 +962,14 @@ td {
   font-size: 0.78rem;
   font-weight: 550;
   text-align: left;
+  text-decoration: none;
 }
-.app-navigation button:hover,
-.app-navigation button.active {
+.app-navigation a:hover,
+.app-navigation a.active {
   background: #1b1b20;
   color: var(--text);
 }
-.app-navigation button.active {
+.app-navigation a.active {
   box-shadow: inset 2px 0 var(--accent);
 }
 .app-navigation svg {
@@ -1314,6 +1315,7 @@ td {
   min-width: 0;
 }
 .project-back {
+  display: inline-block;
   margin: 0 0 1.2rem;
   padding: 0;
   border: 0;
@@ -1321,6 +1323,7 @@ td {
   color: var(--muted);
   cursor: pointer;
   font-size: 0.72rem;
+  text-decoration: none;
 }
 .project-back:hover {
   color: var(--text);
@@ -1351,8 +1354,10 @@ td {
   gap: 1.4rem;
   border-bottom: 1px solid var(--border);
 }
-.project-tabs button {
+.project-tabs a {
   position: relative;
+  display: flex;
+  align-items: center;
   flex: 0 0 auto;
   min-height: 42px;
   padding: 0;
@@ -1361,12 +1366,45 @@ td {
   color: var(--muted);
   cursor: pointer;
   font-size: 0.72rem;
+  text-decoration: none;
 }
-.project-tabs button:hover,
-.project-tabs button.active {
+.project-not-found {
+  display: grid;
+  justify-items: start;
+  max-width: 34rem;
+  padding: 3rem;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--surface);
+}
+.project-not-found > span {
+  color: #a78bfa;
+  font-family: "SFMono-Regular", Consolas, monospace;
+  font-size: 0.72rem;
+}
+.app-content .project-not-found h2 {
+  margin: 0.7rem 0;
+  font-size: 1.5rem;
+  letter-spacing: -0.03em;
+}
+.project-not-found p {
+  margin: 0 0 1.4rem;
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+.project-not-found a {
+  padding: 0.55rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  font-size: 0.72rem;
+  text-decoration: none;
+}
+.project-tabs a:hover,
+.project-tabs a.active {
   color: var(--text);
 }
-.project-tabs button.active::after {
+.project-tabs a.active::after {
   position: absolute;
   right: 0;
   bottom: -1px;

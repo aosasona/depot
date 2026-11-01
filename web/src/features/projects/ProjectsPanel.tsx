@@ -1,5 +1,6 @@
 import { useForm } from "@tanstack/react-form";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link, useNavigate } from "@tanstack/react-router";
 import { useState } from "react";
 import { z } from "zod";
 import {
@@ -32,18 +33,29 @@ const projectSchema = z.object({
 });
 
 /** Renders project creation, live project state, and intentional empty feedback. */
-export function ProjectsPanel() {
+export function ProjectsPanel({
+  projectId,
+  tab = "overview",
+}: {
+  projectId?: string;
+  tab?: ProjectTab;
+}) {
+  const navigate = useNavigate();
   const projects = useQuery({ queryKey: ["projects"], queryFn: listProjects });
-  const [selectedProjectId, setSelectedProjectId] = useState<string>();
   const selectedProject = projects.data?.find(
-    (project) => project.id === selectedProjectId,
+    (project) => project.id === projectId,
   );
   if (selectedProject) {
+    return <ProjectWorkspace project={selectedProject} tab={tab} />;
+  }
+  if (projectId && projects.isSuccess) {
     return (
-      <ProjectWorkspace
-        project={selectedProject}
-        onBack={() => setSelectedProjectId(undefined)}
-      />
+      <section className="project-not-found">
+        <span>404</span>
+        <h2>Project not found</h2>
+        <p>This project may have been removed or the URL is incorrect.</p>
+        <Link to="/projects">Return to projects</Link>
+      </section>
     );
   }
   return (
@@ -80,7 +92,12 @@ export function ProjectsPanel() {
           <ProjectListCard
             key={project.id}
             project={project}
-            onSelect={() => setSelectedProjectId(project.id)}
+            onSelect={() =>
+              void navigate({
+                to: "/projects/$projectId/$tab",
+                params: { projectId: project.id, tab: "overview" },
+              })
+            }
           />
         ))}
       </div>
@@ -204,7 +221,7 @@ function ProjectListCard({
   );
 }
 
-type ProjectTab =
+export type ProjectTab =
   | "overview"
   | "deployments"
   | "logs"
@@ -224,12 +241,11 @@ const projectTabs: Array<{ id: ProjectTab; label: string }> = [
 /** Hosts project operations in stable, task-oriented views. */
 function ProjectWorkspace({
   project,
-  onBack,
+  tab,
 }: {
   project: Project;
-  onBack: () => void;
+  tab: ProjectTab;
 }) {
-  const [tab, setTab] = useState<ProjectTab>("overview");
   const [jobId, setJobId] = useState<string | undefined>(
     project.latest_inspection_job_id ?? undefined,
   );
@@ -252,9 +268,9 @@ function ProjectWorkspace({
       : undefined;
   return (
     <section className="project-workspace" aria-labelledby="project-title">
-      <button className="project-back" type="button" onClick={onBack}>
+      <Link className="project-back" to="/projects">
         ← All projects
-      </button>
+      </Link>
       <div className="project-workspace-heading">
         <div className="project-index">
           {project.slug.slice(0, 2).toUpperCase()}
@@ -267,14 +283,14 @@ function ProjectWorkspace({
       </div>
       <nav className="project-tabs" aria-label={`${project.name} sections`}>
         {projectTabs.map((item) => (
-          <button
+          <Link
             className={tab === item.id ? "active" : undefined}
             key={item.id}
-            type="button"
-            onClick={() => setTab(item.id)}
+            to="/projects/$projectId/$tab"
+            params={{ projectId: project.id, tab: item.id }}
           >
             {item.label}
-          </button>
+          </Link>
         ))}
       </nav>
       <div className="project-tab-content">

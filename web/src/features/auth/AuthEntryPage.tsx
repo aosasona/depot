@@ -1,5 +1,6 @@
 import { useForm } from "@tanstack/react-form";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { type ReactNode, useState } from "react";
 import { z } from "zod";
 import {
@@ -9,7 +10,7 @@ import {
   logout,
   type User,
 } from "../../lib/api/client";
-import { ProjectsPanel } from "../projects/ProjectsPanel";
+import { ProjectsPanel, type ProjectTab } from "../projects/ProjectsPanel";
 import { UsersPanel } from "../users/UsersPanel";
 import { bootstrapStatusQuery, currentUserQuery } from "./queries";
 
@@ -25,8 +26,17 @@ const loginSchema = z.object({
   password: z.string().min(1, "Enter your password."),
 });
 
-/** Selects setup, login, or dashboard from real API state. */
-export function AuthEntryPage() {
+export type DashboardLocation =
+  | { kind: "projects" }
+  | { kind: "project"; projectId: string; tab: ProjectTab }
+  | { kind: "team" };
+
+/** Selects setup, login, or the requested dashboard location from real API state. */
+export function AuthEntryPage({
+  dashboard = { kind: "projects" },
+}: {
+  dashboard?: DashboardLocation;
+}) {
   const setup = useQuery(bootstrapStatusQuery());
   const session = useQuery({
     ...currentUserQuery(),
@@ -38,7 +48,8 @@ export function AuthEntryPage() {
     return <AuthFrame label="Depot could not read instance state." danger />;
   if (!setup.data.initialized) return <SetupForm />;
   if (session.isPending) return <AuthFrame label="Checking session…" />;
-  if (session.data) return <Dashboard user={session.data} />;
+  if (session.data)
+    return <Dashboard user={session.data} location={dashboard} />;
   return <LoginForm />;
 }
 
@@ -277,8 +288,13 @@ function LabeledInput({
 }
 
 /** Shows the authenticated identity while the operational dashboard is built. */
-function Dashboard({ user }: { user: User }) {
-  const [view, setView] = useState<"projects" | "team">("projects");
+function Dashboard({
+  user,
+  location,
+}: {
+  user: User;
+  location: DashboardLocation;
+}) {
   const queryClient = useQueryClient();
   const mutation = useMutation({
     mutationFn: logout,
@@ -300,23 +316,21 @@ function Dashboard({ user }: { user: User }) {
           </span>
         </div>
         <nav className="app-navigation" aria-label="Workspace">
-          <button
-            className={view === "projects" ? "active" : undefined}
-            type="button"
-            onClick={() => setView("projects")}
+          <Link
+            className={location.kind !== "team" ? "active" : undefined}
+            to="/projects"
           >
             <NavigationIcon name="projects" />
             Projects
-          </button>
+          </Link>
           {user.role === "admin" && (
-            <button
-              className={view === "team" ? "active" : undefined}
-              type="button"
-              onClick={() => setView("team")}
+            <Link
+              className={location.kind === "team" ? "active" : undefined}
+              to="/team"
             >
               <NavigationIcon name="team" />
               Team
-            </button>
+            </Link>
           )}
         </nav>
         <div className="sidebar-footer">
@@ -331,7 +345,16 @@ function Dashboard({ user }: { user: User }) {
           <div className="breadcrumb">
             <span>Personal workspace</span>
             <b>/</b>
-            <strong>{view === "projects" ? "Projects" : "Team"}</strong>
+            <strong>{location.kind === "team" ? "Team" : "Projects"}</strong>
+            {location.kind === "project" && (
+              <>
+                <b>/</b>
+                <strong className="breadcrumb-current">
+                  {location.tab.slice(0, 1).toUpperCase() +
+                    location.tab.slice(1)}
+                </strong>
+              </>
+            )}
           </div>
           <div className="account-menu">
             <span className="account-avatar">
@@ -351,23 +374,43 @@ function Dashboard({ user }: { user: User }) {
           </div>
         </header>
         <div className="app-content">
-          <section className="page-intro">
-            <div>
-              <p className="eyebrow">
-                {view === "projects" ? "Deployments" : "Access"}
-              </p>
-              <h1>{view === "projects" ? "Projects" : "Team"}</h1>
-              <p>
-                {view === "projects"
-                  ? "Connect source, configure builds, and promote releases from one place."
-                  : "Manage the people who can access this Depot instance."}
-              </p>
-            </div>
-            <span className="control-plane-status">
-              <i aria-hidden="true" /> Control plane online
-            </span>
-          </section>
-          {view === "projects" ? <ProjectsPanel /> : <UsersPanel />}
+          {location.kind !== "project" && (
+            <section className="page-intro">
+              <div>
+                <p className="eyebrow">
+                  {location.kind === "projects" ? "Deployments" : "Access"}
+                </p>
+                <h1>{location.kind === "projects" ? "Projects" : "Team"}</h1>
+                <p>
+                  {location.kind === "projects"
+                    ? "Connect source, configure builds, and promote releases from one place."
+                    : "Manage the people who can access this Depot instance."}
+                </p>
+              </div>
+              <span className="control-plane-status">
+                <i aria-hidden="true" /> Control plane online
+              </span>
+            </section>
+          )}
+          {location.kind === "team" ? (
+            user.role === "admin" ? (
+              <UsersPanel />
+            ) : (
+              <section className="project-not-found">
+                <span>403</span>
+                <h2>Administrator access required</h2>
+                <p>Your account cannot manage workspace members.</p>
+                <Link to="/projects">Return to projects</Link>
+              </section>
+            )
+          ) : (
+            <ProjectsPanel
+              projectId={
+                location.kind === "project" ? location.projectId : undefined
+              }
+              tab={location.kind === "project" ? location.tab : undefined}
+            />
+          )}
         </div>
       </div>
     </main>
