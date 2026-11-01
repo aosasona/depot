@@ -156,13 +156,28 @@ export function ProjectCanvas({ project }: { project: Project }) {
           <strong>Project topology</strong>
           <span>Right-click any node for actions.</span>
         </div>
-        <button
-          className="table-action"
-          type="button"
-          onClick={() => setConnection({ kind: "database" })}
-        >
-          + Add connection
-        </button>
+        <div className="canvas-toolbar-actions">
+          <button
+            className="table-action shell-action"
+            type="button"
+            disabled={!active?.container_id}
+            title={
+              active?.container_id
+                ? "Open a command shell in the active release container"
+                : "Deploy the project before opening a shell"
+            }
+            onClick={() => setShellOpen(true)}
+          >
+            <span aria-hidden="true">&gt;_</span> Open shell
+          </button>
+          <button
+            className="table-action"
+            type="button"
+            onClick={() => setConnection({ kind: "database" })}
+          >
+            + Add connection
+          </button>
+        </div>
       </div>
       <section
         className="project-topology"
@@ -203,7 +218,14 @@ export function ProjectCanvas({ project }: { project: Project }) {
       )}
       {menu && <NodeMenu menu={menu} onAction={act} />}
       {selected && (
-        <InspectDrawer node={selected} onClose={() => setSelected(undefined)} />
+        <InspectDrawer
+          node={selected}
+          onClose={() => setSelected(undefined)}
+          onShell={() => {
+            setSelected(undefined);
+            setShellOpen(true);
+          }}
+        />
       )}
       {connection && (
         <ConnectionDialog
@@ -349,9 +371,11 @@ function NodeMenu({
 function InspectDrawer({
   node,
   onClose,
+  onShell,
 }: {
   node: CanvasNode;
   onClose: () => void;
+  onShell: () => void;
 }) {
   return (
     <aside className="canvas-inspector" aria-label={`${node.label} details`}>
@@ -391,6 +415,16 @@ function InspectDrawer({
           </div>
         )}
       </dl>
+      {node.kind === "app" && (
+        <button
+          className="table-action canvas-inspector-action"
+          type="button"
+          disabled={!node.active}
+          onClick={onShell}
+        >
+          {node.active ? ">_ Open container shell" : "Deploy to open a shell"}
+        </button>
+      )}
     </aside>
   );
 }

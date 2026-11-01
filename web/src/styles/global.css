@@ -1388,6 +1388,21 @@ td {
   color: var(--muted);
   font-size: 0.75rem;
 }
+.canvas-toolbar > .canvas-toolbar-actions {
+  display: flex;
+  gap: 0.6rem;
+  align-items: center;
+}
+.canvas-toolbar-actions .shell-action {
+  border-color: var(--accent);
+}
+.canvas-toolbar-actions .shell-action > span {
+  color: var(--accent);
+  font-family: var(--mono-font);
+}
+.canvas-toolbar-actions .shell-action:disabled {
+  border-color: var(--border);
+}
 .project-topology {
   position: relative;
   display: grid;
@@ -1563,6 +1578,12 @@ td {
   margin: 0;
   overflow-wrap: anywhere;
 }
+.canvas-inspector-action {
+  align-self: end;
+  width: 100%;
+  min-height: 42px;
+  border-color: var(--accent);
+}
 .canvas-dialog-backdrop {
   position: fixed;
   z-index: 90;
@@ -1680,6 +1701,10 @@ td {
   .canvas-toolbar {
     align-items: stretch;
     flex-direction: column;
+  }
+  .canvas-toolbar > .canvas-toolbar-actions {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
   }
   .project-topology {
     grid-template-columns: 1fr;
