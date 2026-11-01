@@ -10,7 +10,9 @@ import {
   logout,
   type User,
 } from "../../lib/api/client";
+import { ServiceCanvas } from "../canvas/ServiceCanvas";
 import { ProjectsPanel, type ProjectTab } from "../projects/ProjectsPanel";
+import { TemplatesPanel } from "../templates/TemplatesPanel";
 import { UsersPanel } from "../users/UsersPanel";
 import { bootstrapStatusQuery, currentUserQuery } from "./queries";
 
@@ -29,6 +31,8 @@ const loginSchema = z.object({
 export type DashboardLocation =
   | { kind: "projects" }
   | { kind: "project"; projectId: string; tab: ProjectTab }
+  | { kind: "canvas" }
+  | { kind: "templates" }
   | { kind: "team" };
 
 /** Selects setup, login, or the requested dashboard location from real API state. */
@@ -317,11 +321,29 @@ function Dashboard({
         </div>
         <nav className="app-navigation" aria-label="Workspace">
           <Link
-            className={location.kind !== "team" ? "active" : undefined}
+            className={
+              location.kind === "projects" || location.kind === "project"
+                ? "active"
+                : undefined
+            }
             to="/projects"
           >
             <NavigationIcon name="projects" />
             Projects
+          </Link>
+          <Link
+            className={location.kind === "canvas" ? "active" : undefined}
+            to="/canvas"
+          >
+            <NavigationIcon name="canvas" />
+            Canvas
+          </Link>
+          <Link
+            className={location.kind === "templates" ? "active" : undefined}
+            to="/templates"
+          >
+            <NavigationIcon name="templates" />
+            Templates
           </Link>
           {user.role === "admin" && (
             <Link
@@ -345,7 +367,7 @@ function Dashboard({
           <div className="breadcrumb">
             <span>Personal workspace</span>
             <b>/</b>
-            <strong>{location.kind === "team" ? "Team" : "Projects"}</strong>
+            <strong>{pageTitle(location)}</strong>
             {location.kind === "project" && (
               <>
                 <b>/</b>
@@ -378,21 +400,25 @@ function Dashboard({
             <section className="page-intro">
               <div>
                 <p className="eyebrow">
-                  {location.kind === "projects" ? "Deployments" : "Access"}
-                </p>
-                <h1>{location.kind === "projects" ? "Projects" : "Team"}</h1>
-                <p>
                   {location.kind === "projects"
-                    ? "Connect source, configure builds, and promote releases from one place."
-                    : "Manage the people who can access this Depot instance."}
+                    ? "Deployments"
+                    : location.kind === "team"
+                      ? "Access"
+                      : "Architecture"}
                 </p>
+                <h1>{pageTitle(location)}</h1>
+                <p>{pageDescription(location)}</p>
               </div>
               <span className="control-plane-status">
                 <i aria-hidden="true" /> Control plane online
               </span>
             </section>
           )}
-          {location.kind === "team" ? (
+          {location.kind === "canvas" ? (
+            <ServiceCanvas />
+          ) : location.kind === "templates" ? (
+            <TemplatesPanel />
+          ) : location.kind === "team" ? (
             user.role === "admin" ? (
               <UsersPanel />
             ) : (
@@ -418,16 +444,53 @@ function Dashboard({
 }
 
 /** Small dependency-free navigation glyphs with currentColor styling. */
-function NavigationIcon({ name }: { name: "projects" | "team" }) {
-  return name === "projects" ? (
-    <svg aria-hidden="true" viewBox="0 0 20 20">
-      <path d="M3.5 4.5h5v5h-5zM11.5 4.5h5v5h-5zM3.5 12.5h5v3h-5zM11.5 12.5h5v3h-5z" />
-    </svg>
-  ) : (
+function NavigationIcon({
+  name,
+}: {
+  name: "projects" | "team" | "canvas" | "templates";
+}) {
+  if (name === "projects")
+    return (
+      <svg aria-hidden="true" viewBox="0 0 20 20">
+        <path d="M3.5 4.5h5v5h-5zM11.5 4.5h5v5h-5zM3.5 12.5h5v3h-5zM11.5 12.5h5v3h-5z" />
+      </svg>
+    );
+  if (name === "canvas")
+    return (
+      <svg aria-hidden="true" viewBox="0 0 20 20">
+        <path d="M3 3.5h5v4H3zM12 3.5h5v4h-5zM7.5 14.5h5v-4h-5zM5.5 7.5v2h4.5M14.5 7.5v2H10v1" />
+      </svg>
+    );
+  if (name === "templates")
+    return (
+      <svg aria-hidden="true" viewBox="0 0 20 20">
+        <path d="M3.5 3.5h5.5v5.5H3.5zM11 3.5h5.5v5.5H11zM3.5 11h5.5v5.5H3.5zM11 11h5.5v5.5H11z" />
+      </svg>
+    );
+  return (
     <svg aria-hidden="true" viewBox="0 0 20 20">
       <path d="M7.5 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6ZM2.5 16.5v-2a3 3 0 0 1 3-3h4a3 3 0 0 1 3 3v2M13 8.5a2.5 2.5 0 1 0 0-5M13.5 11.5h1a3 3 0 0 1 3 3v2" />
     </svg>
   );
+}
+
+/** Returns a stable heading for every URL-backed workspace page. */
+function pageTitle(location: DashboardLocation) {
+  if (location.kind === "team") return "Team";
+  if (location.kind === "canvas") return "Service canvas";
+  if (location.kind === "templates") return "Templates";
+  return "Projects";
+}
+
+/** Describes the job of each top-level workspace page. */
+function pageDescription(location: DashboardLocation) {
+  if (location.kind === "team")
+    return "Manage the people who can access this Depot instance.";
+  if (location.kind === "canvas")
+    return "See how public routes connect to the services running on this instance.";
+  if (location.kind === "templates")
+    return "Start with safe defaults or follow a dependency-aware application blueprint.";
+  return "Connect source, configure builds, and promote releases from one place.";
 }
 
 /** Converts unknown failures into useful but non-sensitive UI copy. */

@@ -86,11 +86,25 @@ const teamRoute = createRoute({
   component: () => <DashboardPage location={{ kind: "team" }} />,
 });
 
+const canvasRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/canvas",
+  component: () => <DashboardPage location={{ kind: "canvas" }} />,
+});
+
+const templatesRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/templates",
+  component: () => <DashboardPage location={{ kind: "templates" }} />,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   projectsRoute,
   projectOverviewRoute,
   projectRoute,
+  canvasRoute,
+  templatesRoute,
   teamRoute,
 ]);
 

@@ -44,10 +44,14 @@ export function GithubImportPanel() {
     queryKey: ["github-integration"],
     queryFn: getGithubIntegration,
   });
+  const template = new URLSearchParams(window.location.search).get("template");
   useEffect(() => {
-    if (new URLSearchParams(window.location.search).has("installation_id"))
+    if (
+      new URLSearchParams(window.location.search).has("installation_id") ||
+      template
+    )
       setOpen(true);
-  }, []);
+  }, [template]);
   useEffect(() => {
     if (open && !dialog.current?.open) dialog.current?.showModal();
     if (!open && dialog.current?.open) dialog.current.close();
@@ -81,6 +85,7 @@ export function GithubImportPanel() {
           <ProjectWizard
             configured={integration.data?.configured ?? false}
             installUrl={integration.data?.install_url ?? null}
+            template={template}
             onClose={() => setOpen(false)}
           />
         )}
@@ -93,10 +98,12 @@ export function GithubImportPanel() {
 function ProjectWizard({
   configured,
   installUrl,
+  template,
   onClose,
 }: {
   configured: boolean;
   installUrl: string | null;
+  template: string | null;
   onClose: () => void;
 }) {
   const client = useQueryClient();
@@ -113,6 +120,13 @@ function ProjectWizard({
   const link = useMutation({ mutationFn: linkGithubInstallation });
   const create = useMutation({ mutationFn: createProject });
   const importProject = useMutation({ mutationFn: importGithubProject });
+
+  useEffect(() => {
+    const preset = templateDefaults(template);
+    if (!preset) return;
+    setSource({ kind: "manual" });
+    setValues(preset);
+  }, [template]);
 
   useEffect(() => {
     const first = integration.data?.installations[0]?.installation_id;
@@ -473,6 +487,26 @@ function projectSlug(name: string) {
 /** Checks the backend-compatible project slug shape. */
 function validSlug(slug: string) {
   return /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(slug);
+}
+
+/** Maps supported template links to editable project defaults. */
+function templateDefaults(
+  template: string | null,
+): ConfigureValues | undefined {
+  if (template === "static") return { ...initialValues, projectKind: "static" };
+  if (template === "service")
+    return { ...initialValues, projectKind: "service" };
+  if (template === "affine")
+    return {
+      ...initialValues,
+      name: "Affine",
+      slug: "affine",
+      repositoryUrl: "https://github.com/toeverything/AFFiNE.git",
+      projectKind: "service",
+      builder: "dockerfile",
+      port: "3010",
+    };
+  return undefined;
 }
 /** Converts provider and validation failures into safe dialog feedback. */
 function errorMessage(reason: unknown) {

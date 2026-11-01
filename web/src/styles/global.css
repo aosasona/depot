@@ -1938,3 +1938,289 @@ td {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
 }
+
+/* Live service topology and dependency-aware templates. */
+.service-canvas {
+  position: relative;
+  display: grid;
+  gap: 2rem;
+  min-height: 34rem;
+  padding: 2rem;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background-color: #09090b;
+  background-image:
+    linear-gradient(var(--border) 1px, transparent 1px),
+    linear-gradient(90deg, var(--border) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+.canvas-internet {
+  justify-self: center;
+  z-index: 1;
+  display: grid;
+  min-width: 13rem;
+  padding: 1rem;
+  border: 1px solid var(--accent);
+  background: var(--surface);
+  text-align: center;
+}
+.canvas-internet span,
+.canvas-internet small {
+  color: var(--muted);
+  font: 0.62rem var(--mono-font);
+}
+.canvas-internet strong {
+  margin: 0.25rem 0;
+  font: 1.3rem var(--display-font);
+}
+.canvas-spine {
+  position: absolute;
+  top: 7rem;
+  left: 50%;
+  width: 1px;
+  height: 5rem;
+  background: var(--accent);
+}
+.canvas-projects {
+  z-index: 1;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(15rem, 1fr));
+  gap: 1rem;
+  align-items: start;
+}
+.canvas-node {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.canvas-node.live {
+  border-top-color: var(--accent);
+}
+.canvas-node > div {
+  display: flex;
+  align-items: center;
+  gap: 0.7rem;
+}
+.canvas-node > div > span:nth-child(2) {
+  display: grid;
+  gap: 0.15rem;
+}
+.canvas-node > div small {
+  color: var(--muted);
+  font: 0.65rem var(--mono-font);
+}
+.canvas-node > div > i {
+  width: 8px;
+  height: 8px;
+  margin-left: auto;
+  background: #52525b;
+}
+.canvas-node.live > div > i {
+  background: var(--accent);
+  box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 55%, transparent);
+}
+.canvas-node ul {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  border-top: 1px solid var(--border);
+}
+.canvas-node li {
+  display: flex;
+  justify-content: space-between;
+  gap: 0.5rem;
+  padding: 0.55rem 0;
+  border-bottom: 1px solid var(--border);
+  font-size: 0.72rem;
+}
+.canvas-node li small {
+  color: var(--muted);
+  text-transform: uppercase;
+}
+.canvas-node > a {
+  color: var(--accent);
+  font-size: 0.72rem;
+}
+.service-canvas > footer {
+  display: flex;
+  gap: 1.2rem;
+  align-items: center;
+  margin-top: auto;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border);
+  color: var(--muted);
+  font: 0.65rem var(--mono-font);
+}
+.service-canvas > footer span {
+  display: inline-flex;
+  gap: 0.35rem;
+  align-items: center;
+}
+.service-canvas > footer i {
+  width: 7px;
+  height: 7px;
+  background: #52525b;
+}
+.service-canvas > footer i.active {
+  background: var(--accent);
+}
+.service-canvas > footer strong {
+  margin-left: auto;
+  color: var(--text);
+}
+.canvas-loading {
+  min-height: 30rem;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font: 0.75rem var(--mono-font);
+}
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+.templates-layout {
+  display: grid;
+  gap: 1rem;
+}
+.template-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1rem;
+}
+.template-card,
+.affine-blueprint {
+  position: relative;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.template-card {
+  display: grid;
+  gap: 1rem;
+  padding: 1.5rem;
+}
+.template-number {
+  color: #52525b;
+  font: 0.72rem var(--mono-font);
+}
+.template-card h2,
+.affine-blueprint h2 {
+  margin: 0;
+  font: 1.75rem var(--display-font);
+}
+.template-card p,
+.affine-blueprint p {
+  margin: 0;
+  color: var(--muted);
+  line-height: 1.6;
+}
+.template-card ul {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.4rem;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.template-card li,
+.plan-badge {
+  padding: 0.35rem 0.5rem;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font: 0.62rem var(--mono-font);
+  text-transform: uppercase;
+}
+.template-card .primary-action {
+  justify-self: start;
+  margin-top: auto;
+}
+.affine-blueprint {
+  display: grid;
+  gap: 1.5rem;
+  padding: 1.5rem;
+}
+.blueprint-title {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  gap: 1rem;
+  align-items: start;
+}
+.blueprint-title > div {
+  display: grid;
+  gap: 0.4rem;
+}
+.blueprint-flow {
+  display: grid;
+  grid-template-columns: minmax(12rem, 0.8fr) auto minmax(15rem, 1.2fr);
+  gap: 1rem;
+  align-items: center;
+  padding: 1.5rem;
+  border: 1px solid var(--border);
+  background: #09090b;
+}
+.blueprint-flow > span {
+  color: var(--accent);
+  font-size: 1.5rem;
+}
+.blueprint-dependencies {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 0.5rem;
+}
+.blueprint-node {
+  display: grid;
+  gap: 0.3rem;
+  padding: 1rem;
+  border: 1px solid var(--border);
+  background: var(--surface);
+}
+.blueprint-node.primary {
+  border-color: var(--accent);
+}
+.blueprint-node small {
+  color: var(--muted);
+  font: 0.62rem var(--mono-font);
+}
+.blueprint-note {
+  display: grid;
+  grid-template-columns: minmax(10rem, 0.35fr) 1fr auto;
+  gap: 1rem;
+  align-items: center;
+}
+.blueprint-note a {
+  color: var(--accent);
+  white-space: nowrap;
+}
+
+@media (max-width: 800px) {
+  .template-grid,
+  .blueprint-dependencies {
+    grid-template-columns: 1fr;
+  }
+  .blueprint-title,
+  .blueprint-flow,
+  .blueprint-note {
+    grid-template-columns: 1fr;
+  }
+  .blueprint-flow > span {
+    transform: rotate(90deg);
+    justify-self: start;
+  }
+  .service-canvas {
+    padding: 1rem;
+  }
+  .service-canvas > footer {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+  .service-canvas > footer strong {
+    margin-left: 0;
+  }
+}
