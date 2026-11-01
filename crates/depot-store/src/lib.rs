@@ -2330,6 +2330,30 @@ impl Store {
         transaction.commit().await?;
         Ok(user_id)
     }
+
+    /// Records a security-relevant project action without retaining sensitive content.
+    pub async fn record_project_audit(
+        &self,
+        actor_user_id: &str,
+        action: &str,
+        project_id: &str,
+        metadata_json: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO audit_log
+             (actor_user_id, action, target_type, target_id, metadata_json, created_at)
+             VALUES (?, ?, 'project', ?, ?, ?)",
+        )
+        .bind(actor_user_id)
+        .bind(action)
+        .bind(project_id)
+        .bind(metadata_json)
+        .bind(now_unix)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 /// Rejects setup operations once any administrator exists.

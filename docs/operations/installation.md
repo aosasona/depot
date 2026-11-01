@@ -53,6 +53,11 @@ git --version
 /usr/local/bin/railpack --version
 ```
 
+Browser shell traffic stays on the VM. The API and worker exchange signed,
+short-lived capabilities through `/var/lib/depot/worker-shell.sock`; only the
+worker account needs Docker-group membership. Do not expose this Unix socket or
+replace it with the Docker socket.
+
 Download a release asset named `depot-linux-x86_64`, verify its provenance,
 and make it executable. From a source checkout, install it with:
 

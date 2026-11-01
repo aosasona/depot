@@ -1513,6 +1513,72 @@ td {
   font: 0.72rem / 1.5 var(--mono-font);
   white-space: pre-wrap;
 }
+.browser-shell {
+  width: min(58rem, 100%);
+}
+.browser-shell header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  align-items: center;
+}
+.shell-state {
+  padding: 0.3rem 0.45rem;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font: 0.58rem var(--mono-font);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+.shell-state.open {
+  border-color: var(--accent);
+  color: var(--accent);
+}
+.shell-state.error {
+  border-color: var(--danger);
+  color: var(--danger);
+}
+.browser-shell .browser-shell-output {
+  min-height: 24rem;
+  max-height: min(55vh, 36rem);
+  color: #e4e4e7;
+}
+.browser-shell-input {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  border: 1px solid var(--border);
+  background: #070709;
+}
+.browser-shell-input > span {
+  padding-left: 0.8rem;
+  color: var(--accent);
+  font: 0.75rem var(--mono-font);
+}
+.browser-shell-input input {
+  min-width: 0;
+  min-height: 42px;
+  border: 0;
+  background: transparent;
+  color: var(--text);
+  font: 0.72rem var(--mono-font);
+}
+.browser-shell-input button {
+  align-self: stretch;
+  min-width: 4.5rem;
+  border: 0;
+  border-left: 1px solid var(--border);
+  background: var(--accent);
+  color: var(--accent-foreground);
+  font: 0.65rem var(--mono-font);
+  text-transform: uppercase;
+}
+.browser-shell-input button:disabled {
+  background: var(--surface-raised);
+  color: var(--muted);
+}
+.browser-shell footer {
+  justify-content: space-between;
+}
 
 @media (max-width: 760px) {
   .canvas-toolbar {

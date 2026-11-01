@@ -2,7 +2,9 @@
 
 use std::{fs, net::SocketAddr, path::Path};
 
-use serde::Deserialize;
+use hmac::{Hmac, KeyInit, Mac};
+use serde::{Deserialize, Serialize};
+use sha2::Sha256;
 use thiserror::Error;
 use url::Url;
 
@@ -62,6 +64,8 @@ pub struct WorkerConfig {
     pub docker_binary: String,
     #[serde(default = "default_railpack_binary")]
     pub railpack_binary: String,
+    #[serde(default = "default_shell_socket")]
+    pub shell_socket: String,
     #[serde(default = "default_docker_timeout_seconds")]
     pub docker_timeout_seconds: u64,
     pub caddy_agent: Option<CaddyAgentClientConfig>,
@@ -85,6 +89,102 @@ fn default_docker_binary() -> String {
 /// Returns the conventional Railpack CLI name for operator PATH resolution.
 fn default_railpack_binary() -> String {
     "railpack".to_owned()
+}
+
+/// Returns the group-restricted local socket shared by the API and worker.
+fn default_shell_socket() -> String {
+    "/var/lib/depot/worker-shell.sock".to_owned()
+}
+
+/// Signed short-lived request passed from the authenticated API to the Docker worker.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ShellHandshake {
+    pub session_id: String,
+    pub project_id: String,
+    pub container_id: String,
+    pub actor_user_id: String,
+    pub expires_at: i64,
+    pub nonce: String,
+    pub signature: String,
+}
+
+/// Domain-separates the local shell MAC key from the secret-encryption key.
+pub fn derive_shell_signing_key(master_key: &[u8; 32]) -> [u8; 32] {
+    let mut digest = Sha256::new();
+    use sha2::Digest;
+    digest.update(b"depot:worker-shell:v1:");
+    digest.update(master_key);
+    digest.finalize().into()
+}
+
+impl ShellHandshake {
+    /// Signs every capability field while deliberately excluding the signature itself.
+    pub fn sign(&mut self, key: &[u8; 32]) {
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts a 256-bit key");
+        mac.update(self.canonical().as_bytes());
+        self.signature = encode_hex(&mac.finalize().into_bytes());
+    }
+
+    /// Authenticates the complete capability using constant-time MAC verification.
+    pub fn verify(&self, key: &[u8; 32]) -> bool {
+        let Some(signature) = decode_hex_32(&self.signature) else {
+            return false;
+        };
+        let mut mac = Hmac::<Sha256>::new_from_slice(key).expect("HMAC accepts a 256-bit key");
+        mac.update(self.canonical().as_bytes());
+        mac.verify_slice(&signature).is_ok()
+    }
+
+    /// Produces an unambiguous length-prefixed capability representation.
+    fn canonical(&self) -> String {
+        let fields = [
+            self.session_id.as_str(),
+            self.project_id.as_str(),
+            self.container_id.as_str(),
+            self.actor_user_id.as_str(),
+            self.nonce.as_str(),
+        ];
+        let mut value = format!("{}|", self.expires_at);
+        for field in fields {
+            value.push_str(&format!("{}:{field}|", field.len()));
+        }
+        value
+    }
+}
+
+/// Encodes authentication bytes without introducing another protocol dependency.
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(char::from(HEX[usize::from(byte >> 4)]));
+        encoded.push(char::from(HEX[usize::from(byte & 0x0f)]));
+    }
+    encoded
+}
+
+/// Decodes an exact 256-bit hexadecimal signature.
+fn decode_hex_32(encoded: &str) -> Option<[u8; 32]> {
+    if encoded.len() != 64 {
+        return None;
+    }
+    let mut decoded = [0_u8; 32];
+    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+        let high = decode_nibble(pair[0])?;
+        let low = decode_nibble(pair[1])?;
+        decoded[index] = (high << 4) | low;
+    }
+    Some(decoded)
+}
+
+/// Converts one ASCII hexadecimal character into its four-bit value.
+const fn decode_nibble(value: u8) -> Option<u8> {
+    match value {
+        b'0'..=b'9' => Some(value - b'0'),
+        b'a'..=b'f' => Some(value - b'a' + 10),
+        b'A'..=b'F' => Some(value - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Returns the production static artifact root used by packaged installations.
@@ -261,6 +361,7 @@ impl Config {
                 git_timeout_seconds: 120,
                 docker_binary: default_docker_binary(),
                 railpack_binary: default_railpack_binary(),
+                shell_socket: ".tmp/worker-shell.sock".to_owned(),
                 docker_timeout_seconds: default_docker_timeout_seconds(),
                 caddy_agent: None,
             },
@@ -293,6 +394,10 @@ impl Config {
             || self.worker.git_timeout_seconds > 1_800
             || self.worker.docker_binary.trim().is_empty()
             || self.worker.railpack_binary.trim().is_empty()
+            || self.worker.shell_socket.trim().is_empty()
+            || !self.worker.shell_socket.ends_with(".sock")
+            || Path::new(&self.worker.shell_socket).parent()
+                != Path::new(&self.worker.workspace_root).parent()
             || self.worker.docker_timeout_seconds == 0
             || self.worker.docker_timeout_seconds > 7_200
         {
@@ -329,9 +434,28 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, ConfigError, ProjectValidationError, validate_domain_hostname, validate_host_port,
-        validate_project_slug, validate_repository_url,
+        Config, ConfigError, ProjectValidationError, ShellHandshake, validate_domain_hostname,
+        validate_host_port, validate_project_slug, validate_repository_url,
     };
+
+    /// Proves shell capabilities cannot be altered after the API signs them.
+    #[test]
+    fn shell_handshake_authenticates_every_capability_field() {
+        let key = [19_u8; 32];
+        let mut handshake = ShellHandshake {
+            session_id: "session".to_owned(),
+            project_id: "project".to_owned(),
+            container_id: "container".to_owned(),
+            actor_user_id: "user".to_owned(),
+            expires_at: 100,
+            nonce: "nonce".to_owned(),
+            signature: String::new(),
+        };
+        handshake.sign(&key);
+        assert!(handshake.verify(&key));
+        handshake.container_id = "other".to_owned();
+        assert!(!handshake.verify(&key));
+    }
 
     /// Ensures the built-in development configuration satisfies all validation.
     #[test]
@@ -339,6 +463,17 @@ mod tests {
         Config::local_default()
             .validate()
             .expect("defaults are valid");
+    }
+
+    /// Prevents the stale-socket cleanup from ever targeting Docker or system sockets.
+    #[test]
+    fn shell_socket_must_share_the_workspace_parent() {
+        let mut config = Config::local_default();
+        config.worker.shell_socket = "/var/run/docker.sock".to_owned();
+        assert!(matches!(
+            config.validate(),
+            Err(ConfigError::InvalidWorkerConfig)
+        ));
     }
 
     #[test]

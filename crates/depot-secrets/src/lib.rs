@@ -49,8 +49,7 @@ pub enum SecretError {
 impl SecretCipher {
     /// Loads one 256-bit hexadecimal master key from an operator-owned file.
     pub fn load(path: &Path) -> Result<Self, SecretError> {
-        let encoded = fs::read_to_string(path).map_err(SecretError::KeyRead)?;
-        let key = decode_key(encoded.trim())?;
+        let key = load_key(path)?;
         let cipher =
             XChaCha20Poly1305::new_from_slice(&key).map_err(|_| SecretError::InvalidKey)?;
         Ok(Self { cipher })
@@ -96,6 +95,12 @@ impl SecretCipher {
             .map_err(|_| SecretError::Decrypt)?;
         String::from_utf8(plaintext).map_err(|_| SecretError::Decrypt)
     }
+}
+
+/// Loads the instance key for other authenticated local protocols.
+pub fn load_key(path: &Path) -> Result<[u8; KEY_BYTES], SecretError> {
+    let encoded = fs::read_to_string(path).map_err(SecretError::KeyRead)?;
+    decode_key(encoded.trim())
 }
 
 /// Generates a fresh 256-bit key encoded for a restricted text file.

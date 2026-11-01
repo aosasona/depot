@@ -3,6 +3,7 @@
 #[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::{
     Json, Router,
@@ -13,7 +14,7 @@ use axum::{
 };
 use clap::{Parser, Subcommand};
 use depot_auth::{issue_bootstrap_token, issue_deploy_token};
-use depot_core::Config;
+use depot_core::{Config, ShellHandshake};
 use depot_store::Store;
 use hyper::client::conn::http1;
 use hyper_util::rt::TokioIo;
@@ -21,7 +22,7 @@ use rust_embed::Embed;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use time::Duration;
-use tokio::net::TcpListener;
+use tokio::net::{TcpListener, UnixListener, UnixStream};
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use zeroize::Zeroize;
@@ -160,6 +161,8 @@ enum AppError {
     GithubConfig(String),
     #[error("required dependency check failed: {0}")]
     Dependency(String),
+    #[error("worker shell broker failed: {0}")]
+    ShellBroker(#[source] std::io::Error),
 }
 
 /// Parses the command line and runs the selected Depot process mode.
@@ -331,7 +334,17 @@ async fn verify_command(binary: &str, arguments: &[&str]) -> Result<(), AppError
 async fn worker(config: Config, once: bool) -> Result<(), AppError> {
     let store = Store::connect(&config.database.url).await?;
     let secrets = load_secret_cipher(&config)?;
+    let mut master_key = depot_secrets::load_key(Path::new(&config.security.master_key_file))
+        .map_err(AppError::from)?;
+    let shell_key = Arc::new(depot_core::derive_shell_signing_key(&master_key));
+    master_key.zeroize();
     let github = load_github_integration(&config)?.map(|integration| integration.client);
+    let shell_listener = bind_shell_listener(&config.worker.shell_socket).await?;
+    let shell_store = store.clone();
+    let shell_worker = config.worker.clone();
+    tokio::spawn(async move {
+        run_shell_broker(shell_listener, shell_store, shell_worker, shell_key).await;
+    });
     cleanup_retired_containers(&store, &config.worker).await;
     let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
     info!(%worker_id, "Depot worker started");
@@ -361,6 +374,223 @@ async fn worker(config: Config, once: bool) -> Result<(), AppError> {
                 info!(%worker_id, "Depot worker stopping");
                 return Ok(());
             }
+        }
+    }
+}
+
+/// Replaces only a stale Unix socket before binding the worker shell broker.
+async fn bind_shell_listener(path: &str) -> Result<UnixListener, AppError> {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+
+    let socket_path = Path::new(path);
+    if let Some(parent) = socket_path.parent() {
+        tokio::fs::create_dir_all(parent)
+            .await
+            .map_err(AppError::ShellBroker)?;
+    }
+    if let Ok(metadata) = std::fs::symlink_metadata(socket_path) {
+        if !metadata.file_type().is_socket() {
+            return Err(AppError::ShellBroker(std::io::Error::new(
+                std::io::ErrorKind::AlreadyExists,
+                "configured shell socket path exists and is not a socket",
+            )));
+        }
+        tokio::fs::remove_file(socket_path)
+            .await
+            .map_err(AppError::ShellBroker)?;
+    }
+    let listener = UnixListener::bind(socket_path).map_err(AppError::ShellBroker)?;
+    std::fs::set_permissions(socket_path, std::fs::Permissions::from_mode(0o660))
+        .map_err(AppError::ShellBroker)?;
+    Ok(listener)
+}
+
+/// Accepts a small bounded number of signed local terminal sessions.
+async fn run_shell_broker(
+    listener: UnixListener,
+    store: Store,
+    worker_config: depot_core::WorkerConfig,
+    signing_key: Arc<[u8; 32]>,
+) {
+    let permits = Arc::new(tokio::sync::Semaphore::new(4));
+    info!(socket = %worker_config.shell_socket, "worker shell broker started");
+    loop {
+        let (stream, _) = match listener.accept().await {
+            Ok(connection) => connection,
+            Err(error) => {
+                tracing::warn!(%error, "shell broker accept failed");
+                continue;
+            }
+        };
+        let Ok(permit) = permits.clone().try_acquire_owned() else {
+            tokio::spawn(reject_busy_shell(stream));
+            continue;
+        };
+        let connection_store = store.clone();
+        let docker_binary = worker_config.docker_binary.clone();
+        let connection_key = signing_key.clone();
+        tokio::spawn(async move {
+            let _permit = permit;
+            if let Err(error) =
+                serve_shell_connection(stream, connection_store, docker_binary, connection_key)
+                    .await
+            {
+                tracing::warn!(%error, "worker shell session ended with an error");
+            }
+        });
+    }
+}
+
+/// Returns a safe operator message when the global shell limit is exhausted.
+async fn reject_busy_shell(mut stream: UnixStream) {
+    use tokio::io::AsyncWriteExt;
+    let _ = stream
+        .write_all(b"Depot shell capacity is full. Try again shortly.\r\n")
+        .await;
+}
+
+/// Verifies one capability and streams a bounded-lifetime shell for its active container.
+async fn serve_shell_connection(
+    mut stream: UnixStream,
+    store: Store,
+    docker_binary: String,
+    signing_key: Arc<[u8; 32]>,
+) -> Result<(), std::io::Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::process::Command;
+
+    let mut encoded = Vec::with_capacity(1024);
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let byte = stream.read_u8().await?;
+            if byte == b'\n' {
+                return Ok::<(), std::io::Error>(());
+            }
+            if encoded.len() >= 4 * 1024 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "shell handshake is too large",
+                ));
+            }
+            encoded.push(byte);
+        }
+    })
+    .await
+    .map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "shell handshake timed out")
+    })??;
+    let handshake: ShellHandshake = serde_json::from_slice(&encoded)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    if !handshake.verify(&signing_key)
+        || handshake.expires_at <= now
+        || handshake.expires_at > now + 15 * 60
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "shell capability is invalid or expired",
+        ));
+    }
+    let active = store
+        .list_deployments(&handshake.project_id)
+        .await
+        .map_err(std::io::Error::other)?
+        .into_iter()
+        .find(|deployment| deployment.active);
+    if active
+        .as_ref()
+        .and_then(|deployment| deployment.container_id.as_deref())
+        != Some(handshake.container_id.as_str())
+    {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::PermissionDenied,
+            "shell container is no longer the active deployment",
+        ));
+    }
+    stream
+        .write_all(b"Connected to the active Depot container. Session limit: 15 minutes.\r\n\r\n")
+        .await?;
+    let mut child = Command::new(docker_binary)
+        .args([
+            "exec",
+            "-i",
+            "-e",
+            "TERM=xterm-256color",
+            &handshake.container_id,
+            "sh",
+            "-i",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .kill_on_drop(true)
+        .spawn()?;
+    let mut child_stdin = child.stdin.take().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "shell stdin unavailable")
+    })?;
+    let child_stdout = child.stdout.take().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "shell stdout unavailable")
+    })?;
+    let child_stderr = child.stderr.take().ok_or_else(|| {
+        std::io::Error::new(std::io::ErrorKind::BrokenPipe, "shell stderr unavailable")
+    })?;
+    let (mut socket_read, socket_write) = stream.into_split();
+    let (output_tx, output_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(32);
+    tokio::spawn(pump_shell_output(child_stdout, output_tx.clone()));
+    tokio::spawn(pump_shell_output(child_stderr, output_tx));
+    let output = tokio::spawn(write_shell_output(socket_write, output_rx));
+    let input =
+        tokio::spawn(async move { tokio::io::copy(&mut socket_read, &mut child_stdin).await });
+    let remaining = u64::try_from(handshake.expires_at.saturating_sub(now)).unwrap_or(1);
+    tokio::select! {
+        _ = child.wait() => {}
+        _ = input => { let _ = child.kill().await; }
+        () = tokio::time::sleep(std::time::Duration::from_secs(remaining)) => {
+            let _ = child.kill().await;
+        }
+    }
+    let _ = tokio::time::timeout(std::time::Duration::from_secs(1), output).await;
+    let closed_at = time::OffsetDateTime::now_utc().unix_timestamp();
+    let metadata = serde_json::json!({"session_id": handshake.session_id});
+    let _ = store
+        .record_project_audit(
+            &handshake.actor_user_id,
+            "project.shell.close",
+            &handshake.project_id,
+            &metadata.to_string(),
+            closed_at,
+        )
+        .await;
+    Ok(())
+}
+
+/// Reads one Docker output stream into the bounded broker channel.
+async fn pump_shell_output<R>(mut reader: R, sender: tokio::sync::mpsc::Sender<Vec<u8>>)
+where
+    R: tokio::io::AsyncRead + Unpin,
+{
+    use tokio::io::AsyncReadExt;
+    let mut buffer = vec![0_u8; 4 * 1024];
+    loop {
+        let count = match reader.read(&mut buffer).await {
+            Ok(0) | Err(_) => break,
+            Ok(count) => count,
+        };
+        if sender.send(buffer[..count].to_vec()).await.is_err() {
+            break;
+        }
+    }
+}
+
+/// Serializes Docker stdout and stderr chunks onto the local socket.
+async fn write_shell_output(
+    mut writer: tokio::net::unix::OwnedWriteHalf,
+    mut output: tokio::sync::mpsc::Receiver<Vec<u8>>,
+) {
+    use tokio::io::AsyncWriteExt;
+    while let Some(chunk) = output.recv().await {
+        if writer.write_all(&chunk).await.is_err() {
+            break;
         }
     }
 }
@@ -891,14 +1121,23 @@ fn init_tracing() {
 async fn serve(config: Config) -> Result<(), AppError> {
     let store = Store::connect(&config.database.url).await?;
     let secrets = load_secret_cipher(&config)?;
+    let mut master_key = depot_secrets::load_key(Path::new(&config.security.master_key_file))?;
+    let shell_key = depot_core::derive_shell_signing_key(&master_key);
+    master_key.zeroize();
     let github = load_github_integration(&config)?;
+    let shell = depot_api::ShellBroker {
+        socket_path: Arc::from(config.worker.shell_socket.clone()),
+        public_origin: Arc::from(config.security.public_origin.clone()),
+        signing_key: Arc::new(shell_key),
+    };
     let gateway_store = store.clone();
     let app = Router::new()
         .route("/api/v1/system/health", get(system_health))
-        .merge(depot_api::router_with_integrations(
+        .merge(depot_api::router_with_shell(
             store.clone(),
             Some(secrets),
             github,
+            Some(shell),
         ))
         .fallback(move |request| gateway_or_spa(gateway_store.clone(), request));
     let listener = TcpListener::bind(config.server.bind)

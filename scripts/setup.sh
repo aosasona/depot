@@ -340,7 +340,7 @@ webhook_secret_file = \"/etc/depot/github-webhook-secret\""
         printf '[server]\nbind = "%s"\n\n' "$bind"
         printf '[database]\nurl = "sqlite:///var/lib/depot/depot.db"\n\n'
         printf '[security]\npublic_origin = "%s"\nmaster_key_file = "/etc/depot/master.key"\n\n' "$public_origin"
-        printf '[worker]\nworkspace_root = "/var/lib/depot/workspaces"\nstatic_root = "/var/lib/depot/static"\ngit_timeout_seconds = 120\ndocker_binary = "docker"\nrailpack_binary = "/usr/local/bin/railpack"\ndocker_timeout_seconds = 1800\n'
+        printf '[worker]\nworkspace_root = "/var/lib/depot/workspaces"\nstatic_root = "/var/lib/depot/static"\ngit_timeout_seconds = 120\ndocker_binary = "docker"\nrailpack_binary = "/usr/local/bin/railpack"\nshell_socket = "/var/lib/depot/worker-shell.sock"\ndocker_timeout_seconds = 1800\n'
         printf '%s\n' "$agent_section"
         printf '%s\n' "$github_section"
     } > "$config_temp"

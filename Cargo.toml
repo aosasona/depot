@@ -3,13 +3,14 @@ members = ["crates/depot", "crates/depot-api", "crates/depot-auth", "crates/depo
 resolver = "2"
 
 [workspace.package]
-version = "0.3.3"
+version = "0.4.0"
 edition = "2024"
 license = "AGPL-3.0-only"
 rust-version = "1.91"
 
 [workspace.dependencies]
-axum = "0.8.9"
+axum = { version = "0.8.9", features = ["ws"] }
+futures-util = "0.3.31"
 http-body-util = "0.1.3"
 hyper = { version = "1.8.1", features = ["client", "http1"] }
 hyper-util = { version = "0.1.20", features = ["tokio"] }

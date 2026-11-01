@@ -3,7 +3,10 @@
 use axum::{
     Json, Router,
     body::Bytes,
-    extract::{DefaultBodyLimit, State},
+    extract::{
+        DefaultBodyLimit, State, WebSocketUpgrade,
+        ws::{Message, WebSocket},
+    },
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
     routing::{get, post},
@@ -18,7 +21,7 @@ use depot_auth::{
     validate_csrf,
 };
 use depot_core::{
-    ProjectValidationError, validate_domain_hostname, validate_project_slug,
+    ProjectValidationError, ShellHandshake, validate_domain_hostname, validate_project_slug,
     validate_repository_url,
 };
 use depot_github::{GithubAppClient, GithubError, Repository};
@@ -29,6 +32,7 @@ use depot_store::{
     Store, StoreError, UpdateServiceConfig, UpsertGithubWebhook, UpsertProjectSshCredential,
     UpsertProjectVariable, UserRole, UserSummary,
 };
+use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -45,6 +49,25 @@ struct ApiState {
     store: Store,
     secrets: Option<SecretCipher>,
     github: Option<GithubIntegration>,
+    shell: Option<ShellBroker>,
+}
+
+/// Redacted local shell-broker configuration shared by authenticated handlers.
+#[derive(Clone)]
+pub struct ShellBroker {
+    pub socket_path: std::sync::Arc<str>,
+    pub public_origin: std::sync::Arc<str>,
+    pub signing_key: std::sync::Arc<[u8; 32]>,
+}
+
+impl std::fmt::Debug for ShellBroker {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("ShellBroker")
+            .field("socket_path", &self.socket_path)
+            .field("public_origin", &self.public_origin)
+            .finish_non_exhaustive()
+    }
 }
 
 /// GitHub App dependencies loaded once at process startup.
@@ -246,6 +269,9 @@ enum ApiError {
     InvalidSshCredential,
     GithubUnavailable,
     Github(GithubError),
+    ShellUnavailable,
+    ShellNotRunning,
+    InvalidShellOrigin,
 }
 
 #[derive(Debug, Deserialize)]
@@ -428,6 +454,16 @@ pub fn router_with_integrations(
     secrets: Option<SecretCipher>,
     github: Option<GithubIntegration>,
 ) -> Router {
+    router_with_shell(store, secrets, github, None)
+}
+
+/// Builds API routes with an optional worker-brokered interactive shell.
+pub fn router_with_shell(
+    store: Store,
+    secrets: Option<SecretCipher>,
+    github: Option<GithubIntegration>,
+    shell: Option<ShellBroker>,
+) -> Router {
     Router::new()
         .route(
             "/api/v1/auth/bootstrap",
@@ -475,6 +511,7 @@ pub fn router_with_integrations(
             "/api/v1/projects/{project_id}/runtime-logs",
             post(enqueue_runtime_logs),
         )
+        .route("/api/v1/projects/{project_id}/shell", get(project_shell))
         .route(
             "/api/v1/projects/{project_id}/deploy-tokens",
             post(create_deploy_token),
@@ -527,6 +564,7 @@ pub fn router_with_integrations(
             store,
             secrets,
             github,
+            shell,
         })
 }
 
@@ -1171,6 +1209,124 @@ async fn enqueue_runtime_logs(
         StatusCode::ACCEPTED,
         Json(EnqueuedJobResponse { job_id: job.id }),
     ))
+}
+
+/// Upgrades an authenticated same-origin request into a worker-brokered shell.
+async fn project_shell(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+    upgrade: WebSocketUpgrade,
+) -> Result<Response, ApiError> {
+    let actor = require_user(&state.store, &jar).await?;
+    let broker = state.shell.clone().ok_or(ApiError::ShellUnavailable)?;
+    let origin = headers
+        .get(axum::http::header::ORIGIN)
+        .and_then(|value| value.to_str().ok())
+        .ok_or(ApiError::InvalidShellOrigin)?;
+    if origin.trim_end_matches('/') != broker.public_origin.trim_end_matches('/') {
+        return Err(ApiError::InvalidShellOrigin);
+    }
+    state.store.project_by_id(&project_id).await?;
+    let deployment = state
+        .store
+        .list_deployments(&project_id)
+        .await?
+        .into_iter()
+        .find(|deployment| deployment.active)
+        .ok_or(ApiError::ShellNotRunning)?;
+    let container_id = deployment.container_id.ok_or(ApiError::ShellNotRunning)?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let session_id = uuid::Uuid::now_v7().to_string();
+    let mut handshake = ShellHandshake {
+        session_id: session_id.clone(),
+        project_id: project_id.clone(),
+        container_id,
+        actor_user_id: actor.id.clone(),
+        expires_at: now + 15 * 60,
+        nonce: uuid::Uuid::now_v7().to_string(),
+        signature: String::new(),
+    };
+    handshake.sign(&broker.signing_key);
+    let metadata = serde_json::json!({
+        "session_id": session_id,
+        "deployment_id": deployment.id,
+    });
+    state
+        .store
+        .record_project_audit(
+            &actor.id,
+            "project.shell.open",
+            &project_id,
+            &metadata.to_string(),
+            now,
+        )
+        .await?;
+    Ok(upgrade
+        .max_message_size(4 * 1024)
+        .max_frame_size(4 * 1024)
+        .on_upgrade(move |socket| proxy_shell(socket, broker, handshake)))
+}
+
+/// Proxies bounded terminal bytes without exposing the worker socket to HTTP clients.
+async fn proxy_shell(mut socket: WebSocket, broker: ShellBroker, handshake: ShellHandshake) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let mut worker = match tokio::net::UnixStream::connect(broker.socket_path.as_ref()).await {
+        Ok(worker) => worker,
+        Err(error) => {
+            error!(?error, "shell broker connection failed");
+            let _ = socket
+                .send(Message::Text(
+                    "Depot worker shell is unavailable.\r\n".into(),
+                ))
+                .await;
+            return;
+        }
+    };
+    let Ok(mut encoded) = serde_json::to_vec(&handshake) else {
+        return;
+    };
+    encoded.push(b'\n');
+    if worker.write_all(&encoded).await.is_err() {
+        return;
+    }
+    let (mut worker_read, mut worker_write) = worker.into_split();
+    let (mut websocket_write, mut websocket_read) = socket.split();
+    let browser_to_worker = async {
+        while let Some(message) = websocket_read.next().await {
+            let bytes = match message {
+                Ok(Message::Text(value)) => value.as_bytes().to_vec(),
+                Ok(Message::Binary(value)) => value.to_vec(),
+                Ok(Message::Close(_)) | Err(_) => break,
+                _ => continue,
+            };
+            if bytes.len() > 4 * 1024 || worker_write.write_all(&bytes).await.is_err() {
+                break;
+            }
+        }
+    };
+    let worker_to_browser = async {
+        let mut buffer = vec![0_u8; 4 * 1024];
+        loop {
+            let count = match worker_read.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(count) => count,
+            };
+            if websocket_write
+                .send(Message::Binary(buffer[..count].to_vec().into()))
+                .await
+                .is_err()
+            {
+                break;
+            }
+        }
+    };
+    tokio::select! {
+        () = browser_to_worker => {}
+        () = worker_to_browser => {}
+    }
 }
 
 /// Creates a manual deployment from the latest successfully inspected commit.
@@ -2108,6 +2264,21 @@ impl IntoResponse for ApiError {
                     "GitHub could not complete the repository request.",
                 )
             }
+            Self::ShellUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "shell_unavailable",
+                "The Depot worker shell broker is not configured.",
+            ),
+            Self::ShellNotRunning => (
+                StatusCode::CONFLICT,
+                "shell_not_running",
+                "Deploy an active service container before opening a shell.",
+            ),
+            Self::InvalidShellOrigin => (
+                StatusCode::FORBIDDEN,
+                "invalid_shell_origin",
+                "Shell connections must originate from this Depot dashboard.",
+            ),
             Self::Store(StoreError::InvalidRole(_))
             | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (
                 StatusCode::UNPROCESSABLE_ENTITY,

@@ -1,5 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   createProject,
@@ -136,9 +136,6 @@ export function ProjectCanvas({ project }: { project: Project }) {
       });
   }
 
-  const shellCommand = active?.container_id
-    ? `sudo -u depot-worker docker exec -it ${active.container_id} sh`
-    : undefined;
   return (
     <div className="project-canvas-layout">
       <div className="canvas-toolbar">
@@ -210,7 +207,8 @@ export function ProjectCanvas({ project }: { project: Project }) {
       )}
       {shellOpen && (
         <ShellDialog
-          command={shellCommand}
+          projectId={project.id}
+          available={Boolean(active?.container_id)}
           onClose={() => setShellOpen(false)}
         />
       )}
@@ -482,28 +480,71 @@ function ConnectionDialog({
   );
 }
 
-/** Shows the exact host command for entering the active container. */
+/** Streams a persistent active-container shell through the local worker broker. */
 function ShellDialog({
-  command,
+  projectId,
+  available,
   onClose,
 }: {
-  command?: string;
+  projectId: string;
+  available: boolean;
   onClose: () => void;
 }) {
-  const [copied, setCopied] = useState(false);
-  async function copy() {
-    if (!command) return;
-    await navigator.clipboard.writeText(command);
-    setCopied(true);
+  const [status, setStatus] = useState<
+    "connecting" | "open" | "closed" | "error"
+  >("connecting");
+  const [output, setOutput] = useState("");
+  const [command, setCommand] = useState("");
+  const socket = useRef<WebSocket | undefined>(undefined);
+  const terminal = useRef<HTMLPreElement>(null);
+  useEffect(() => {
+    if (!available) {
+      setStatus("closed");
+      return;
+    }
+    const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
+    const connection = new WebSocket(
+      `${protocol}//${window.location.host}/api/v1/projects/${projectId}/shell`,
+    );
+    connection.binaryType = "arraybuffer";
+    socket.current = connection;
+    const decoder = new TextDecoder();
+    connection.onopen = () => setStatus("open");
+    connection.onmessage = (event) => {
+      const chunk =
+        typeof event.data === "string"
+          ? event.data
+          : decoder.decode(event.data as ArrayBuffer, { stream: true });
+      setOutput((current) => `${current}${chunk}`.slice(-200_000));
+    };
+    connection.onerror = () => setStatus("error");
+    connection.onclose = () =>
+      setStatus((current) => (current === "error" ? current : "closed"));
+    return () => connection.close();
+  }, [available, projectId]);
+  useEffect(() => {
+    if (terminal.current)
+      terminal.current.scrollTop = terminal.current.scrollHeight;
+  }, [output]);
+
+  /** Sends one bounded command line while preserving shell state between commands. */
+  function submit(event: React.FormEvent) {
+    event.preventDefault();
+    const value = command.trim();
+    if (!value || socket.current?.readyState !== WebSocket.OPEN) return;
+    socket.current.send(`${value}\n`);
+    setOutput((current) => `${current}$ ${value}\n`);
+    setCommand("");
   }
   return (
     <div className="canvas-dialog-backdrop">
-      <div className="canvas-dialog shell-dialog">
+      <div className="canvas-dialog shell-dialog browser-shell">
         <header>
           <div>
             <span className="eyebrow">ACTIVE CONTAINER</span>
-            <h3>Open a shell</h3>
+            <h3>Browser shell</h3>
           </div>
+          <span className={`shell-state ${status}`}>{status}</span>
           <button
             className="icon-action"
             type="button"
@@ -513,20 +554,45 @@ function ShellDialog({
             ×
           </button>
         </header>
-        {command ? (
+        {available ? (
           <>
             <p>
-              Run this on the Depot VM. Browser shells will follow after the
-              worker control channel is isolated from the public API.
+              Commands run inside the active release. The session closes after
+              15 minutes or when this dialog disconnects. Full-screen TTY
+              programs are not supported yet.
             </p>
-            <pre>{command}</pre>
-            <button
-              className="primary-action"
-              type="button"
-              onClick={() => void copy()}
-            >
-              {copied ? "Copied" : "Copy command"}
-            </button>
+            <pre ref={terminal} className="browser-shell-output">
+              {output || "Connecting to Depot worker…\n"}
+            </pre>
+            <form className="browser-shell-input" onSubmit={submit}>
+              <span aria-hidden="true">$</span>
+              <input
+                aria-label="Shell command"
+                autoComplete="off"
+                spellCheck={false}
+                value={command}
+                disabled={status !== "open"}
+                onChange={(event) => setCommand(event.target.value)}
+              />
+              <button
+                type="submit"
+                disabled={status !== "open" || !command.trim()}
+              >
+                Run
+              </button>
+            </form>
+            <footer>
+              <button
+                className="table-action"
+                type="button"
+                onClick={() => setOutput("")}
+              >
+                Clear
+              </button>
+              <button className="table-action" type="button" onClick={onClose}>
+                Disconnect
+              </button>
+            </footer>
           </>
         ) : (
           <p>This project has no active service container. Deploy it first.</p>
