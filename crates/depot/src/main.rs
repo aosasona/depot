@@ -640,7 +640,7 @@ async fn process_job(
             store
                 .fail_job(&job.id, worker_id, &message, 30, failed_at)
                 .await?;
-            tracing::warn!(job_id = %job.id, kind = %job.kind, "job attempt failed");
+            tracing::warn!(job_id = %job.id, kind = %job.kind, error = %message, "job attempt failed");
         }
     }
     Ok(())

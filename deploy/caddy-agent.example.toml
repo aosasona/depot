@@ -1,7 +1,8 @@
 bind = "10.0.0.10:9080"
 auth_token = "replace-with-at-least-32-random-characters"
 gateway_upstream = "10.0.0.20:8080"
-allowed_domain_suffixes = ["example.com"]
+allow_any_domain = true
+allowed_domain_suffixes = []
 managed_directory = "/etc/caddy/depot"
 caddyfile = "/etc/caddy/Caddyfile"
 caddy_binary = "caddy"

@@ -26,7 +26,8 @@ custom packaging and automation.
 - Bind the agent only to a host-only VPN or private management address.
 - Use a random bearer token of at least 32 characters and restrict its file to
   the agent service account.
-- Allowlist only domain suffixes that Depot may control.
+- Choose whether Depot may use any valid public hostname or only delegated
+  domain suffixes.
 - Configure exactly one upstream: the private Depot gateway in the VM.
 - Firewall the agent listener so it is reachable only by the Depot VM.
 - Do not expose Caddy's unrestricted admin API to Depot.
@@ -65,7 +66,8 @@ Edit the configuration:
 bind = "10.0.0.10:9080"
 auth_token = "replace-with-at-least-32-random-characters"
 gateway_upstream = "10.0.0.20:8080"
-allowed_domain_suffixes = ["example.com"]
+allow_any_domain = true
+allowed_domain_suffixes = []
 managed_directory = "/etc/caddy/depot"
 caddyfile = "/etc/caddy/Caddyfile"
 caddy_binary = "caddy"
@@ -74,6 +76,18 @@ command_timeout_seconds = 30
 
 `gateway_upstream` is Depot's private VM gateway address. It is fixed by the
 host operator and cannot be changed by an API request.
+
+Unrestricted mode still rejects malformed, wildcard, local, and non-public
+hostnames. To restrict Depot to specific DNS zones instead, use:
+
+```toml
+allow_any_domain = false
+allowed_domain_suffixes = ["example.com", "example.net"]
+```
+
+Configurations created before this option existed remain restricted. Add
+`allow_any_domain = true` and change `allowed_domain_suffixes` to `[]` if you
+want to attach unrelated domains without editing the agent configuration again.
 
 ## 2. Import the managed directory once
 
@@ -137,7 +151,8 @@ depot caddy-agent \
 ```
 
 Remove the temporary snapshot afterward if its contents are operationally
-sensitive. Domain values are validated and suffix-allowlisted in both modes.
+sensitive. Domain values are validated and checked against the configured
+domain policy in both modes.
 
 ## DNS and firewall checklist
 

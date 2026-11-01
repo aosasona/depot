@@ -118,8 +118,8 @@ curl -fsSL https://github.com/aosasona/depot/releases/latest/download/depot-setu
 ```
 
 It verifies Caddy and systemd, offers supported package installation when
-needed, prompts for the private listener, fixed Depot gateway, allowed domain
-suffixes, and shared token, and asks before appending the isolated
+needed, prompts for the private listener, fixed Depot gateway, domain policy,
+and shared token, and asks before appending the isolated
 `import depot/*.caddy` line. It backs up the operator-owned Caddyfile first and
 runs a complete Caddy validation without changing the current Depot route set.
 Manual Caddy records outside `/etc/caddy/depot/routes.caddy` remain untouched.

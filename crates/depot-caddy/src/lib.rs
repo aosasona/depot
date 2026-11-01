@@ -31,6 +31,9 @@ pub struct CaddyAgentConfig {
     pub bind: SocketAddr,
     pub auth_token: String,
     pub gateway_upstream: String,
+    #[serde(default)]
+    pub allow_any_domain: bool,
+    #[serde(default)]
     pub allowed_domain_suffixes: Vec<String>,
     pub managed_directory: PathBuf,
     pub caddyfile: PathBuf,
@@ -49,7 +52,7 @@ pub enum CaddyError {
     ConfigParse(#[from] toml::de::Error),
     #[error("Caddy agent configuration has unsafe or incomplete fields")]
     InvalidConfig,
-    #[error("domain is malformed or outside the configured suffix allowlist: {0}")]
+    #[error("domain is malformed or rejected by the configured domain policy: {0}")]
     DomainRejected(String),
     #[error("could not update the managed Caddy configuration: {0}")]
     Filesystem(#[source] std::io::Error),
@@ -82,13 +85,13 @@ impl CaddyAgentConfig {
         Ok(config)
     }
 
-    /// Rejects broad filesystem roots, empty suffix policy, and unreasonable timeouts.
+    /// Rejects broad filesystem roots, incomplete domain policy, and unreasonable timeouts.
     pub fn validate(&self) -> Result<(), CaddyError> {
         let unsafe_directory = self.managed_directory.as_os_str().is_empty()
             || self.managed_directory == Path::new("/")
             || self.managed_directory == Path::new(".");
         if unsafe_directory
-            || self.allowed_domain_suffixes.is_empty()
+            || (!self.allow_any_domain && self.allowed_domain_suffixes.is_empty())
             || !validate_host_port(&self.gateway_upstream)
             || self.auth_token.len() < 32
             || !self.auth_token.bytes().all(|byte| {
@@ -227,9 +230,10 @@ async fn reconcile_handler(
         return Err(StatusCode::UNAUTHORIZED);
     }
     let _guard = state.lock.lock().await;
-    reconcile(&state.config, &request.domains)
-        .await
-        .map_err(|_| StatusCode::UNPROCESSABLE_ENTITY)?;
+    if let Err(error) = reconcile(&state.config, &request.domains).await {
+        tracing::warn!(%error, "Caddy agent rejected domain reconciliation");
+        return Err(StatusCode::UNPROCESSABLE_ENTITY);
+    }
     Ok(Json(ReconcileResponse {
         accepted: request.domains.len(),
     }))
@@ -294,10 +298,10 @@ pub fn generate_routes(
         .map(|domain| {
             let normalized = validate_domain_hostname(domain)
                 .map_err(|_| CaddyError::DomainRejected(domain.clone()))?;
-            let allowed = config
-                .allowed_domain_suffixes
-                .iter()
-                .any(|suffix| normalized == *suffix || normalized.ends_with(&format!(".{suffix}")));
+            let allowed = config.allow_any_domain
+                || config.allowed_domain_suffixes.iter().any(|suffix| {
+                    normalized == *suffix || normalized.ends_with(&format!(".{suffix}"))
+                });
             allowed
                 .then_some(normalized)
                 .ok_or_else(|| CaddyError::DomainRejected(domain.clone()))
@@ -383,6 +387,7 @@ mod tests {
             bind: "127.0.0.1:9080".parse().expect("bind parses"),
             auth_token: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa".to_owned(),
             gateway_upstream: "gateway.internal:8080".to_owned(),
+            allow_any_domain: false,
             allowed_domain_suffixes: vec!["example.com".to_owned()],
             managed_directory: PathBuf::from("/etc/caddy/depot"),
             caddyfile: PathBuf::from("/etc/caddy/Caddyfile"),
@@ -413,6 +418,25 @@ mod tests {
     fn routes_reject_domains_outside_allowlist() {
         assert!(generate_routes(&config(), &["attacker.test".to_owned()]).is_err());
         assert!(generate_routes(&config(), &["bad.example.com {".to_owned()]).is_err());
+    }
+
+    /// Proves unrestricted policy still validates hostnames before rendering routes.
+    #[test]
+    fn unrestricted_policy_accepts_unrelated_valid_domains_only() {
+        let mut config = config();
+        config.allow_any_domain = true;
+        config.allowed_domain_suffixes.clear();
+        config.validate().expect("unrestricted policy validates");
+        let output = generate_routes(
+            &config,
+            &[
+                "app.example.com".to_owned(),
+                "service.other.test".to_owned(),
+            ],
+        )
+        .expect("valid unrelated domains generate");
+        assert_eq!(output.matches("reverse_proxy").count(), 2);
+        assert!(generate_routes(&config, &["bad.test {".to_owned()]).is_err());
     }
 
     /// Proves bearer authentication requires an exact token and scheme.

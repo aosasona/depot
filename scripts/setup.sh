@@ -384,8 +384,24 @@ configure_caddy_agent() {
     bind=$REPLY
     prompt "Depot VM gateway upstream" "127.0.0.1:8080"
     gateway=$REPLY
-    prompt "Allowed domain suffixes (comma-separated)" "example.com"
-    suffixes=$REPLY
+    say "Domain policy:"
+    say "  1) Allow any valid public hostname"
+    say "  2) Restrict Depot to selected domain suffixes"
+    prompt "Policy" "1"
+    case "$REPLY" in
+        1|any|unrestricted)
+            allow_any_domain=true
+            suffixes="any valid public hostname"
+            SUFFIX_ARRAY=
+            ;;
+        2|restricted)
+            allow_any_domain=false
+            prompt "Allowed domain suffixes (comma-separated)" "example.com"
+            suffixes=$REPLY
+            format_suffixes "$suffixes"
+            ;;
+        *) die "Choose domain policy 1 or 2." ;;
+    esac
     generated_token=$(generate_token)
     prompt "Shared agent token" "$generated_token"
     token=$REPLY
@@ -394,12 +410,11 @@ configure_caddy_agent() {
     validate_safe_value "$token" "Agent token"
     refuse_wildcard_bind "$bind" "Caddy agent listen address"
     [ "${#token}" -ge 32 ] || die "The agent token must contain at least 32 characters."
-    format_suffixes "$suffixes"
     say "Configuration plan:"
     say "  role: Caddy agent"
     say "  listen: $bind"
     say "  Depot gateway: $gateway"
-    say "  allowed suffixes: $suffixes"
+    say "  domain policy: $suffixes"
     confirm "Write and validate this configuration?" || die "Configuration was not changed."
     config_temp=$(mktemp /etc/depot/caddy-agent.toml.new.XXXXXX)
     umask 0027
@@ -407,6 +422,7 @@ configure_caddy_agent() {
         printf 'bind = "%s"\n' "$bind"
         printf 'auth_token = "%s"\n' "$token"
         printf 'gateway_upstream = "%s"\n' "$gateway"
+        printf 'allow_any_domain = %s\n' "$allow_any_domain"
         printf 'allowed_domain_suffixes = [%s]\n' "$SUFFIX_ARRAY"
         printf 'managed_directory = "/etc/caddy/depot"\n'
         printf 'caddyfile = "/etc/caddy/Caddyfile"\n'
