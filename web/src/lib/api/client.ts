@@ -48,6 +48,10 @@ const dockerBuildResultSchema = z.object({
   host_port: z.number().int(),
   logs: z.string(),
 });
+const staticBuildResultSchema = z.object({
+  static_release: z.string(),
+  logs: z.string(),
+});
 const jobStatusSchema = z.object({
   id: z.string(),
   kind: z.string(),
@@ -55,7 +59,13 @@ const jobStatusSchema = z.object({
   state: z.enum(["queued", "running", "succeeded", "failed"]),
   attempts: z.number(),
   max_attempts: z.number(),
-  result: z.union([inspectionResultSchema, dockerBuildResultSchema]).nullable(),
+  result: z
+    .union([
+      inspectionResultSchema,
+      dockerBuildResultSchema,
+      staticBuildResultSchema,
+    ])
+    .nullable(),
   last_error: z.string().nullable(),
   created_at: z.number(),
   updated_at: z.number(),
@@ -105,6 +115,26 @@ const githubWebhookCredentialSchema = z.object({
   endpoint_path: z.string(),
   secret: z.string(),
 });
+const githubInstallationSchema = z.object({
+  installation_id: z.number().int().positive(),
+  account_login: z.string(),
+  account_type: z.string(),
+  repository_selection: z.string(),
+});
+const githubIntegrationSchema = z.object({
+  configured: z.boolean(),
+  install_url: z.string().url().nullable(),
+  installations: z.array(githubInstallationSchema),
+});
+const githubRepositorySchema = z.object({
+  id: z.number().int().positive(),
+  name: z.string(),
+  full_name: z.string(),
+  private: z.boolean(),
+  clone_url: z.string().url(),
+  default_branch: z.string(),
+  archived: z.boolean(),
+});
 const sshCredentialResponseSchema = z.object({ configured: z.literal(true) });
 
 export type User = z.infer<typeof userSchema>;
@@ -119,6 +149,8 @@ export type ServiceConfigInput = Omit<
 export type Deployment = z.infer<typeof deploymentSchema>;
 export type Domain = z.infer<typeof domainSchema>;
 export type ProjectVariable = z.infer<typeof variableSchema>;
+export type GithubIntegration = z.infer<typeof githubIntegrationSchema>;
+export type GithubRepository = z.infer<typeof githubRepositorySchema>;
 
 /** Represents a safe API failure suitable for inline UI feedback. */
 export class ApiError extends Error {
@@ -259,6 +291,47 @@ export function createProject(input: {
   branch: string;
 }) {
   return request("/api/v1/projects", projectSchema, {
+    method: "POST",
+    headers: csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+/** Returns configured GitHub App state and installations linked to Depot. */
+export function getGithubIntegration() {
+  return request("/api/v1/integrations/github", githubIntegrationSchema);
+}
+
+/** Verifies and links the installation returned by GitHub's setup callback. */
+export function linkGithubInstallation(installationId: number) {
+  return request(
+    "/api/v1/integrations/github/installations",
+    githubInstallationSchema,
+    {
+      method: "POST",
+      headers: csrfHeaders(),
+      body: JSON.stringify({ installation_id: installationId }),
+    },
+  );
+}
+
+/** Lists repositories visible to one linked GitHub App installation. */
+export function listGithubRepositories(installationId: number) {
+  return request(
+    `/api/v1/integrations/github/installations/${installationId}/repositories`,
+    z.array(githubRepositorySchema),
+  );
+}
+
+/** Creates a Depot project from a server-verified GitHub repository. */
+export function importGithubProject(input: {
+  installation_id: number;
+  repository_id: number;
+  slug: string;
+  name: string;
+  branch?: string;
+}) {
+  return request("/api/v1/integrations/github/projects", projectSchema, {
     method: "POST",
     headers: csrfHeaders(),
     body: JSON.stringify(input),

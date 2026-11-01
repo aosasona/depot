@@ -21,11 +21,13 @@ use depot_core::{
     ProjectValidationError, validate_domain_hostname, validate_project_slug,
     validate_repository_url,
 };
+use depot_github::{GithubAppClient, GithubError, Repository};
 use depot_secrets::SecretCipher;
 use depot_store::{
-    Deployment, Domain, JobEvent, JobStatus, NewDeployment, NewJob, NewProject, ProjectSummary,
-    ProjectVariable, ServiceConfig, SessionUser, Store, StoreError, UpdateServiceConfig,
-    UpsertGithubWebhook, UpsertProjectSshCredential, UpsertProjectVariable, UserRole, UserSummary,
+    Deployment, Domain, GithubInstallation, GithubProjectRepository, JobEvent, JobStatus,
+    NewDeployment, NewJob, NewProject, ProjectSummary, ProjectVariable, ServiceConfig, SessionUser,
+    Store, StoreError, UpdateServiceConfig, UpsertGithubWebhook, UpsertProjectSshCredential,
+    UpsertProjectVariable, UserRole, UserSummary,
 };
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
@@ -42,6 +44,22 @@ const SESSION_HOURS: i64 = 12;
 struct ApiState {
     store: Store,
     secrets: Option<SecretCipher>,
+    github: Option<GithubIntegration>,
+}
+
+/// GitHub App dependencies loaded once at process startup.
+#[derive(Clone)]
+pub struct GithubIntegration {
+    pub client: GithubAppClient,
+    pub webhook_secret: std::sync::Arc<[u8]>,
+}
+
+impl std::fmt::Debug for GithubIntegration {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("GithubIntegration")
+            .finish_non_exhaustive()
+    }
 }
 
 /// Request body accepted only while the Depot instance is uninitialized.
@@ -226,6 +244,37 @@ enum ApiError {
     SecretsUnavailable,
     InvalidWebhook,
     InvalidSshCredential,
+    GithubUnavailable,
+    Github(GithubError),
+}
+
+#[derive(Debug, Deserialize)]
+struct LinkGithubInstallationRequest {
+    installation_id: u64,
+}
+
+#[derive(Debug, Serialize)]
+struct GithubIntegrationResponse {
+    configured: bool,
+    install_url: Option<String>,
+    installations: Vec<GithubInstallationResponse>,
+}
+
+#[derive(Debug, Serialize)]
+struct GithubInstallationResponse {
+    installation_id: i64,
+    account_login: String,
+    account_type: String,
+    repository_selection: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct ImportGithubProjectRequest {
+    installation_id: u64,
+    repository_id: u64,
+    slug: String,
+    name: String,
+    branch: Option<String>,
 }
 
 /// Durable deployment history returned to authenticated workspace members.
@@ -327,12 +376,19 @@ struct GithubPushPayload {
     after: String,
     deleted: bool,
     repository: GithubRepositoryPayload,
+    installation: Option<GithubInstallationPayload>,
 }
 
 /// Repository identity carried in a GitHub push delivery.
 #[derive(Debug, Deserialize)]
 struct GithubRepositoryPayload {
     full_name: String,
+    id: Option<u64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubInstallationPayload {
+    id: u64,
 }
 
 /// Stable acknowledgment for accepted and duplicate deliveries.
@@ -363,6 +419,15 @@ pub fn router(store: Store) -> Router {
 
 /// Builds API routes with project secret encryption enabled for production use.
 pub fn router_with_secrets(store: Store, secrets: Option<SecretCipher>) -> Router {
+    router_with_integrations(store, secrets, None)
+}
+
+/// Builds API routes with optional secret and GitHub App integrations.
+pub fn router_with_integrations(
+    store: Store,
+    secrets: Option<SecretCipher>,
+    github: Option<GithubIntegration>,
+) -> Router {
     Router::new()
         .route(
             "/api/v1/auth/bootstrap",
@@ -375,6 +440,19 @@ pub fn router_with_secrets(store: Store, secrets: Option<SecretCipher>) -> Route
         .route("/api/v1/users", get(list_users).post(create_user))
         .route("/api/v1/users/{user_id}", axum::routing::patch(update_user))
         .route("/api/v1/projects", get(list_projects).post(create_project))
+        .route("/api/v1/integrations/github", get(github_integration))
+        .route(
+            "/api/v1/integrations/github/installations",
+            post(link_github_installation),
+        )
+        .route(
+            "/api/v1/integrations/github/installations/{installation_id}/repositories",
+            get(list_github_repositories),
+        )
+        .route(
+            "/api/v1/integrations/github/projects",
+            post(import_github_project),
+        )
         .route(
             "/api/v1/projects/{project_id}",
             get(get_project)
@@ -421,6 +499,10 @@ pub fn router_with_secrets(store: Store, secrets: Option<SecretCipher>) -> Route
             "/api/v1/webhooks/github/{endpoint_token}",
             post(receive_github_webhook),
         )
+        .route(
+            "/api/v1/webhooks/github-app",
+            post(receive_github_app_webhook),
+        )
         .route("/api/v1/deploy", post(hook_deploy))
         .route("/api/v1/deployments/{deployment_id}", get(get_deployment))
         .route(
@@ -437,7 +519,153 @@ pub fn router_with_secrets(store: Store, secrets: Option<SecretCipher>) -> Route
         )
         .route("/api/v1/jobs/{job_id}", get(get_job_status))
         .layer(DefaultBodyLimit::max(1024 * 1024))
-        .with_state(ApiState { store, secrets })
+        .with_state(ApiState {
+            store,
+            secrets,
+            github,
+        })
+}
+
+/// Returns GitHub App connection state and linked installations.
+async fn github_integration(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+) -> Result<Json<GithubIntegrationResponse>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    let installations = state
+        .store
+        .github_installations()
+        .await?
+        .into_iter()
+        .map(github_installation_response)
+        .collect();
+    Ok(Json(GithubIntegrationResponse {
+        configured: state.github.is_some(),
+        install_url: state
+            .github
+            .as_ref()
+            .map(|github| github.client.installation_url()),
+        installations,
+    }))
+}
+
+/// Verifies a GitHub callback installation before making it available to Depot.
+async fn link_github_installation(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Json(request): Json<LinkGithubInstallationRequest>,
+) -> Result<Json<GithubInstallationResponse>, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let github = state.github.as_ref().ok_or(ApiError::GithubUnavailable)?;
+    let remote = github
+        .client
+        .installation(request.installation_id)
+        .await
+        .map_err(ApiError::Github)?;
+    let installation = GithubInstallation {
+        installation_id: i64::try_from(remote.id).map_err(|_| ApiError::GithubUnavailable)?,
+        account_login: remote.account.login,
+        account_type: remote.account.account_type,
+        repository_selection: remote.repository_selection,
+    };
+    state
+        .store
+        .upsert_github_installation(
+            &installation,
+            &actor.id,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(Json(github_installation_response(installation)))
+}
+
+/// Lists repositories through a short-lived token for a linked installation.
+async fn list_github_repositories(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(installation_id): axum::extract::Path<i64>,
+) -> Result<Json<Vec<Repository>>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    if installation_id <= 0 || !state.store.has_github_installation(installation_id).await? {
+        return Err(ApiError::Forbidden);
+    }
+    let github = state.github.as_ref().ok_or(ApiError::GithubUnavailable)?;
+    Ok(Json(
+        github
+            .client
+            .repositories(installation_id as u64)
+            .await
+            .map_err(ApiError::Github)?,
+    ))
+}
+
+/// Creates a project from repository metadata verified against GitHub.
+async fn import_github_project(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Json(request): Json<ImportGithubProjectRequest>,
+) -> Result<(StatusCode, Json<ProjectResponse>), ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let installation_id =
+        i64::try_from(request.installation_id).map_err(|_| ApiError::GithubUnavailable)?;
+    if !state.store.has_github_installation(installation_id).await? {
+        return Err(ApiError::Forbidden);
+    }
+    let github = state.github.as_ref().ok_or(ApiError::GithubUnavailable)?;
+    let repository = github
+        .client
+        .repository(request.installation_id, request.repository_id)
+        .await
+        .map_err(ApiError::Github)?;
+    if repository.archived {
+        return Err(ApiError::InvalidProjectField(
+            "Archived repositories cannot be imported.",
+        ));
+    }
+    let branch = request
+        .branch
+        .as_deref()
+        .unwrap_or(&repository.default_branch);
+    validate_project_input(
+        Some(&request.slug),
+        &request.name,
+        &repository.clone_url,
+        branch,
+    )?;
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let project = state
+        .store
+        .create_github_project(
+            NewProject {
+                slug: &request.slug,
+                name: request.name.trim(),
+                owner_user_id: &actor.id,
+                repository_url: &repository.clone_url,
+                branch: branch.trim(),
+                now_unix: now,
+            },
+            &GithubProjectRepository {
+                project_id: String::new(),
+                installation_id,
+                repository_id: i64::try_from(repository.id)
+                    .map_err(|_| ApiError::GithubUnavailable)?,
+                repository_full_name: repository.full_name,
+                private: repository.private,
+            },
+        )
+        .await?;
+    Ok((StatusCode::CREATED, Json(project_response(project))))
+}
+
+fn github_installation_response(installation: GithubInstallation) -> GithubInstallationResponse {
+    GithubInstallationResponse {
+        installation_id: installation.installation_id,
+        account_login: installation.account_login,
+        account_type: installation.account_type,
+        repository_selection: installation.repository_selection,
+    }
 }
 
 /// Encrypts and stores a write-only SSH deploy key with explicit host trust.
@@ -600,6 +828,76 @@ async fn receive_github_webhook(
         .store
         .enqueue_github_delivery(
             &webhook,
+            delivery_id,
+            &payload.after.to_ascii_lowercase(),
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(GithubWebhookResponse {
+            accepted: true,
+            duplicate: deployment.is_none(),
+            deployment_id: deployment.map(|deployment| deployment.id),
+        }),
+    )
+        .into_response())
+}
+
+/// Verifies the App-wide webhook and routes pushes by immutable GitHub IDs.
+async fn receive_github_app_webhook(
+    State(state): State<ApiState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Result<Response, ApiError> {
+    let github = state.github.as_ref().ok_or(ApiError::GithubUnavailable)?;
+    verify_github_signature(&headers, &body, &github.webhook_secret)?;
+    let event = required_header(&headers, "x-github-event")?;
+    if event == "ping" {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    if event != "push" {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    let delivery_id = required_header(&headers, "x-github-delivery")?;
+    if delivery_id.len() > 128
+        || !delivery_id
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+    {
+        return Err(ApiError::InvalidWebhook);
+    }
+    let payload: GithubPushPayload =
+        serde_json::from_slice(&body).map_err(|_| ApiError::InvalidWebhook)?;
+    let installation_id = payload
+        .installation
+        .and_then(|installation| i64::try_from(installation.id).ok())
+        .ok_or(ApiError::InvalidWebhook)?;
+    let repository_id = payload
+        .repository
+        .id
+        .and_then(|repository_id| i64::try_from(repository_id).ok())
+        .ok_or(ApiError::InvalidWebhook)?;
+    let Some(target) = state
+        .store
+        .github_app_webhook_target(installation_id, repository_id)
+        .await?
+    else {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    };
+    if payload.deleted
+        || payload.git_ref != format!("refs/heads/{}", target.branch)
+        || payload.after.len() != 40
+        || !payload.after.bytes().all(|byte| byte.is_ascii_hexdigit())
+    {
+        return Ok(StatusCode::NO_CONTENT.into_response());
+    }
+    let deployment = state
+        .store
+        .enqueue_github_app_delivery(
+            &target,
+            installation_id,
+            repository_id,
             delivery_id,
             &payload.after.to_ascii_lowercase(),
             time::OffsetDateTime::now_utc().unix_timestamp(),
@@ -1765,6 +2063,19 @@ impl IntoResponse for ApiError {
                 "invalid_ssh_credential",
                 "Use an SSH repository with a private key and trusted known_hosts entries.",
             ),
+            Self::GithubUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "github_unavailable",
+                "GitHub integration is not configured on this Depot instance.",
+            ),
+            Self::Github(error) => {
+                error!(?error, "GitHub integration request failed");
+                (
+                    StatusCode::BAD_GATEWAY,
+                    "github_request_failed",
+                    "GitHub could not complete the repository request.",
+                )
+            }
             Self::Store(StoreError::InvalidRole(_))
             | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (
                 StatusCode::UNPROCESSABLE_ENTITY,

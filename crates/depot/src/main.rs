@@ -156,6 +156,8 @@ enum AppError {
     Secrets(#[from] depot_secrets::SecretError),
     #[error("could not create master key file: {0}")]
     KeyWrite(#[source] std::io::Error),
+    #[error("GitHub App configuration could not be loaded: {0}")]
+    GithubConfig(String),
 }
 
 /// Parses the command line and runs the selected Depot process mode.
@@ -304,6 +306,7 @@ async fn doctor(config: Config) -> Result<(), AppError> {
 async fn worker(config: Config, once: bool) -> Result<(), AppError> {
     let store = Store::connect(&config.database.url).await?;
     let secrets = load_secret_cipher(&config)?;
+    let github = load_github_integration(&config)?.map(|integration| integration.client);
     cleanup_retired_containers(&store, &config.worker).await;
     let worker_id = format!("worker-{}", uuid::Uuid::now_v7());
     info!(%worker_id, "Depot worker started");
@@ -311,7 +314,15 @@ async fn worker(config: Config, once: bool) -> Result<(), AppError> {
         let now = time::OffsetDateTime::now_utc().unix_timestamp();
         let claimed = store.claim_job(&worker_id, now, 60).await?;
         if let Some(job) = claimed {
-            process_job(&store, &config.worker, &secrets, &worker_id, job).await?;
+            process_job(
+                &store,
+                &config.worker,
+                &secrets,
+                github.as_ref(),
+                &worker_id,
+                job,
+            )
+            .await?;
         }
         if once {
             return Ok(());
@@ -334,6 +345,7 @@ async fn process_job(
     store: &Store,
     worker_config: &depot_core::WorkerConfig,
     secrets: &depot_secrets::SecretCipher,
+    github: Option<&depot_github::GithubAppClient>,
     worker_id: &str,
     job: depot_store::Job,
 ) -> Result<(), AppError> {
@@ -341,7 +353,7 @@ async fn process_job(
     store
         .append_job_event(&job.id, "info", "Worker claimed durable job.", now)
         .await?;
-    match execute_job(store, worker_config, secrets, &job).await {
+    match execute_job(store, worker_config, secrets, github, &job).await {
         Ok(result_json) => {
             let completed_at = time::OffsetDateTime::now_utc().unix_timestamp();
             let completion_message = if job.kind == "inspect_repository" {
@@ -448,11 +460,14 @@ async fn execute_job(
     store: &Store,
     worker_config: &depot_core::WorkerConfig,
     secrets: &depot_secrets::SecretCipher,
+    github: Option<&depot_github::GithubAppClient>,
     job: &depot_store::Job,
 ) -> Result<String, String> {
     match job.kind.as_str() {
-        "inspect_repository" => execute_inspection(store, worker_config, secrets, job).await,
-        "deploy_project" => execute_deployment(store, worker_config, secrets, job).await,
+        "inspect_repository" => {
+            execute_inspection(store, worker_config, secrets, github, job).await
+        }
+        "deploy_project" => execute_deployment(store, worker_config, secrets, github, job).await,
         "reconcile_domains" => execute_domain_reconciliation(store, worker_config).await,
         _ => Err(format!("Unsupported job kind: {}", job.kind)),
     }
@@ -504,6 +519,7 @@ async fn execute_inspection(
     store: &Store,
     worker_config: &depot_core::WorkerConfig,
     secrets: &depot_secrets::SecretCipher,
+    github: Option<&depot_github::GithubAppClient>,
     job: &depot_store::Job,
 ) -> Result<String, String> {
     let project_id = job
@@ -522,16 +538,24 @@ async fn execute_inspection(
                 private_key,
                 known_hosts,
             });
+    let mut github_token = github_checkout_token(store, github, project_id).await?;
+    let http_credentials = github_token
+        .as_deref()
+        .map(|token| depot_git::GitHttpCredentials { token });
     let inspection = depot_git::inspect_repository(
         &project.repository_url,
         &project.branch,
         std::path::Path::new(&worker_config.workspace_root),
         std::time::Duration::from_secs(worker_config.git_timeout_seconds),
         git_credentials,
+        http_credentials,
     )
     .await;
     if let Some((private_key, _)) = &mut ssh {
         private_key.zeroize();
+    }
+    if let Some(token) = &mut github_token {
+        token.zeroize();
     }
     let inspection = inspection.map_err(|error| error.to_string())?;
     serde_json::to_string(&inspection)
@@ -543,6 +567,7 @@ async fn execute_deployment(
     store: &Store,
     worker_config: &depot_core::WorkerConfig,
     secrets: &depot_secrets::SecretCipher,
+    github: Option<&depot_github::GithubAppClient>,
     job: &depot_store::Job,
 ) -> Result<String, String> {
     let payload: DeploymentJobPayload = serde_json::from_str(&job.payload_json)
@@ -564,9 +589,6 @@ async fn execute_deployment(
         .service_config(project_id)
         .await
         .map_err(|_| "Deployment configuration is unavailable.".to_owned())?;
-    if config.project_kind == "static" {
-        return Err("Static artifact builds are not implemented yet.".to_owned());
-    }
     if config.builder == "railpack" {
         return Err("Railpack builds are not implemented yet.".to_owned());
     }
@@ -578,6 +600,10 @@ async fn execute_deployment(
                 private_key,
                 known_hosts,
             });
+    let mut github_token = github_checkout_token(store, github, project_id).await?;
+    let http_credentials = github_token
+        .as_deref()
+        .map(|token| depot_git::GitHttpCredentials { token });
     let checkout = depot_git::checkout_repository(
         &project.repository_url,
         &project.branch,
@@ -585,12 +611,47 @@ async fn execute_deployment(
         std::path::Path::new(&worker_config.workspace_root),
         std::time::Duration::from_secs(worker_config.git_timeout_seconds),
         git_credentials,
+        http_credentials,
     )
     .await;
     if let Some((private_key, _)) = &mut ssh {
         private_key.zeroize();
     }
+    if let Some(token) = &mut github_token {
+        token.zeroize();
+    }
     let checkout = checkout.map_err(|error| error.to_string())?;
+    if config.project_kind == "static" {
+        let output_directory = config
+            .static_output_dir
+            .as_deref()
+            .ok_or_else(|| "Static projects require an output directory.".to_owned())?;
+        let built = depot_build::build_static(depot_build::StaticBuildRequest {
+            docker_binary: &worker_config.docker_binary,
+            checkout_path: checkout.path(),
+            context_path: &config.context_path,
+            output_directory,
+            static_root: Path::new(&worker_config.static_root),
+            project_id,
+            release_id: &deployment.id,
+            timeout: std::time::Duration::from_secs(worker_config.docker_timeout_seconds),
+        })
+        .await
+        .map_err(|error| error.to_string())?;
+        store
+            .record_static_release(
+                &deployment.id,
+                &built.release_path.to_string_lossy(),
+                time::OffsetDateTime::now_utc().unix_timestamp(),
+            )
+            .await
+            .map_err(|_| "Static release identity could not be persisted.".to_owned())?;
+        return serde_json::to_string(&serde_json::json!({
+            "static_release": built.release_path,
+            "logs": built.logs,
+        }))
+        .map_err(|_| "Static deployment result could not be encoded.".to_owned());
+    }
     let image_tag = format!("depot/{}:{}", project.slug, &checkout.commit_sha()[..12]);
     let build = depot_build::build_dockerfile(depot_build::DockerBuildRequest {
         docker_binary: &worker_config.docker_binary,
@@ -709,6 +770,30 @@ async fn load_project_ssh_credentials(
     Ok(Some((private_key, credential.known_hosts)))
 }
 
+/// Mints an installation token only for projects imported through the GitHub App.
+async fn github_checkout_token(
+    store: &Store,
+    github: Option<&depot_github::GithubAppClient>,
+    project_id: &str,
+) -> Result<Option<String>, String> {
+    let Some(repository) = store
+        .github_repository_for_project(project_id)
+        .await
+        .map_err(|_| "GitHub repository identity could not be loaded.".to_owned())?
+    else {
+        return Ok(None);
+    };
+    let github =
+        github.ok_or_else(|| "This project requires the GitHub App integration.".to_owned())?;
+    let installation_id = u64::try_from(repository.installation_id)
+        .map_err(|_| "GitHub installation identity is invalid.".to_owned())?;
+    github
+        .checkout_token(installation_id)
+        .await
+        .map(Some)
+        .map_err(|_| "GitHub could not issue a checkout credential.".to_owned())
+}
+
 /// Installs structured logging with a safe, operator-configurable filter.
 fn init_tracing() {
     let filter = EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("depot=info"));
@@ -719,10 +804,15 @@ fn init_tracing() {
 async fn serve(config: Config) -> Result<(), AppError> {
     let store = Store::connect(&config.database.url).await?;
     let secrets = load_secret_cipher(&config)?;
+    let github = load_github_integration(&config)?;
     let gateway_store = store.clone();
     let app = Router::new()
         .route("/api/v1/system/health", get(system_health))
-        .merge(depot_api::router_with_secrets(store.clone(), Some(secrets)))
+        .merge(depot_api::router_with_integrations(
+            store.clone(),
+            Some(secrets),
+            github,
+        ))
         .fallback(move |request| gateway_or_spa(gateway_store.clone(), request));
     let listener = TcpListener::bind(config.server.bind)
         .await
@@ -730,6 +820,31 @@ async fn serve(config: Config) -> Result<(), AppError> {
 
     info!(bind = %config.server.bind, "Depot HTTP listener started");
     axum::serve(listener, app).await.map_err(AppError::Serve)
+}
+
+/// Loads operator-owned GitHub App secrets once without retaining file paths in API state.
+fn load_github_integration(
+    config: &Config,
+) -> Result<Option<depot_api::GithubIntegration>, AppError> {
+    let Some(github) = &config.github else {
+        return Ok(None);
+    };
+    let private_key = std::fs::read(&github.private_key_file)
+        .map_err(|_| AppError::GithubConfig("the private key file is unreadable".to_owned()))?;
+    let webhook_secret = std::fs::read_to_string(&github.webhook_secret_file)
+        .map_err(|_| AppError::GithubConfig("the webhook secret file is unreadable".to_owned()))?;
+    let webhook_secret = webhook_secret.trim();
+    if webhook_secret.len() < 32 {
+        return Err(AppError::GithubConfig(
+            "the webhook secret is too short".to_owned(),
+        ));
+    }
+    let client = depot_github::GithubAppClient::new(github.app_id, &github.app_slug, &private_key)
+        .map_err(|error| AppError::GithubConfig(error.to_string()))?;
+    Ok(Some(depot_api::GithubIntegration {
+        client,
+        webhook_secret: std::sync::Arc::from(webhook_secret.as_bytes()),
+    }))
 }
 
 /// Reports API process liveness; dependency readiness will use a separate endpoint.
@@ -748,7 +863,12 @@ async fn gateway_or_spa(store: Store, request: Request<Body>) -> Response {
     let hostname = request_hostname(request.headers());
     if let Some(hostname) = hostname {
         match store.gateway_target(&hostname).await {
-            Ok(Some(target)) => return proxy_to_runtime(request, target.host_port).await,
+            Ok(Some(depot_store::GatewayTarget::Service { host_port, .. })) => {
+                return proxy_to_runtime(request, host_port).await;
+            }
+            Ok(Some(depot_store::GatewayTarget::Static { release_path, .. })) => {
+                return serve_static_release(request.uri(), Path::new(&release_path)).await;
+            }
             Ok(None) => {}
             Err(error) => {
                 tracing::error!(%error, "gateway target lookup failed");
@@ -757,6 +877,58 @@ async fn gateway_or_spa(store: Store, request: Request<Body>) -> Response {
         }
     }
     serve_spa(request.uri()).await
+}
+
+/// Serves one validated immutable static release with a safe SPA fallback.
+async fn serve_static_release(uri: &Uri, release_root: &Path) -> Response {
+    let Ok(root) = tokio::fs::canonicalize(release_root).await else {
+        return StatusCode::SERVICE_UNAVAILABLE.into_response();
+    };
+    let requested = uri.path().trim_start_matches('/');
+    if requested
+        .split('/')
+        .any(|part| part == ".." || part.contains('\\'))
+    {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let requested = if requested.is_empty() {
+        "index.html"
+    } else {
+        requested
+    };
+    let candidate = root.join(requested);
+    let selected = match tokio::fs::canonicalize(&candidate).await {
+        Ok(path) if path.starts_with(&root) && path.is_file() => path,
+        _ if !requested.contains('.') => root.join("index.html"),
+        _ => return StatusCode::NOT_FOUND.into_response(),
+    };
+    let Ok(selected) = tokio::fs::canonicalize(selected).await else {
+        return StatusCode::NOT_FOUND.into_response();
+    };
+    if !selected.starts_with(&root) || !selected.is_file() {
+        return StatusCode::NOT_FOUND.into_response();
+    }
+    match tokio::fs::read(&selected).await {
+        Ok(bytes) => static_artifact_response(&selected, bytes),
+        Err(_) => StatusCode::NOT_FOUND.into_response(),
+    }
+}
+
+/// Returns a static artifact with MIME and cache policy derived from its extension.
+fn static_artifact_response(path: &Path, bytes: Vec<u8>) -> Response {
+    let content_type = mime_guess::from_path(path).first_or_octet_stream();
+    let cache_control = if path.file_name().is_some_and(|name| name == "index.html") {
+        "no-cache"
+    } else {
+        "public, max-age=3600"
+    };
+    Response::builder()
+        .status(StatusCode::OK)
+        .header(header::CONTENT_TYPE, content_type.as_ref())
+        .header(header::CACHE_CONTROL, cache_control)
+        .header("x-content-type-options", "nosniff")
+        .body(Body::from(bytes))
+        .expect("static artifact response headers are valid")
 }
 
 /// Extracts a lowercase DNS hostname while rejecting malformed Host authorities.
@@ -873,9 +1045,9 @@ fn content_type(asset_name: &str) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderMap, HeaderValue, header};
+    use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 
-    use super::{content_type, request_hostname};
+    use super::{content_type, request_hostname, serve_static_release};
 
     /// Ensures unknown embedded files cannot select an executable content type.
     #[test]
@@ -897,5 +1069,25 @@ mod tests {
         );
         headers.insert(header::HOST, HeaderValue::from_static("invalid host"));
         assert!(request_hostname(&headers).is_none());
+    }
+
+    /// Serves files and SPA routes only from the selected immutable release root.
+    #[tokio::test]
+    async fn static_release_serving_has_safe_fallbacks() {
+        let root =
+            std::env::temp_dir().join(format!("depot-static-serve-{}", uuid::Uuid::now_v7()));
+        std::fs::create_dir_all(root.join("assets")).expect("release root is created");
+        std::fs::write(root.join("index.html"), "home").expect("index writes");
+        std::fs::write(root.join("assets/app.js"), "app").expect("asset writes");
+        let asset =
+            serve_static_release(&"/assets/app.js".parse::<Uri>().expect("URI"), &root).await;
+        assert_eq!(asset.status(), StatusCode::OK);
+        let route =
+            serve_static_release(&"/dashboard/settings".parse::<Uri>().expect("URI"), &root).await;
+        assert_eq!(route.status(), StatusCode::OK);
+        let traversal =
+            serve_static_release(&"/../secret".parse::<Uri>().expect("URI"), &root).await;
+        assert_eq!(traversal.status(), StatusCode::BAD_REQUEST);
+        std::fs::remove_dir_all(root).expect("release root is removed");
     }
 }

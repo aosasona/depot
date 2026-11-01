@@ -14,6 +14,18 @@ pub struct Config {
     pub database: DatabaseConfig,
     pub security: SecurityConfig,
     pub worker: WorkerConfig,
+    #[serde(default)]
+    pub github: Option<GithubAppConfig>,
+}
+
+/// Operator-owned GitHub App configuration shared by API and workers.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GithubAppConfig {
+    pub app_id: u64,
+    pub app_slug: String,
+    pub private_key_file: String,
+    pub webhook_secret_file: String,
 }
 
 /// Listener configuration for the combined v0.1 API and private gateway process.
@@ -43,6 +55,8 @@ pub struct SecurityConfig {
 #[serde(deny_unknown_fields)]
 pub struct WorkerConfig {
     pub workspace_root: String,
+    #[serde(default = "default_static_root")]
+    pub static_root: String,
     pub git_timeout_seconds: u64,
     #[serde(default = "default_docker_binary")]
     pub docker_binary: String,
@@ -64,6 +78,11 @@ pub struct CaddyAgentClientConfig {
 /// Returns the conventional Docker CLI name for operator PATH resolution.
 fn default_docker_binary() -> String {
     "docker".to_owned()
+}
+
+/// Returns the production static artifact root used by packaged installations.
+fn default_static_root() -> String {
+    "/var/lib/depot/static".to_owned()
 }
 
 /// Returns a conservative default wall-clock limit for application image builds.
@@ -95,6 +114,8 @@ pub enum ConfigError {
     InvalidMasterKeyFile,
     #[error("worker workspace and timeout configuration is invalid")]
     InvalidWorkerConfig,
+    #[error("github app configuration is invalid")]
+    InvalidGithubConfig,
 }
 
 /// Accepts an IP address or DNS name with an explicit TCP port and no URL syntax.
@@ -229,11 +250,13 @@ impl Config {
             },
             worker: WorkerConfig {
                 workspace_root: ".tmp/workspaces".to_owned(),
+                static_root: ".tmp/static".to_owned(),
                 git_timeout_seconds: 120,
                 docker_binary: default_docker_binary(),
                 docker_timeout_seconds: default_docker_timeout_seconds(),
                 caddy_agent: None,
             },
+            github: None,
         }
     }
 
@@ -256,6 +279,8 @@ impl Config {
             return Err(ConfigError::InvalidMasterKeyFile);
         }
         if self.worker.workspace_root.trim().is_empty()
+            || self.worker.static_root.trim().is_empty()
+            || matches!(self.worker.static_root.as_str(), "/" | ".")
             || self.worker.git_timeout_seconds == 0
             || self.worker.git_timeout_seconds > 1_800
             || self.worker.docker_binary.trim().is_empty()
@@ -274,6 +299,19 @@ impl Config {
                 || agent.timeout_seconds > 300
         }) {
             return Err(ConfigError::InvalidWorkerConfig);
+        }
+        if self.github.as_ref().is_some_and(|github| {
+            github.app_id == 0
+                || github.app_slug.is_empty()
+                || github.private_key_file.trim().is_empty()
+                || github.webhook_secret_file.trim().is_empty()
+                || github.private_key_file == github.webhook_secret_file
+                || !github
+                    .app_slug
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-')
+        }) {
+            return Err(ConfigError::InvalidGithubConfig);
         }
         Ok(())
     }

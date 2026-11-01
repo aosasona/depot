@@ -10,6 +10,7 @@ axum.workspace = true
 axum-extra.workspace = true
 depot-auth = { path = "../depot-auth" }
 depot-core = { path = "../depot-core" }
+depot-github = { path = "../depot-github" }
 depot-secrets = { path = "../depot-secrets" }
 depot-store = { path = "../depot-store" }
 hmac.workspace = true

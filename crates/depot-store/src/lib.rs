@@ -208,6 +208,7 @@ pub struct Deployment {
     pub image_id: Option<String>,
     pub container_id: Option<String>,
     pub host_port: Option<i64>,
+    pub static_release_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub finished_at: Option<i64>,
@@ -306,6 +307,33 @@ pub struct UpsertGithubWebhook<'a> {
     pub now_unix: i64,
 }
 
+/// Non-secret metadata for a GitHub App installation linked to this Depot.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GithubInstallation {
+    pub installation_id: i64,
+    pub account_login: String,
+    pub account_type: String,
+    pub repository_selection: String,
+}
+
+/// Repository identity bound to a project without any persisted access token.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GithubProjectRepository {
+    pub project_id: String,
+    pub installation_id: i64,
+    pub repository_id: i64,
+    pub repository_full_name: String,
+    pub private: bool,
+}
+
+/// Project and actor resolved from an exact GitHub installation/repository pair.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GithubAppWebhookTarget {
+    pub project_id: String,
+    pub branch: String,
+    pub actor_user_id: String,
+}
+
 /// Encrypted SSH key and trusted-host data loaded only by the worker.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ProjectSshCredential {
@@ -337,11 +365,17 @@ pub struct Domain {
     pub updated_at: i64,
 }
 
-/// Loopback-only runtime selected for an exact validated incoming hostname.
+/// Verified active release selected for an exact validated incoming hostname.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GatewayTarget {
-    pub deployment_id: String,
-    pub host_port: u16,
+pub enum GatewayTarget {
+    Service {
+        deployment_id: String,
+        host_port: u16,
+    },
+    Static {
+        deployment_id: String,
+        release_path: String,
+    },
 }
 
 /// Runtime containers safe to retire after an atomic deployment transition.
@@ -397,6 +431,266 @@ pub enum StoreError {
 }
 
 impl Store {
+    /// Links a verified GitHub App installation while retaining its original actor.
+    pub async fn upsert_github_installation(
+        &self,
+        installation: &GithubInstallation,
+        actor_user_id: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO github_installations
+             (installation_id, account_login, account_type, repository_selection,
+              linked_by_user_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(installation_id) DO UPDATE SET
+               account_login = excluded.account_login,
+               account_type = excluded.account_type,
+               repository_selection = excluded.repository_selection,
+               updated_at = excluded.updated_at",
+        )
+        .bind(installation.installation_id)
+        .bind(&installation.account_login)
+        .bind(&installation.account_type)
+        .bind(&installation.repository_selection)
+        .bind(actor_user_id)
+        .bind(now_unix)
+        .bind(now_unix)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Lists linked installations without exposing app credentials.
+    pub async fn github_installations(&self) -> Result<Vec<GithubInstallation>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT installation_id, account_login, account_type, repository_selection
+             FROM github_installations ORDER BY account_login, installation_id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(GithubInstallation {
+                    installation_id: row.try_get("installation_id")?,
+                    account_login: row.try_get("account_login")?,
+                    account_type: row.try_get("account_type")?,
+                    repository_selection: row.try_get("repository_selection")?,
+                })
+            })
+            .collect()
+    }
+
+    /// Returns whether an installation was explicitly linked by an authenticated user.
+    pub async fn has_github_installation(&self, installation_id: i64) -> Result<bool, StoreError> {
+        Ok(sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM github_installations WHERE installation_id = ?",
+        )
+        .bind(installation_id)
+        .fetch_one(&self.pool)
+        .await?
+            > 0)
+    }
+
+    /// Creates a project and binds its verified GitHub repository in one transaction.
+    pub async fn create_github_project(
+        &self,
+        input: NewProject<'_>,
+        repository: &GithubProjectRepository,
+    ) -> Result<ProjectSummary, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let exists = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE slug = ?")
+            .bind(input.slug)
+            .fetch_one(&mut *transaction)
+            .await?;
+        if exists > 0 {
+            return Err(StoreError::ProjectSlugAlreadyExists);
+        }
+        let id = Uuid::now_v7().to_string();
+        sqlx::query(
+            "INSERT INTO projects
+             (id, slug, name, owner_user_id, repository_url, branch, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(input.slug)
+        .bind(input.name)
+        .bind(input.owner_user_id)
+        .bind(input.repository_url)
+        .bind(input.branch)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO service_configs (project_id, created_at, updated_at) VALUES (?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO github_project_repositories
+             (project_id, installation_id, repository_id, repository_full_name,
+              private, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(repository.installation_id)
+        .bind(repository.repository_id)
+        .bind(&repository.repository_full_name)
+        .bind(repository.private)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        insert_project_audit(
+            &mut transaction,
+            input.owner_user_id,
+            "project.create",
+            &id,
+            input.now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(ProjectSummary {
+            id,
+            slug: input.slug.to_owned(),
+            name: input.name.to_owned(),
+            owner_user_id: input.owner_user_id.to_owned(),
+            repository_url: input.repository_url.to_owned(),
+            branch: input.branch.to_owned(),
+            created_at: input.now_unix,
+            updated_at: input.now_unix,
+            latest_inspection_job_id: None,
+        })
+    }
+
+    /// Loads the GitHub repository identity used for short-lived worker authentication.
+    pub async fn github_repository_for_project(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<GithubProjectRepository>, StoreError> {
+        let row = sqlx::query(
+            "SELECT project_id, installation_id, repository_id, repository_full_name, private
+             FROM github_project_repositories WHERE project_id = ?",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(GithubProjectRepository {
+                project_id: row.try_get("project_id")?,
+                installation_id: row.try_get("installation_id")?,
+                repository_id: row.try_get("repository_id")?,
+                repository_full_name: row.try_get("repository_full_name")?,
+                private: row.try_get("private")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Resolves a global GitHub App delivery to exactly one imported project.
+    pub async fn github_app_webhook_target(
+        &self,
+        installation_id: i64,
+        repository_id: i64,
+    ) -> Result<Option<GithubAppWebhookTarget>, StoreError> {
+        let row = sqlx::query(
+            "SELECT projects.id AS project_id, projects.branch,
+                    github_installations.linked_by_user_id AS actor_user_id
+             FROM github_project_repositories
+             JOIN projects ON projects.id = github_project_repositories.project_id
+             JOIN github_installations ON github_installations.installation_id = github_project_repositories.installation_id
+             WHERE github_project_repositories.installation_id = ?
+               AND github_project_repositories.repository_id = ?",
+        )
+        .bind(installation_id)
+        .bind(repository_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(GithubAppWebhookTarget {
+                project_id: row.try_get("project_id")?,
+                branch: row.try_get("branch")?,
+                actor_user_id: row.try_get("actor_user_id")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Deduplicates one global App delivery and atomically enqueues its deployment.
+    pub async fn enqueue_github_app_delivery(
+        &self,
+        target: &GithubAppWebhookTarget,
+        installation_id: i64,
+        repository_id: i64,
+        delivery_id: &str,
+        commit_sha: &str,
+        now_unix: i64,
+    ) -> Result<Option<Deployment>, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let inserted = sqlx::query(
+            "INSERT OR IGNORE INTO github_app_deliveries
+             (installation_id, repository_id, delivery_id, commit_sha, received_at)
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(installation_id)
+        .bind(repository_id)
+        .bind(delivery_id)
+        .bind(commit_sha)
+        .bind(now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        if inserted.rows_affected() == 0 {
+            transaction.rollback().await?;
+            return Ok(None);
+        }
+        let deployment_id = Uuid::now_v7().to_string();
+        let job_id = Uuid::now_v7().to_string();
+        let payload_json = format!(r#"{{"deployment_id":"{deployment_id}"}}"#);
+        sqlx::query(
+            "INSERT INTO jobs
+             (id, kind, project_id, payload_json, state, deduplication_key,
+              attempts, max_attempts, available_at, created_at, updated_at)
+             VALUES (?, 'deploy_project', ?, ?, 'queued', ?, 0, 3, ?, ?, ?)",
+        )
+        .bind(&job_id)
+        .bind(&target.project_id)
+        .bind(payload_json)
+        .bind(format!("deploy:{deployment_id}"))
+        .bind(now_unix)
+        .bind(now_unix)
+        .bind(now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "INSERT INTO deployments
+             (id, project_id, job_id, commit_sha, trigger_kind, status,
+              created_by_user_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'webhook', 'queued', ?, ?, ?)",
+        )
+        .bind(&deployment_id)
+        .bind(&target.project_id)
+        .bind(&job_id)
+        .bind(commit_sha)
+        .bind(&target.actor_user_id)
+        .bind(now_unix)
+        .bind(now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query(
+            "UPDATE github_app_deliveries SET deployment_id = ?
+             WHERE installation_id = ? AND delivery_id = ?",
+        )
+        .bind(&deployment_id)
+        .bind(installation_id)
+        .bind(delivery_id)
+        .execute(&mut *transaction)
+        .await?;
+        transaction.commit().await?;
+        self.deployment_by_id(&deployment_id).await.map(Some)
+    }
     /// Creates or rotates an encrypted SSH deploy key and its trusted hosts.
     pub async fn upsert_project_ssh_credential(
         &self,
@@ -1354,29 +1648,42 @@ impl Store {
         hostname: &str,
     ) -> Result<Option<GatewayTarget>, StoreError> {
         let row = sqlx::query(
-            "SELECT deployments.id, deployments.host_port
+            "SELECT deployments.id, deployments.host_port,
+                    deployments.static_release_path
              FROM domains
              JOIN deployments ON deployments.project_id = domains.project_id
              WHERE domains.hostname = ? COLLATE NOCASE
                AND deployments.status = 'succeeded'
                AND deployments.active = 1
-               AND deployments.host_port IS NOT NULL
+               AND (deployments.static_release_path IS NOT NULL
+                    OR deployments.host_port IS NOT NULL)
              LIMIT 1",
         )
         .bind(hostname)
         .fetch_optional(&self.pool)
         .await?;
         row.map(|row| {
-            let port: i64 = row.try_get("host_port")?;
-            let host_port = u16::try_from(port).map_err(|_| {
-                StoreError::Database(sqlx::Error::Protocol(
-                    "stored deployment port is invalid".to_owned(),
-                ))
-            })?;
-            Ok(GatewayTarget {
-                deployment_id: row.try_get("id")?,
-                host_port,
-            })
+            let deployment_id = row.try_get("id")?;
+            if row
+                .try_get::<Option<String>, _>("static_release_path")?
+                .is_some()
+            {
+                Ok(GatewayTarget::Static {
+                    deployment_id,
+                    release_path: row.try_get("static_release_path")?,
+                })
+            } else {
+                let port: i64 = row.try_get("host_port")?;
+                let host_port = u16::try_from(port).map_err(|_| {
+                    StoreError::Database(sqlx::Error::Protocol(
+                        "stored deployment port is invalid".to_owned(),
+                    ))
+                })?;
+                Ok(GatewayTarget::Service {
+                    deployment_id,
+                    host_port,
+                })
+            }
         })
         .transpose()
     }
@@ -1515,7 +1822,7 @@ impl Store {
         self.project_by_id(project_id).await?;
         let rows = sqlx::query(
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
-                    failure_reason, image_id, container_id, host_port,
+                    failure_reason, image_id, container_id, host_port, static_release_path,
                     created_at, updated_at, finished_at, active
              FROM deployments WHERE project_id = ? ORDER BY created_at DESC, id DESC",
         )
@@ -1529,7 +1836,7 @@ impl Store {
     pub async fn deployment_by_id(&self, deployment_id: &str) -> Result<Deployment, StoreError> {
         let row = sqlx::query(
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
-                    failure_reason, image_id, container_id, host_port,
+                    failure_reason, image_id, container_id, host_port, static_release_path,
                     created_at, updated_at, finished_at, active
              FROM deployments WHERE id = ?",
         )
@@ -1556,6 +1863,28 @@ impl Store {
         .bind(image_id)
         .bind(container_id)
         .bind(i64::from(host_port))
+        .bind(now_unix)
+        .bind(deployment_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::DeploymentNotFound);
+        }
+        Ok(())
+    }
+
+    /// Persists one immutable static release before atomic deployment promotion.
+    pub async fn record_static_release(
+        &self,
+        deployment_id: &str,
+        release_path: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "UPDATE deployments SET static_release_path = ?, updated_at = ?
+             WHERE id = ? AND status = 'building'",
+        )
+        .bind(release_path)
         .bind(now_unix)
         .bind(deployment_id)
         .execute(&self.pool)
@@ -1623,7 +1952,11 @@ impl Store {
         let mut transaction = self.pool.begin().await?;
         let missing_runtime = sqlx::query_scalar::<_, i64>(
             "SELECT COUNT(*) FROM deployments
-             WHERE job_id = ? AND (image_id IS NULL OR container_id IS NULL OR host_port IS NULL)",
+             WHERE deployments.job_id = ?
+               AND deployments.static_release_path IS NULL
+               AND (deployments.image_id IS NULL
+                    OR deployments.container_id IS NULL
+                    OR deployments.host_port IS NULL)",
         )
         .bind(job_id)
         .fetch_one(&mut *transaction)
@@ -2101,6 +2434,7 @@ fn deployment_from_row(row: SqliteRow) -> Result<Deployment, StoreError> {
         image_id: row.try_get("image_id")?,
         container_id: row.try_get("container_id")?,
         host_port: row.try_get("host_port")?,
+        static_release_path: row.try_get("static_release_path")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         finished_at: row.try_get("finished_at")?,
@@ -2144,8 +2478,8 @@ async fn insert_project_audit(
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapAdmin, NewDeployment, NewJob, NewProject, NewUser, Store, StoreError,
-        UpdateServiceConfig, UpsertGithubWebhook, UpsertProjectVariable, UserRole,
+        BootstrapAdmin, GatewayTarget, NewDeployment, NewJob, NewProject, NewUser, Store,
+        StoreError, UpdateServiceConfig, UpsertGithubWebhook, UpsertProjectVariable, UserRole,
     };
 
     /// Creates one administrator in a fresh store for project-focused tests.
@@ -2474,8 +2808,13 @@ mod tests {
             .await
             .expect("target lookup succeeds")
             .expect("healthy target exists");
-        assert_eq!(target.deployment_id, deployment.id);
-        assert_eq!(target.host_port, 43123);
+        assert_eq!(
+            target,
+            GatewayTarget::Service {
+                deployment_id: deployment.id,
+                host_port: 43123,
+            }
+        );
     }
 
     /// Proves promotion retires the previous runtime and rejects stale completion order.

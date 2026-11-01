@@ -14,11 +14,13 @@ depot-build = { path = "../depot-build" }
 depot-caddy = { path = "../depot-caddy" }
 depot-core = { path = "../depot-core" }
 depot-git = { path = "../depot-git" }
+depot-github = { path = "../depot-github" }
 depot-runtime = { path = "../depot-runtime" }
 depot-secrets = { path = "../depot-secrets" }
 depot-store = { path = "../depot-store" }
 hyper.workspace = true
 hyper-util.workspace = true
+mime_guess.workspace = true
 rust-embed.workspace = true
 serde.workspace = true
 serde_json = "1.0.154"

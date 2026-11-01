@@ -13,6 +13,7 @@ import {
 import { DeploymentPanel } from "./DeploymentPanel";
 import { DomainPanel } from "./DomainPanel";
 import { EnvironmentPanel } from "./EnvironmentPanel";
+import { GithubImportPanel } from "./GithubImportPanel";
 import { ServiceConfigForm } from "./ServiceConfigForm";
 import { SshCredentialPanel } from "./SshCredentialPanel";
 import { WebhookPanel } from "./WebhookPanel";
@@ -43,7 +44,11 @@ export function ProjectsPanel() {
           {projects.data?.length ?? 0} PROJECTS
         </span>
       </div>
-      <NewProjectForm />
+      <GithubImportPanel />
+      <details className="manual-project">
+        <summary>Advanced: add a repository URL manually</summary>
+        <NewProjectForm />
+      </details>
       {projects.isPending && <p className="panel-message">Loading projects…</p>}
       {projects.isError && (
         <p className="notice danger">Projects are unavailable.</p>

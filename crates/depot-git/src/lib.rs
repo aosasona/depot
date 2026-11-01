@@ -39,6 +39,12 @@ pub struct GitSshCredentials<'a> {
     pub known_hosts: &'a str,
 }
 
+/// Short-lived HTTPS token borrowed only for one GitHub App checkout.
+#[derive(Clone, Copy)]
+pub struct GitHttpCredentials<'a> {
+    pub token: &'a str,
+}
+
 /// A verified immutable checkout whose workspace is removed when dropped.
 #[derive(Debug)]
 pub struct RepositoryCheckout {
@@ -84,6 +90,7 @@ pub async fn inspect_repository(
     workspace_root: &Path,
     timeout: Duration,
     ssh_credentials: Option<GitSshCredentials<'_>>,
+    http_credentials: Option<GitHttpCredentials<'_>>,
 ) -> Result<RepositoryInspection, GitError> {
     validate_repository_url(repository_url)?;
     require_ssh_credentials(repository_url, ssh_credentials)?;
@@ -94,6 +101,10 @@ pub async fn inspect_repository(
     let ssh = prepare_ssh_command(workspace_root, ssh_credentials)?;
     if let Some(ssh) = &ssh {
         ssh.configure(&mut clone);
+    }
+    let http = prepare_http_command(workspace_root, http_credentials)?;
+    if let Some(http) = &http {
+        http.configure(&mut clone);
     }
     clone.args([
         "clone",
@@ -109,6 +120,7 @@ pub async fn inspect_repository(
     clone.arg(workspace.path());
     run_status(&mut clone, timeout).await?;
     drop(ssh);
+    drop(http);
 
     let mut revision = git_command();
     revision
@@ -144,6 +156,7 @@ pub async fn checkout_repository(
     workspace_root: &Path,
     timeout: Duration,
     ssh_credentials: Option<GitSshCredentials<'_>>,
+    http_credentials: Option<GitHttpCredentials<'_>>,
 ) -> Result<RepositoryCheckout, GitError> {
     if expected_commit_sha.len() != 40
         || !expected_commit_sha
@@ -160,6 +173,10 @@ pub async fn checkout_repository(
     let ssh = prepare_ssh_command(workspace_root, ssh_credentials)?;
     if let Some(ssh) = &ssh {
         ssh.configure(&mut clone);
+    }
+    let http = prepare_http_command(workspace_root, http_credentials)?;
+    if let Some(http) = &http {
+        http.configure(&mut clone);
     }
     clone.args([
         "clone",
@@ -178,6 +195,7 @@ pub async fn checkout_repository(
         return Err(error);
     }
     drop(ssh);
+    drop(http);
     let mut revision = git_command();
     revision
         .arg("-C")
@@ -256,6 +274,33 @@ fn prepare_ssh_command(
     Ok(Some(guard))
 }
 
+/// Writes an ephemeral askpass helper and token file outside command arguments.
+fn prepare_http_command(
+    workspace_root: &Path,
+    credentials: Option<GitHttpCredentials<'_>>,
+) -> Result<Option<HttpCommandGuard>, GitError> {
+    let Some(credentials) = credentials else {
+        return Ok(None);
+    };
+    let path = workspace_root.join(format!("https-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir(&path).map_err(GitError::Workspace)?;
+    let guard = HttpCommandGuard { path };
+    std::fs::set_permissions(&guard.path, Permissions::from_mode(0o700))
+        .map_err(GitError::Workspace)?;
+    let token = guard.path.join("token");
+    let askpass = guard.path.join("askpass");
+    std::fs::write(&token, credentials.token).map_err(GitError::Workspace)?;
+    std::fs::write(
+        &askpass,
+        "#!/bin/sh\ncase \"$1\" in\n  *Username*) printf '%s\\n' x-access-token ;;\n  *) cat \"$DEPOT_GIT_TOKEN_FILE\" ;;\nesac\n",
+    )
+    .map_err(GitError::Workspace)?;
+    std::fs::set_permissions(&token, Permissions::from_mode(0o600)).map_err(GitError::Workspace)?;
+    std::fs::set_permissions(&askpass, Permissions::from_mode(0o700))
+        .map_err(GitError::Workspace)?;
+    Ok(Some(guard))
+}
+
 /// Runs a Git command under the configured wall-clock timeout.
 async fn run_status(command: &mut Command, timeout: Duration) -> Result<(), GitError> {
     let status = tokio::time::timeout(timeout, command.status())
@@ -303,6 +348,31 @@ struct WorkspaceGuard {
 /// Owns materialized SSH credentials and removes them after the clone exits.
 struct SshCommandGuard {
     path: PathBuf,
+}
+
+/// Owns an ephemeral HTTPS askpass helper and installation token.
+struct HttpCommandGuard {
+    path: PathBuf,
+}
+
+impl HttpCommandGuard {
+    /// Configures non-interactive Git authentication without putting a token in argv.
+    fn configure(&self, command: &mut Command) {
+        command
+            .env("GIT_ASKPASS", self.path.join("askpass"))
+            .env("GIT_ASKPASS_REQUIRE", "force")
+            .env("DEPOT_GIT_TOKEN_FILE", self.path.join("token"));
+    }
+}
+
+impl Drop for HttpCommandGuard {
+    fn drop(&mut self) {
+        if let Err(error) = std::fs::remove_dir_all(&self.path)
+            && error.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(path = %self.path.display(), %error, "could not remove temporary HTTPS credentials");
+        }
+    }
 }
 
 impl SshCommandGuard {
@@ -450,6 +520,7 @@ mod tests {
             "main",
             &workspace,
             std::time::Duration::from_secs(120),
+            None,
             None,
         )
         .await
