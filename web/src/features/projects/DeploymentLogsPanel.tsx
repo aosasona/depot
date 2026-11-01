@@ -1,4 +1,5 @@
 import { type UseQueryResult, useQuery } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import { useState } from "react";
 import {
   type Deployment,
@@ -8,8 +9,16 @@ import {
 } from "../../lib/api/client";
 
 /** Shows durable deployment events and bounded builder output beside deployment work. */
-export function DeploymentLogsPanel({ projectId }: { projectId: string }) {
-  const [view, setView] = useState<"runtime" | "build">("runtime");
+export function DeploymentLogsPanel({
+  projectId,
+  deploymentId,
+}: {
+  projectId: string;
+  deploymentId?: string;
+}) {
+  const [view, setView] = useState<"runtime" | "build">(
+    deploymentId ? "build" : "runtime",
+  );
   const deployments = useQuery({
     queryKey: ["projects", projectId, "deployments"],
     queryFn: () => listDeployments(projectId),
@@ -24,29 +33,45 @@ export function DeploymentLogsPanel({ projectId }: { projectId: string }) {
     <div className="deployment-logs">
       <div className="surface-heading">
         <div>
-          <strong>Logs</strong>
-          <span>Live service output and durable build history.</span>
+          <strong>{deploymentId ? "Deployment logs" : "Logs"}</strong>
+          <span>
+            {deploymentId
+              ? "Durable events and output for this deployment attempt."
+              : "Live service output and durable build history."}
+          </span>
         </div>
-        <fieldset className="log-view-tabs">
-          <legend>Log type</legend>
-          <button
-            className={view === "runtime" ? "active" : undefined}
-            type="button"
-            onClick={() => setView("runtime")}
+        {deploymentId ? (
+          <Link
+            className="table-action"
+            to="/projects/$projectId/$tab"
+            params={{ projectId, tab: "deployments" }}
           >
-            Runtime
-          </button>
-          <button
-            className={view === "build" ? "active" : undefined}
-            type="button"
-            onClick={() => setView("build")}
-          >
-            Build
-          </button>
-        </fieldset>
+            ← Deployment history
+          </Link>
+        ) : (
+          <fieldset className="log-view-tabs">
+            <legend>Log type</legend>
+            <button
+              className={view === "runtime" ? "active" : undefined}
+              type="button"
+              onClick={() => setView("runtime")}
+            >
+              Runtime
+            </button>
+            <button
+              className={view === "build" ? "active" : undefined}
+              type="button"
+              onClick={() => setView("build")}
+            >
+              Build
+            </button>
+          </fieldset>
+        )}
       </div>
       {view === "runtime" && <RuntimeLogs projectId={projectId} />}
-      {view === "build" && <BuildLogs deployments={deployments} />}
+      {view === "build" && (
+        <BuildLogs deployments={deployments} deploymentId={deploymentId} />
+      )}
     </div>
   );
 }
@@ -109,20 +134,32 @@ function RuntimeLogs({ projectId }: { projectId: string }) {
 /** Renders retained worker events and build output for all deployment attempts. */
 function BuildLogs({
   deployments,
+  deploymentId,
 }: {
   deployments: UseQueryResult<Deployment[], Error>;
+  deploymentId?: string;
 }) {
+  const visibleDeployments = deploymentId
+    ? deployments.data?.filter((deployment) => deployment.id === deploymentId)
+    : deployments.data;
   return (
     <>
       {deployments.isPending && <p className="surface-empty">Loading logs…</p>}
       {deployments.isError && (
         <p className="inspection-error">Deployment logs are unavailable.</p>
       )}
-      {deployments.data?.length === 0 && (
+      {!deploymentId && deployments.data?.length === 0 && (
         <p className="surface-empty">No deployment jobs have run yet.</p>
       )}
+      {deploymentId &&
+        deployments.isSuccess &&
+        visibleDeployments?.length === 0 && (
+          <p className="inspection-error">
+            This deployment does not exist in this project.
+          </p>
+        )}
       <div className="deployment-log-list">
-        {deployments.data?.map((deployment, index) => (
+        {visibleDeployments?.map((deployment, index) => (
           <DeploymentLog
             deploymentId={deployment.id}
             jobId={deployment.job_id}

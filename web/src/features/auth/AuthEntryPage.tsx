@@ -30,7 +30,12 @@ const loginSchema = z.object({
 
 export type DashboardLocation =
   | { kind: "projects" }
-  | { kind: "project"; projectId: string; tab: ProjectTab }
+  | {
+      kind: "project";
+      projectId: string;
+      tab: ProjectTab;
+      deploymentId?: string;
+    }
   | { kind: "templates" }
   | { kind: "team" };
 
@@ -362,7 +367,7 @@ function Dashboard({
               ? "Control plane ready"
               : "Checking control plane"}
           </span>
-          <span className="sidebar-version">Depot v0.4.0</span>
+          <span className="sidebar-version">Depot v0.4.1</span>
         </div>
       </aside>
       <div className="app-workspace">
@@ -442,6 +447,9 @@ function Dashboard({
                 location.kind === "project" ? location.projectId : undefined
               }
               tab={location.kind === "project" ? location.tab : undefined}
+              deploymentId={
+                location.kind === "project" ? location.deploymentId : undefined
+              }
             />
           )}
         </div>

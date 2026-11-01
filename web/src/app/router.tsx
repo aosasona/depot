@@ -72,11 +72,32 @@ const projectRoute = createRoute({
   component: ProjectRoute,
 });
 
+const deploymentDetailRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/projects/$projectId/deployments/$deploymentId",
+  component: DeploymentDetailRoute,
+});
+
 function ProjectRoute() {
   const { projectId, tab } = projectRoute.useParams();
   return (
     <DashboardPage
       location={{ kind: "project", projectId, tab: tab as ProjectTab }}
+    />
+  );
+}
+
+/** Resolves one deployment to its URL-backed build output view. */
+function DeploymentDetailRoute() {
+  const { projectId, deploymentId } = deploymentDetailRoute.useParams();
+  return (
+    <DashboardPage
+      location={{
+        kind: "project",
+        projectId,
+        tab: "deployments",
+        deploymentId,
+      }}
     />
   );
 }
@@ -98,6 +119,7 @@ const routeTree = rootRoute.addChildren([
   projectsRoute,
   projectOverviewRoute,
   projectRoute,
+  deploymentDetailRoute,
   templatesRoute,
   teamRoute,
 ]);

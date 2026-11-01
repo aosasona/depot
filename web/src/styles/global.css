@@ -541,21 +541,39 @@ h1 {
   background: var(--border);
 }
 .deployment-row {
-  display: grid;
-  grid-template-columns: auto auto 1fr auto;
-  gap: 0.8rem;
-  align-items: center;
   min-width: 0;
-  padding: 0.75rem;
   background: var(--surface);
   color: var(--muted);
   font-size: 0.68rem;
 }
-.deployment-row code {
+.deployment-row-link {
+  display: grid;
+  grid-template-columns: auto auto minmax(5rem, 1fr) auto auto auto;
+  gap: 0.8rem;
+  align-items: center;
+  min-width: 0;
+  padding: 0.75rem;
+  color: var(--muted);
+  text-decoration: none;
+}
+.deployment-row-link:hover,
+.deployment-row-link:focus-visible {
+  background: var(--surface-hover);
+}
+.deployment-row code,
+.deployment-row-link code {
   overflow: hidden;
   color: var(--text);
   font-size: 0.65rem;
   text-overflow: ellipsis;
+}
+.deployment-log-link {
+  color: var(--accent);
+  font-family: var(--mono-font);
+  text-transform: uppercase;
+}
+.deployment-row > .text-action {
+  margin: 0 0.75rem 0.75rem;
 }
 .deployment-row .inspection-error {
   grid-column: 1 / -1;
@@ -566,7 +584,8 @@ h1 {
   font-family: var(--mono-font);
   text-transform: uppercase;
 }
-.deployment-status.succeeded {
+.deployment-status.succeeded,
+.deployment-status.active {
   border-color: #8edb91;
   color: #8edb91;
 }
@@ -575,7 +594,9 @@ h1 {
   color: #f36c6c;
 }
 .deployment-status.queued,
-.deployment-status.building {
+.deployment-status.building,
+.deployment-status.pending,
+.deployment-status.error {
   border-color: #f0bd65;
   color: #f0bd65;
 }
@@ -587,6 +608,19 @@ h1 {
   padding-top: 1rem;
   font-size: 0.72rem;
   text-transform: uppercase;
+}
+.domain-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+.domain-sync-error {
+  grid-column: 1 / -1;
+  margin: 0;
+  color: var(--warning);
+  font: 0.65rem / 1.5 var(--mono-font);
+  text-transform: none;
 }
 
 .environment-form {
@@ -845,6 +879,9 @@ td {
     border-right: 0;
   }
   .deployment-row {
+    display: block;
+  }
+  .deployment-row-link {
     grid-template-columns: auto 1fr;
   }
 }

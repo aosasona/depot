@@ -24,9 +24,11 @@ import { WebhookPanel } from "./WebhookPanel";
 export function ProjectsPanel({
   projectId,
   tab = "overview",
+  deploymentId,
 }: {
   projectId?: string;
   tab?: ProjectTab;
+  deploymentId?: string;
 }) {
   const navigate = useNavigate();
   const projects = useQuery({ queryKey: ["projects"], queryFn: listProjects });
@@ -34,7 +36,13 @@ export function ProjectsPanel({
     (project) => project.id === projectId,
   );
   if (selectedProject) {
-    return <ProjectWorkspace project={selectedProject} tab={tab} />;
+    return (
+      <ProjectWorkspace
+        project={selectedProject}
+        tab={tab}
+        deploymentId={deploymentId}
+      />
+    );
   }
   if (projectId && projects.isSuccess) {
     return (
@@ -141,9 +149,11 @@ const projectTabs: Array<{ id: ProjectTab; label: string }> = [
 function ProjectWorkspace({
   project,
   tab,
+  deploymentId,
 }: {
   project: Project;
   tab: ProjectTab;
+  deploymentId?: string;
 }) {
   const [jobId, setJobId] = useState<string | undefined>(
     project.latest_inspection_job_id ?? undefined,
@@ -251,7 +261,14 @@ function ProjectWorkspace({
         )}
         {tab === "deployments" && (
           <section className="project-surface">
-            <DeploymentPanel projectId={project.id} />
+            {deploymentId ? (
+              <DeploymentLogsPanel
+                projectId={project.id}
+                deploymentId={deploymentId}
+              />
+            ) : (
+              <DeploymentPanel projectId={project.id} />
+            )}
           </section>
         )}
         {tab === "canvas" && <ProjectCanvas project={project} />}

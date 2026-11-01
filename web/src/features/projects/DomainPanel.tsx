@@ -7,6 +7,7 @@ import {
   createDomain,
   deleteDomain,
   listDomains,
+  retryDomainReconciliation,
 } from "../../lib/api/client";
 
 const hostnameSchema = z
@@ -25,6 +26,10 @@ export function DomainPanel({ projectId }: { projectId: string }) {
   const domains = useQuery({
     queryKey: ["projects", projectId, "domains"],
     queryFn: () => listDomains(projectId),
+    refetchInterval: (query) =>
+      query.state.data?.some((domain) => domain.routing_status !== "active")
+        ? 2_000
+        : false,
   });
   const create = useMutation({
     mutationFn: (hostname: string) => createDomain(projectId, hostname),
@@ -37,6 +42,17 @@ export function DomainPanel({ projectId }: { projectId: string }) {
       });
     },
   });
+  const retry = useMutation({
+    mutationFn: retryDomainReconciliation,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["projects", projectId, "domains"],
+      });
+    },
+  });
+  const hasSyncError = domains.data?.some(
+    (domain) => domain.routing_status === "error",
+  );
   const form = useForm({
     defaultValues: { hostname: "" },
     onSubmit: async ({ value, formApi }) => {
@@ -56,7 +72,19 @@ export function DomainPanel({ projectId }: { projectId: string }) {
   });
   return (
     <div className="domain-panel">
-      <strong>Domains</strong>
+      <div className="domain-heading">
+        <strong>Domains</strong>
+        {hasSyncError && (
+          <button
+            className="text-action"
+            type="button"
+            disabled={retry.isPending}
+            onClick={() => retry.mutate()}
+          >
+            {retry.isPending ? "Retrying…" : "Retry sync"}
+          </button>
+        )}
+      </div>
       <form
         className="domain-form"
         onSubmit={(event) => {
@@ -86,6 +114,9 @@ export function DomainPanel({ projectId }: { projectId: string }) {
       {remove.error && (
         <p className="inspection-error">{domainError(remove.error)}</p>
       )}
+      {retry.error && (
+        <p className="inspection-error">{domainError(retry.error)}</p>
+      )}
       {domains.isPending && <p className="config-message">Loading domains…</p>}
       {domains.data?.length === 0 && (
         <p className="config-message">No public hostnames attached.</p>
@@ -95,7 +126,9 @@ export function DomainPanel({ projectId }: { projectId: string }) {
           <div className="domain-row" key={domain.id}>
             <code>{domain.hostname}</code>
             <span className={`deployment-status ${domain.routing_status}`}>
-              {domain.routing_status}
+              {domain.routing_status === "error"
+                ? "sync failed"
+                : domain.routing_status}
             </span>
             <button
               className="text-action"
@@ -105,6 +138,12 @@ export function DomainPanel({ projectId }: { projectId: string }) {
             >
               Remove
             </button>
+            {domain.last_error && (
+              <p className="domain-sync-error">
+                The route may still be live using Caddy's last valid config.{" "}
+                {domain.last_error}
+              </p>
+            )}
           </div>
         ))}
       </div>

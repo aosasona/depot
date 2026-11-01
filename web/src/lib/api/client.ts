@@ -519,6 +519,15 @@ export async function deleteDomain(domainId: string) {
   }
 }
 
+/** Requeues the complete desired-domain snapshot for the restricted Caddy agent. */
+export function retryDomainReconciliation() {
+  return request(
+    "/api/v1/domains/reconcile",
+    z.object({ job_id: z.string() }),
+    { method: "POST", headers: csrfHeaders() },
+  );
+}
+
 /** Lists masked runtime-variable metadata without loading stored values. */
 export function listVariables(projectId: string) {
   return request(

@@ -1722,13 +1722,16 @@ impl Store {
         Ok(())
     }
 
-    /// Records a bounded reconciliation failure without exposing credentials.
+    /// Fails only unacknowledged routes because Caddy retains its last valid snapshot.
     pub async fn mark_domains_error(&self, message: &str, now_unix: i64) -> Result<(), StoreError> {
-        sqlx::query("UPDATE domains SET routing_status = 'error', last_error = ?, updated_at = ?")
-            .bind(message)
-            .bind(now_unix)
-            .execute(&self.pool)
-            .await?;
+        sqlx::query(
+            "UPDATE domains SET routing_status = 'error', last_error = ?, updated_at = ?
+             WHERE routing_status != 'active'",
+        )
+        .bind(message)
+        .bind(now_unix)
+        .execute(&self.pool)
+        .await?;
         Ok(())
     }
 
@@ -2727,6 +2730,44 @@ mod tests {
                 .expect("domains list")
                 .is_empty()
         );
+    }
+
+    /// Keeps acknowledged routes active when a newer desired snapshot cannot apply.
+    #[tokio::test]
+    async fn domain_failure_only_marks_unacknowledged_routes() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let project = store
+            .create_project(NewProject {
+                slug: "stable-routes",
+                name: "Stable routes",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/project.git",
+                branch: "main",
+                now_unix: 300,
+            })
+            .await
+            .expect("project is created");
+        store
+            .create_domain(&project.id, "active.example.com", &admin_id, 301)
+            .await
+            .expect("active domain is created");
+        store
+            .mark_domains_active(302)
+            .await
+            .expect("first snapshot is acknowledged");
+        store
+            .create_domain(&project.id, "pending.example.com", &admin_id, 303)
+            .await
+            .expect("pending domain is created");
+        store
+            .mark_domains_error("agent unavailable", 304)
+            .await
+            .expect("failure is recorded");
+
+        let domains = store.list_domains(&project.id).await.expect("domains list");
+        assert_eq!(domains[0].routing_status, "active");
+        assert_eq!(domains[1].routing_status, "error");
     }
 
     /// Proves deployment history and its durable build job are created atomically.

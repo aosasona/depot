@@ -1,4 +1,5 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { Link } from "@tanstack/react-router";
 import {
   ApiError,
   createDeployment,
@@ -99,13 +100,21 @@ function DeploymentRow({
   const image = result && "image_id" in result ? result : undefined;
   return (
     <div className="deployment-row">
-      <span className={`deployment-status ${deployment.status}`}>
-        {deployment.active ? "active" : deployment.status}
-      </span>
-      <code>{deployment.commit_sha.slice(0, 12)}</code>
-      <span>{deployment.trigger_kind}</span>
-      {image && <code title={image.image_id}>{image.image_tag}</code>}
-      {deployment.host_port && <code>127.0.0.1:{deployment.host_port}</code>}
+      <Link
+        className="deployment-row-link"
+        to="/projects/$projectId/deployments/$deploymentId"
+        params={{ projectId, deploymentId: deployment.id }}
+        aria-label={`View logs for deployment ${deployment.commit_sha.slice(0, 12)}`}
+      >
+        <span className={`deployment-status ${deployment.status}`}>
+          {deployment.active ? "active" : deployment.status}
+        </span>
+        <code>{deployment.commit_sha.slice(0, 12)}</code>
+        <span>{deployment.trigger_kind}</span>
+        {image && <code title={image.image_id}>{image.image_tag}</code>}
+        {deployment.host_port && <code>127.0.0.1:{deployment.host_port}</code>}
+        <span className="deployment-log-link">View logs →</span>
+      </Link>
       {deployment.status === "succeeded" && !deployment.active && (
         <button
           className="text-action"

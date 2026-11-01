@@ -555,6 +555,10 @@ pub fn router_with_shell(
             get(list_domains).post(create_domain),
         )
         .route(
+            "/api/v1/domains/reconcile",
+            post(enqueue_domain_reconciliation),
+        )
+        .route(
             "/api/v1/domains/{domain_id}",
             axum::routing::delete(delete_domain),
         )
@@ -1541,6 +1545,23 @@ async fn delete_domain(
         .enqueue_domain_reconciliation(time::OffsetDateTime::now_utc().unix_timestamp())
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Requeues the complete desired-domain snapshot after authenticated operator action.
+async fn enqueue_domain_reconciliation(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<EnqueuedJobResponse>), ApiError> {
+    require_mutation(&state.store, &jar, &headers).await?;
+    let job = state
+        .store
+        .enqueue_domain_reconciliation(time::OffsetDateTime::now_utc().unix_timestamp())
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(EnqueuedJobResponse { job_id: job.id }),
+    ))
 }
 
 /// Validates and replaces project service settings after CSRF verification.
