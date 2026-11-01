@@ -48,14 +48,12 @@ export function ProjectsPanel({
   }
   return (
     <section className="projects-panel" aria-labelledby="projects-heading">
-      <div className="section-heading">
-        <div>
-          <p className="eyebrow">WORKSPACE / PROJECTS</p>
-          <h2 id="projects-heading">Projects</h2>
-        </div>
-        <span className="count-block">
-          {projects.data?.length ?? 0} PROJECTS
-        </span>
+      <h2 className="visually-hidden" id="projects-heading">
+        Projects
+      </h2>
+      <div className="project-list-toolbar">
+        <span>Repository-backed services</span>
+        <strong>{String(projects.data?.length ?? 0).padStart(2, "0")}</strong>
       </div>
       <GithubImportPanel />
       {projects.isPending && <p className="panel-message">Loading projects…</p>}
@@ -177,6 +175,9 @@ function ProjectWorkspace({
           {project.slug.slice(0, 2).toUpperCase()}
         </div>
         <div>
+          <span className="project-heading-kicker">
+            PROJECT / {project.slug}
+          </span>
           <h2 id="project-title">{project.name}</h2>
           <p>{project.repository_url}</p>
         </div>

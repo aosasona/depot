@@ -3,7 +3,7 @@ members = ["crates/depot", "crates/depot-api", "crates/depot-auth", "crates/depo
 resolver = "2"
 
 [workspace.package]
-version = "0.3.2"
+version = "0.3.3"
 edition = "2024"
 license = "AGPL-3.0-only"
 rust-version = "1.91"

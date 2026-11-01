@@ -4,6 +4,10 @@ const errorSchema = z.object({
   error: z.object({ code: z.string(), message: z.string() }),
 });
 const bootstrapStatusSchema = z.object({ initialized: z.boolean() });
+const readinessSchema = z.object({
+  status: z.literal("ready"),
+  database: z.literal("ready"),
+});
 const userSchema = z.object({
   id: z.string(),
   email: z.email(),
@@ -198,6 +202,11 @@ async function request<T>(
 /** Returns whether this instance has completed first-admin setup. */
 export function getBootstrapStatus() {
   return request("/api/v1/auth/bootstrap", bootstrapStatusSchema);
+}
+
+/** Verifies that the control plane and its database are ready for requests. */
+export function getSystemReadiness() {
+  return request("/api/v1/system/readiness", readinessSchema);
 }
 
 /** Consumes the operator token and creates the first local administrator. */

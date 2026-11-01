@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   ApiError,
   bootstrapAdmin,
+  getSystemReadiness,
   login,
   logout,
   type User,
@@ -298,6 +299,11 @@ function Dashboard({
   location: DashboardLocation;
 }) {
   const queryClient = useQueryClient();
+  const readiness = useQuery({
+    queryKey: ["system", "readiness"],
+    queryFn: getSystemReadiness,
+    refetchInterval: 30_000,
+  });
   const mutation = useMutation({
     mutationFn: logout,
     onSuccess: () =>
@@ -307,16 +313,16 @@ function Dashboard({
     <main className="app-shell">
       <aside className="app-sidebar">
         <div className="sidebar-brand">
-          <span className="brand-mark">D</span>
-          <span className="brand-word">Depot</span>
+          <span className="brand-word">depot_</span>
         </div>
         <div className="workspace-switcher">
-          <span className="workspace-avatar">P</span>
           <span>
+            <small>Workspace</small>
             <strong>Personal workspace</strong>
-            <small>Self-hosted</small>
           </span>
+          <i aria-hidden="true" />
         </div>
+        <span className="nav-section-label">Control plane</span>
         <nav className="app-navigation" aria-label="Workspace">
           <Link
             className={
@@ -348,9 +354,15 @@ function Dashboard({
         </nav>
         <div className="sidebar-footer">
           <span className="system-state">
-            <i aria-hidden="true" /> All systems operational
+            <i
+              className={readiness.isSuccess ? "ready" : undefined}
+              aria-hidden="true"
+            />
+            {readiness.isSuccess
+              ? "Control plane ready"
+              : "Checking control plane"}
           </span>
-          <span className="sidebar-version">Depot v0.3.2</span>
+          <span className="sidebar-version">Depot v0.3.3</span>
         </div>
       </aside>
       <div className="app-workspace">
@@ -392,16 +404,22 @@ function Dashboard({
               <div>
                 <p className="eyebrow">
                   {location.kind === "projects"
-                    ? "Deployments"
+                    ? "// Deployments"
                     : location.kind === "team"
-                      ? "Access"
-                      : "Architecture"}
+                      ? "// Access"
+                      : "// Architecture"}
                 </p>
                 <h1>{pageTitle(location)}</h1>
                 <p>{pageDescription(location)}</p>
               </div>
               <span className="control-plane-status">
-                <i aria-hidden="true" /> Control plane online
+                <i
+                  className={readiness.isSuccess ? "ready" : undefined}
+                  aria-hidden="true"
+                />
+                {readiness.isSuccess
+                  ? "Control plane ready"
+                  : "Status unavailable"}
               </span>
             </section>
           )}
