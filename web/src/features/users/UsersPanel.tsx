@@ -27,6 +27,9 @@ const createUserSchema = z.object({
 export function UsersPanel() {
   const users = useQuery({ queryKey: ["users"], queryFn: listUsers });
   const queryClient = useQueryClient();
+  const activeAdminCount =
+    users.data?.filter((user) => user.active && user.role === "admin").length ??
+    0;
   const mutation = useMutation({
     mutationFn: updateUser,
     onSuccess: () => queryClient.invalidateQueries({ queryKey: ["users"] }),
@@ -43,25 +46,38 @@ export function UsersPanel() {
       {
         id: "actions",
         header: "Action",
-        cell: ({ row }) => (
-          <button
-            className="table-action"
-            type="button"
-            disabled={mutation.isPending}
-            onClick={() =>
-              mutation.mutate({
-                id: row.original.id,
-                role: row.original.role,
-                active: !row.original.active,
-              })
-            }
-          >
-            {row.original.active ? "Disable" : "Enable"}
-          </button>
-        ),
+        cell: ({ row }) => {
+          const isOnlyActiveAdmin =
+            row.original.active &&
+            row.original.role === "admin" &&
+            activeAdminCount === 1;
+          return isOnlyActiveAdmin ? (
+            <span
+              className="protected-user-label"
+              title="Add or enable another administrator before disabling this account."
+            >
+              Required admin
+            </span>
+          ) : (
+            <button
+              className="table-action"
+              type="button"
+              disabled={mutation.isPending}
+              onClick={() =>
+                mutation.mutate({
+                  id: row.original.id,
+                  role: row.original.role,
+                  active: !row.original.active,
+                })
+              }
+            >
+              {row.original.active ? "Disable" : "Enable"}
+            </button>
+          );
+        },
       },
     ],
-    [mutation],
+    [activeAdminCount, mutation],
   );
   const table = useTable({
     features: coreFeatures,
@@ -79,6 +95,9 @@ export function UsersPanel() {
         <span className="count-block">{users.data?.length ?? 0} ACCOUNTS</span>
       </div>
       <CreateUserForm />
+      <p className="user-safety-note">
+        Depot always requires at least one active administrator.
+      </p>
       {users.isError && (
         <p className="notice danger">User data is unavailable.</p>
       )}

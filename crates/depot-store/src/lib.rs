@@ -2848,6 +2848,12 @@ mod tests {
             .await
             .expect("admin is created");
         let error = store
+            .update_user(&admin_id, UserRole::Admin, false, &admin_id, 155)
+            .await
+            .expect_err("last admin cannot be disabled");
+        assert!(matches!(error, StoreError::LastActiveAdmin));
+
+        let error = store
             .update_user(&admin_id, UserRole::Member, true, &admin_id, 160)
             .await
             .expect_err("last admin is protected");

@@ -2890,7 +2890,7 @@ impl IntoResponse for ApiError {
             | Self::Auth(AuthError::Store(StoreError::LastActiveAdmin)) => (
                 StatusCode::CONFLICT,
                 "last_active_admin",
-                "The last active administrator cannot be changed.",
+                "Add or enable another administrator before disabling or demoting this account.",
             ),
             Self::Store(StoreError::UserNotFound)
             | Self::Auth(AuthError::Store(StoreError::UserNotFound)) => (
