@@ -2312,6 +2312,7 @@ td {
 .project-tabs {
   display: flex;
   overflow-x: auto;
+  overflow-y: hidden;
   gap: 1.6rem;
   border-bottom: 1px solid var(--border);
 }
@@ -2370,7 +2371,7 @@ td {
 .project-tabs a.active::after {
   position: absolute;
   right: 0;
-  bottom: -1px;
+  bottom: 0;
   left: 0;
   height: 2px;
   background: var(--accent);
