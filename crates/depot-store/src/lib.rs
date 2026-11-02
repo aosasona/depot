@@ -1317,6 +1317,8 @@ impl Store {
         &self,
         user_id: &str,
         password_hash: &str,
+        actor_user_id: Option<&str>,
+        action: &str,
         now_unix: i64,
     ) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin().await?;
@@ -1336,14 +1338,7 @@ impl Store {
             .bind(user_id)
             .execute(&mut *transaction)
             .await?;
-        insert_user_audit(
-            &mut transaction,
-            user_id,
-            "user.password_change",
-            user_id,
-            now_unix,
-        )
-        .await?;
+        insert_user_audit(&mut transaction, actor_user_id, action, user_id, now_unix).await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -1394,7 +1389,7 @@ impl Store {
         .await?;
         insert_user_audit(
             &mut transaction,
-            input.actor_user_id,
+            Some(input.actor_user_id),
             "user.create",
             &id,
             input.now_unix,
@@ -1455,7 +1450,7 @@ impl Store {
         }
         insert_user_audit(
             &mut transaction,
-            actor_user_id,
+            Some(actor_user_id),
             "user.update",
             user_id,
             now_unix,
@@ -2570,7 +2565,7 @@ async fn ensure_uninitialized(transaction: &mut Transaction<'_, Sqlite>) -> Resu
 /// Appends a user-management audit event inside the caller's transaction.
 async fn insert_user_audit(
     transaction: &mut Transaction<'_, Sqlite>,
-    actor_user_id: &str,
+    actor_user_id: Option<&str>,
     action: &str,
     target_user_id: &str,
     now_unix: i64,

@@ -304,6 +304,32 @@ pub async fn change_password(
         .update_user_password(
             &user.id,
             &password_hash,
+            Some(&user.id),
+            "user.password_change",
+            OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Replaces a selected local password from the trusted server console.
+pub async fn recover_password(
+    store: &Store,
+    user_id: &str,
+    new_password: String,
+) -> Result<(), AuthError> {
+    if new_password.chars().count() < MINIMUM_PASSWORD_LENGTH {
+        return Err(AuthError::WeakPassword);
+    }
+    let password_hash = tokio::task::spawn_blocking(move || hash_password(&new_password))
+        .await
+        .map_err(|_| AuthError::PasswordHash)??;
+    store
+        .update_user_password(
+            user_id,
+            &password_hash,
+            None,
+            "user.password_recovery",
             OffsetDateTime::now_utc().unix_timestamp(),
         )
         .await?;

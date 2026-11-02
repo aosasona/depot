@@ -39,6 +39,7 @@ reqwest = { version = "0.13.5", default-features = false, features = [
 	"rustls",
 ] }
 rust-embed = "8.13.0"
+rpassword = "7.5.4"
 serde = { version = "1.0.228", features = ["derive"] }
 sha2 = "0.11.1"
 sqlx = { version = "0.8.6", default-features = false, features = [

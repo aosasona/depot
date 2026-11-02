@@ -87,6 +87,12 @@ enum Command {
         #[arg(long, env = "DEPOT_CONFIG")]
         config: Option<PathBuf>,
     },
+    /// Interactively resets one local user's password from the trusted server console.
+    ResetPassword {
+        /// TOML configuration path; local development defaults apply when omitted.
+        #[arg(long, env = "DEPOT_CONFIG")]
+        config: Option<PathBuf>,
+    },
     /// Validates a configuration file without opening the database or binding a port.
     ValidateConfig {
         #[arg(long, env = "DEPOT_CONFIG")]
@@ -173,6 +179,14 @@ enum AppError {
     Dependency(String),
     #[error("worker shell broker failed: {0}")]
     ShellBroker(#[source] std::io::Error),
+    #[error("interactive password recovery failed: {0}")]
+    Interactive(#[source] std::io::Error),
+    #[error("there are no local users to recover")]
+    NoUsers,
+    #[error("select a user by entering one of the displayed numbers")]
+    InvalidUserSelection,
+    #[error("the new passwords do not match")]
+    PasswordMismatch,
 }
 
 /// Parses the command line and runs the selected Depot process mode.
@@ -203,6 +217,7 @@ async fn main() -> Result<(), AppError> {
         Command::Serve { config } => serve(load_config(config.as_deref())?).await,
         Command::Migrate { config } => migrate(load_config(config.as_deref())?).await,
         Command::Doctor { config } => doctor(load_config(config.as_deref())?).await,
+        Command::ResetPassword { config } => reset_password(load_config(config.as_deref())?).await,
         Command::ValidateConfig { config } => {
             Config::load(&config)?;
             println!("Configuration is valid.");
@@ -215,6 +230,56 @@ async fn main() -> Result<(), AppError> {
             check,
         } => caddy_agent(&config, domains_file.as_deref(), check).await,
     }
+}
+
+/// Selects one local account and rotates its password without echoing either entry.
+async fn reset_password(config: Config) -> Result<(), AppError> {
+    use std::io::Write;
+
+    let store = Store::connect(&config.database.url).await?;
+    let users = store.list_users().await?;
+    if users.is_empty() {
+        return Err(AppError::NoUsers);
+    }
+    println!("Select the account to recover:");
+    for (index, user) in users.iter().enumerate() {
+        let status = if user.active { "active" } else { "disabled" };
+        println!(
+            "  {}) {} ({}, {status})",
+            index + 1,
+            user.email,
+            user.role.as_str()
+        );
+    }
+    print!("User [1-{}]: ", users.len());
+    std::io::stdout().flush().map_err(AppError::Interactive)?;
+    let mut selection = String::new();
+    std::io::stdin()
+        .read_line(&mut selection)
+        .map_err(AppError::Interactive)?;
+    let selected =
+        parse_user_selection(&selection, users.len()).ok_or(AppError::InvalidUserSelection)?;
+    println!("Passwords must contain at least 12 characters.");
+    let password = rpassword::prompt_password("New password: ").map_err(AppError::Interactive)?;
+    let confirmation =
+        rpassword::prompt_password("Confirm new password: ").map_err(AppError::Interactive)?;
+    if password != confirmation {
+        return Err(AppError::PasswordMismatch);
+    }
+    depot_auth::recover_password(&store, &users[selected].id, password).await?;
+    println!(
+        "Password reset for {}. All existing sessions were revoked.",
+        users[selected].email
+    );
+    Ok(())
+}
+
+/// Parses a one-based menu selection without accepting signs or trailing input.
+fn parse_user_selection(input: &str, user_count: usize) -> Option<usize> {
+    let selected = input.trim().parse::<usize>().ok()?;
+    selected
+        .checked_sub(1)
+        .filter(|zero_based| *zero_based < user_count)
 }
 
 /// Creates a mode-0600 master key file and refuses to replace existing material.
@@ -1776,9 +1841,18 @@ mod tests {
     use axum::http::{HeaderMap, HeaderValue, StatusCode, Uri, header};
 
     use super::{
-        content_type, managed_not_found_response, parse_file_entries, request_hostname,
-        serve_static_release,
+        content_type, managed_not_found_response, parse_file_entries, parse_user_selection,
+        request_hostname, serve_static_release,
     };
+
+    /// Keeps recovery selection deliberately one-based and bounded to listed users.
+    #[test]
+    fn password_recovery_user_selection_is_bounded() {
+        assert_eq!(parse_user_selection(" 2\n", 3), Some(1));
+        assert_eq!(parse_user_selection("0", 3), None);
+        assert_eq!(parse_user_selection("4", 3), None);
+        assert_eq!(parse_user_selection("1 extra", 3), None);
+    }
 
     /// Keeps missing managed deployments distinct from the operator dashboard SPA.
     #[test]

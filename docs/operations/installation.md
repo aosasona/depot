@@ -111,6 +111,14 @@ sudo -u depot /usr/local/bin/depot setup \
 Start the services only after reviewing the private bind address, public origin,
 data paths, and Caddy-agent token:
 
+If a local user cannot sign in, recover the account directly from the trusted
+Depot VM. The command lists users and prompts twice without echoing the new
+password; it also revokes every existing session for the selected account:
+
+```sh
+sudo -u depot /usr/local/bin/depot reset-password --config /etc/depot/config.toml
+```
+
 ```sh
 sudo systemctl enable --now depot.service depot-worker.service
 sudo systemctl status depot.service depot-worker.service

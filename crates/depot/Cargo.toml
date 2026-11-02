@@ -22,6 +22,7 @@ hyper.workspace = true
 hyper-util.workspace = true
 mime_guess.workspace = true
 rust-embed.workspace = true
+rpassword.workspace = true
 serde.workspace = true
 serde_json = "1.0.154"
 thiserror.workspace = true
