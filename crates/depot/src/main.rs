@@ -1394,6 +1394,14 @@ fn init_tracing() {
     tracing_subscriber::fmt().with_env_filter(filter).init();
 }
 
+/// /// Lightweight gateway liveness check.
+///
+/// Intentionally independent of hostname routing and authentication.
+/// Confirms that the Depot HTTP server is accepting requests.
+async fn gateway_health() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
 /// Runs the initial combined API and embedded frontend HTTP listener.
 async fn serve(config: Config) -> Result<(), AppError> {
     let store = Store::connect(&config.database.url).await?;
@@ -1419,6 +1427,7 @@ async fn serve(config: Config) -> Result<(), AppError> {
 
     // This router ONLY handles Depot's management API and dashboard.
     let management_router = Router::new()
+        .route("/healthz", get(gateway_health))
         .route("/api/v1/system/health", get(system_health))
         .merge(depot_api::router_with_shell_and_domains(
             store.clone(),
@@ -1444,6 +1453,11 @@ async fn serve(config: Config) -> Result<(), AppError> {
             let dashboard = dashboard_hostname.clone();
 
             async move {
+                // Health checks must work without a hostname, so they are handled before routing.
+                if request.uri().path() == "/healthz" {
+                    return next.run(request).await;
+                }
+
                 let Some(hostname) = request_hostname(request.headers()) else {
                     return StatusCode::BAD_REQUEST.into_response();
                 };

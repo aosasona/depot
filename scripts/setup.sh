@@ -539,7 +539,7 @@ verify_caddy_agent_peer() {
 verify_gateway_peer() {
     address=$(toml_value /etc/depot/caddy-agent.toml "" gateway_upstream)
     curl --fail --silent --show-error --connect-timeout 5 --max-time 10 \
-        "http://$address/api/v1/system/health" >/dev/null || {
+        "http://$address/healthz" >/dev/null || {
         warn "The Depot gateway is not reachable at $address. Check DNS/IP, firewall, port, and Depot service."
         return 1
     }
