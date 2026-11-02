@@ -9,6 +9,7 @@ use axum::{
     Json, Router,
     body::Body,
     http::{HeaderMap, Request, StatusCode, Uri, header},
+    middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
 };
@@ -1406,26 +1407,58 @@ async fn serve(config: Config) -> Result<(), AppError> {
         public_origin: Arc::from(config.security.public_origin.clone()),
         signing_key: Arc::new(shell_key),
     };
-    let gateway_store = store.clone();
+
     let dashboard_hostname = config
         .security
         .public_origin
         .parse::<Uri>()
         .ok()
         .and_then(|origin| origin.host().map(str::to_ascii_lowercase))
-        .map(Arc::<str>::from);
-    let app = Router::new()
+        .map(Arc::<str>::from)
+        .expect("Depot public_origin must contain a hostname");
+
+    // This router ONLY handles Depot's management API and dashboard.
+    let management_router = Router::new()
         .route("/api/v1/system/health", get(system_health))
         .merge(depot_api::router_with_shell_and_domains(
             store.clone(),
-            Some(secrets),
-            github,
-            Some(shell),
+            Some(secrets.clone()),
+            github.clone(),
+            Some(shell.clone()),
             config.domains.default_suffix.clone(),
         ))
-        .fallback(move |request| {
-            gateway_or_spa(gateway_store.clone(), dashboard_hostname.clone(), request)
+        .fallback(|request: Request<Body>| async move {
+            if request.uri().path().starts_with("/api/") {
+                return StatusCode::NOT_FOUND.into_response();
+            }
+
+            serve_spa(request.uri()).await
         });
+
+    // Run hostname routing BEFORE Depot's API routes can match.
+    let gateway_store = store.clone();
+
+    let app = management_router.layer(middleware::from_fn(
+        move |request: Request<Body>, next: Next| {
+            let store = gateway_store.clone();
+            let dashboard = dashboard_hostname.clone();
+
+            async move {
+                let Some(hostname) = request_hostname(request.headers()) else {
+                    return StatusCode::BAD_REQUEST.into_response();
+                };
+
+                if hostname == dashboard.as_ref() {
+                    // Depot's own hostname: use the management router.
+                    return next.run(request).await;
+                }
+
+                // Application hostname: bypass Depot's API entirely.
+                gateway_or_spa(store, request).await
+            }
+        },
+    ));
+
     let listener = TcpListener::bind(config.server.bind)
         .await
         .map_err(AppError::Bind)?;
@@ -1494,39 +1527,36 @@ async fn system_health() -> Json<HealthResponse> {
     })
 }
 
-/// Routes exact project hostnames to healthy loopback runtimes, otherwise serves Depot's SPA.
-async fn gateway_or_spa(
-    store: Store,
-    dashboard_hostname: Option<Arc<str>>,
-    request: Request<Body>,
-) -> Response {
-    if request.uri().path().starts_with("/api/") {
-        return StatusCode::NOT_FOUND.into_response();
-    }
-    let hostname = request_hostname(request.headers());
-    if let Some(hostname) = hostname {
-        match store.gateway_target(&hostname).await {
-            Ok(Some(depot_store::GatewayTarget::Service { host_port, .. })) => {
-                return proxy_to_runtime(request, host_port).await;
-            }
-            Ok(Some(depot_store::GatewayTarget::Static { release_path, .. })) => {
-                return serve_static_release(request.uri(), Path::new(&release_path)).await;
-            }
-            Ok(None)
-                if dashboard_hostname
-                    .as_deref()
-                    .is_some_and(|dashboard| hostname != dashboard) =>
-            {
-                return managed_not_found_response();
-            }
-            Ok(None) => {}
-            Err(error) => {
-                tracing::error!(%error, "gateway target lookup failed");
-                return StatusCode::SERVICE_UNAVAILABLE.into_response();
-            }
+/// Routes an application request to its deployed service or static release.
+///
+/// This is called only for non-dashboard hostnames, so application
+/// paths can never conflict with Depot's management API.
+async fn gateway_or_spa(store: Store, request: Request<Body>) -> Response {
+    let Some(hostname) = request_hostname(request.headers()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+
+    match store.gateway_target(&hostname).await {
+        Ok(Some(depot_store::GatewayTarget::Service { host_port, .. })) => {
+            proxy_to_runtime(request, host_port).await
+        }
+
+        Ok(Some(depot_store::GatewayTarget::Static { release_path, .. })) => {
+            serve_static_release(request.uri(), Path::new(&release_path)).await
+        }
+
+        Ok(None) => managed_not_found_response(),
+
+        Err(error) => {
+            tracing::error!(
+                %hostname,
+                %error,
+                "gateway target lookup failed"
+            );
+
+            StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }
-    serve_spa(request.uri()).await
 }
 
 /// Serves a safe branded response when a routed application hostname has no live target.
