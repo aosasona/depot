@@ -76,6 +76,15 @@ pub struct NewSession<'a> {
     pub now_unix: i64,
 }
 
+/// Encrypted authenticator state loaded only inside the trusted API boundary.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UserTwoFactor {
+    pub secret_ciphertext: Vec<u8>,
+    pub secret_nonce: Vec<u8>,
+    pub enabled: bool,
+    pub recovery_codes_remaining: i64,
+}
+
 /// Non-secret user fields returned by administration queries.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct UserSummary {
@@ -436,6 +445,10 @@ pub enum StoreError {
     LastActiveAdmin,
     #[error("the requested user does not exist")]
     UserNotFound,
+    #[error("two-factor authentication is not configured for this user")]
+    TwoFactorNotConfigured,
+    #[error("two-factor authentication is already enabled for this user")]
+    TwoFactorAlreadyEnabled,
     #[error("a project with that slug already exists")]
     ProjectSlugAlreadyExists,
     #[error("the requested project does not exist")]
@@ -1339,6 +1352,198 @@ impl Store {
             .execute(&mut *transaction)
             .await?;
         insert_user_audit(&mut transaction, actor_user_id, action, user_id, now_unix).await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Loads encrypted two-factor state without ever exposing its plaintext secret.
+    pub async fn user_two_factor(
+        &self,
+        user_id: &str,
+    ) -> Result<Option<UserTwoFactor>, StoreError> {
+        let row = sqlx::query(
+            "SELECT secret_ciphertext, secret_nonce, enabled_at,
+                    (SELECT COUNT(*) FROM user_two_factor_recovery_codes codes
+                     WHERE codes.user_id = user_two_factor.user_id AND used_at IS NULL)
+                        AS recovery_codes_remaining
+             FROM user_two_factor WHERE user_id = ?",
+        )
+        .bind(user_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(UserTwoFactor {
+                secret_ciphertext: row.try_get("secret_ciphertext")?,
+                secret_nonce: row.try_get("secret_nonce")?,
+                enabled: row.try_get::<Option<i64>, _>("enabled_at")?.is_some(),
+                recovery_codes_remaining: row.try_get("recovery_codes_remaining")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Replaces any unfinished enrollment with a freshly encrypted TOTP secret.
+    pub async fn begin_two_factor_enrollment(
+        &self,
+        user_id: &str,
+        secret_ciphertext: &[u8],
+        secret_nonce: &[u8],
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let user_exists =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM users WHERE id = ? AND active = 1")
+                .bind(user_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if user_exists != 1 {
+            return Err(StoreError::UserNotFound);
+        }
+        let upserted = sqlx::query(
+            "INSERT INTO user_two_factor
+             (user_id, secret_ciphertext, secret_nonce, enabled_at, created_at, updated_at)
+             VALUES (?, ?, ?, NULL, ?, ?)
+             ON CONFLICT(user_id) DO UPDATE SET
+                secret_ciphertext = excluded.secret_ciphertext,
+                secret_nonce = excluded.secret_nonce,
+                enabled_at = NULL,
+                updated_at = excluded.updated_at
+             WHERE user_two_factor.enabled_at IS NULL",
+        )
+        .bind(user_id)
+        .bind(secret_ciphertext)
+        .bind(secret_nonce)
+        .bind(now_unix)
+        .bind(now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        if upserted.rows_affected() != 1 {
+            return Err(StoreError::TwoFactorAlreadyEnabled);
+        }
+        sqlx::query("DELETE FROM user_two_factor_recovery_codes WHERE user_id = ?")
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await?;
+        insert_user_audit(
+            &mut transaction,
+            Some(user_id),
+            "user.two_factor_enrollment_started",
+            user_id,
+            now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Enables a confirmed TOTP enrollment and persists only recovery-code digests.
+    pub async fn confirm_two_factor_enrollment(
+        &self,
+        user_id: &str,
+        recovery_code_hashes: &[[u8; 32]],
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let updated = sqlx::query(
+            "UPDATE user_two_factor SET enabled_at = ?, updated_at = ?
+             WHERE user_id = ? AND enabled_at IS NULL",
+        )
+        .bind(now_unix)
+        .bind(now_unix)
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::TwoFactorNotConfigured);
+        }
+        replace_recovery_code_hashes(&mut transaction, user_id, recovery_code_hashes, now_unix)
+            .await?;
+        insert_user_audit(
+            &mut transaction,
+            Some(user_id),
+            "user.two_factor_enabled",
+            user_id,
+            now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Atomically consumes one matching recovery code so it cannot be replayed.
+    pub async fn consume_two_factor_recovery_code(
+        &self,
+        user_id: &str,
+        code_hash: &[u8; 32],
+        now_unix: i64,
+    ) -> Result<bool, StoreError> {
+        let result = sqlx::query(
+            "UPDATE user_two_factor_recovery_codes SET used_at = ?
+             WHERE user_id = ? AND code_hash = ? AND used_at IS NULL",
+        )
+        .bind(now_unix)
+        .bind(user_id)
+        .bind(code_hash.as_slice())
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Replaces all recovery codes after a fresh second-factor verification.
+    pub async fn replace_two_factor_recovery_codes(
+        &self,
+        user_id: &str,
+        recovery_code_hashes: &[[u8; 32]],
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let configured = sqlx::query_scalar::<_, i64>(
+            "SELECT COUNT(*) FROM user_two_factor WHERE user_id = ? AND enabled_at IS NOT NULL",
+        )
+        .bind(user_id)
+        .fetch_one(&mut *transaction)
+        .await?;
+        if configured != 1 {
+            return Err(StoreError::TwoFactorNotConfigured);
+        }
+        replace_recovery_code_hashes(&mut transaction, user_id, recovery_code_hashes, now_unix)
+            .await?;
+        insert_user_audit(
+            &mut transaction,
+            Some(user_id),
+            "user.two_factor_recovery_codes_replaced",
+            user_id,
+            now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
+    /// Removes second-factor material and revokes every session for the account.
+    pub async fn disable_two_factor(&self, user_id: &str, now_unix: i64) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let deleted =
+            sqlx::query("DELETE FROM user_two_factor WHERE user_id = ? AND enabled_at IS NOT NULL")
+                .bind(user_id)
+                .execute(&mut *transaction)
+                .await?;
+        if deleted.rows_affected() != 1 {
+            return Err(StoreError::TwoFactorNotConfigured);
+        }
+        sqlx::query("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+            .bind(now_unix)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await?;
+        insert_user_audit(
+            &mut transaction,
+            Some(user_id),
+            "user.two_factor_disabled",
+            user_id,
+            now_unix,
+        )
+        .await?;
         transaction.commit().await?;
         Ok(())
     }
@@ -2562,6 +2767,31 @@ async fn ensure_uninitialized(transaction: &mut Transaction<'_, Sqlite>) -> Resu
     Ok(())
 }
 
+/// Replaces recovery-code digests inside an existing two-factor transaction.
+async fn replace_recovery_code_hashes(
+    transaction: &mut Transaction<'_, Sqlite>,
+    user_id: &str,
+    recovery_code_hashes: &[[u8; 32]],
+    now_unix: i64,
+) -> Result<(), StoreError> {
+    sqlx::query("DELETE FROM user_two_factor_recovery_codes WHERE user_id = ?")
+        .bind(user_id)
+        .execute(&mut **transaction)
+        .await?;
+    for code_hash in recovery_code_hashes {
+        sqlx::query(
+            "INSERT INTO user_two_factor_recovery_codes
+             (user_id, code_hash, created_at) VALUES (?, ?, ?)",
+        )
+        .bind(user_id)
+        .bind(code_hash.as_slice())
+        .bind(now_unix)
+        .execute(&mut **transaction)
+        .await?;
+    }
+    Ok(())
+}
+
 /// Appends a user-management audit event inside the caller's transaction.
 async fn insert_user_audit(
     transaction: &mut Transaction<'_, Sqlite>,
@@ -2874,6 +3104,63 @@ mod tests {
             .await
             .expect("admin can be demoted when another remains");
         assert_eq!(updated.role, UserRole::Member);
+    }
+
+    /// Proves 2FA confirmation and recovery-code consumption remain atomic and one-time.
+    #[tokio::test]
+    async fn two_factor_recovery_codes_are_single_use() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let nonce = [7_u8; 24];
+        store
+            .begin_two_factor_enrollment(&admin_id, b"ciphertext", &nonce, 200)
+            .await
+            .expect("enrollment starts");
+        let pending = store
+            .user_two_factor(&admin_id)
+            .await
+            .expect("state loads")
+            .expect("state exists");
+        assert!(!pending.enabled);
+
+        let codes = [[1_u8; 32], [2_u8; 32]];
+        store
+            .confirm_two_factor_enrollment(&admin_id, &codes, 210)
+            .await
+            .expect("enrollment confirms");
+        let enabled = store
+            .user_two_factor(&admin_id)
+            .await
+            .expect("state loads")
+            .expect("state exists");
+        assert!(enabled.enabled);
+        assert_eq!(enabled.recovery_codes_remaining, 2);
+        let error = store
+            .begin_two_factor_enrollment(&admin_id, b"replacement", &nonce, 215)
+            .await
+            .expect_err("enabled enrollment cannot be overwritten");
+        assert!(matches!(error, StoreError::TwoFactorAlreadyEnabled));
+        assert!(
+            store
+                .consume_two_factor_recovery_code(&admin_id, &codes[0], 220)
+                .await
+                .expect("code consumes")
+        );
+        assert!(
+            !store
+                .consume_two_factor_recovery_code(&admin_id, &codes[0], 221)
+                .await
+                .expect("replay is checked")
+        );
+        assert_eq!(
+            store
+                .user_two_factor(&admin_id)
+                .await
+                .expect("state loads")
+                .expect("state exists")
+                .recovery_codes_remaining,
+            1
+        );
     }
 
     /// Proves every project receives defaults and configuration updates round-trip.

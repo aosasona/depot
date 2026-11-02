@@ -119,6 +119,11 @@ password; it also revokes every existing session for the selected account:
 sudo -u depot /usr/local/bin/depot reset-password --config /etc/depot/config.toml
 ```
 
+If the account also lost its authenticator and recovery codes, answer yes when
+the recovery command offers to disable two-factor authentication. For scripted
+console recovery, pass `--disable-two-factor`; this still requires local access
+as the restricted `depot` operating-system account.
+
 ```sh
 sudo systemctl enable --now depot.service depot-worker.service
 sudo systemctl status depot.service depot-worker.service

@@ -12,6 +12,7 @@ use sha2::{Digest, Sha256};
 use subtle::ConstantTimeEq;
 use thiserror::Error;
 use time::{Duration, OffsetDateTime};
+use totp_rs::{Builder as TotpBuilder, Secret};
 
 const BOOTSTRAP_TOKEN_BYTES: usize = 32;
 const PASSWORD_SALT_BYTES: usize = 16;
@@ -19,6 +20,8 @@ const MINIMUM_PASSWORD_LENGTH: usize = 12;
 const SESSION_TOKEN_BYTES: usize = 32;
 const CSRF_TOKEN_BYTES: usize = 32;
 const DEPLOY_TOKEN_BYTES: usize = 32;
+const RECOVERY_CODE_BYTES: usize = 8;
+const RECOVERY_CODE_COUNT: usize = 10;
 
 /// A newly issued plaintext bootstrap token shown once to the operator.
 #[derive(Debug)]
@@ -43,6 +46,13 @@ pub struct IssuedDeployToken {
     pub metadata: DeployToken,
 }
 
+/// One freshly generated authenticator enrollment returned only before confirmation.
+pub struct TwoFactorEnrollment {
+    pub secret_base32: String,
+    pub otpauth_uri: String,
+    pub qr_base64: String,
+}
+
 /// Authentication failures safe for callers to classify without leaking secrets.
 #[derive(Debug, Error)]
 pub enum AuthError {
@@ -54,6 +64,10 @@ pub enum AuthError {
     PasswordHash,
     #[error("email or password is incorrect")]
     InvalidCredentials,
+    #[error("the authenticator or recovery code is invalid")]
+    InvalidSecondFactor,
+    #[error("two-factor authentication could not be configured")]
+    TwoFactorConfiguration,
     #[error("the session is invalid or expired")]
     InvalidSession,
     #[error("the CSRF token is invalid")]
@@ -181,6 +195,16 @@ pub async fn login(
     password: String,
     lifetime: Duration,
 ) -> Result<IssuedSession, AuthError> {
+    let user = verify_credentials(store, email, password).await?;
+    issue_session(store, user, lifetime).await
+}
+
+/// Verifies a local password without issuing a session before second-factor checks.
+pub async fn verify_credentials(
+    store: &Store,
+    email: &str,
+    password: String,
+) -> Result<SessionUser, AuthError> {
     let email = normalize_email(email)?;
     let candidate = store.auth_user_by_email(&email).await?;
     let verification_hash = candidate.as_ref().map(|user| user.password_hash.clone());
@@ -197,6 +221,19 @@ pub async fn login(
         .filter(|_| password_matches)
         .ok_or(AuthError::InvalidCredentials)?;
 
+    Ok(SessionUser {
+        id: user.id,
+        email: user.email,
+        role: user.role,
+    })
+}
+
+/// Creates an opaque session only after every required authentication factor succeeds.
+pub async fn issue_session(
+    store: &Store,
+    user: SessionUser,
+    lifetime: Duration,
+) -> Result<IssuedSession, AuthError> {
     let now = OffsetDateTime::now_utc();
     let expires_at = now + lifetime;
     let token = encode_hex(&rand::random::<[u8; SESSION_TOKEN_BYTES]>());
@@ -216,11 +253,7 @@ pub async fn login(
         token,
         csrf_token,
         expires_at,
-        user: SessionUser {
-            id: user.id,
-            email: user.email,
-            role: user.role,
-        },
+        user,
     })
 }
 
@@ -280,6 +313,28 @@ pub async fn change_password(
     if new_password.chars().count() < MINIMUM_PASSWORD_LENGTH {
         return Err(AuthError::WeakPassword);
     }
+    verify_user_password(store, user, current_password).await?;
+    let password_hash = tokio::task::spawn_blocking(move || hash_password(&new_password))
+        .await
+        .map_err(|_| AuthError::PasswordHash)??;
+    store
+        .update_user_password(
+            &user.id,
+            &password_hash,
+            Some(&user.id),
+            "user.password_change",
+            OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(())
+}
+
+/// Reauthenticates an active session user before a sensitive account mutation.
+pub async fn verify_user_password(
+    store: &Store,
+    user: &SessionUser,
+    current_password: String,
+) -> Result<(), AuthError> {
     let candidate = store.auth_user_by_email(&user.email).await?;
     let verification_hash = candidate
         .as_ref()
@@ -297,19 +352,72 @@ pub async fn change_password(
     if !password_matches {
         return Err(AuthError::InvalidCredentials);
     }
-    let password_hash = tokio::task::spawn_blocking(move || hash_password(&new_password))
-        .await
-        .map_err(|_| AuthError::PasswordHash)??;
-    store
-        .update_user_password(
-            &user.id,
-            &password_hash,
-            Some(&user.id),
-            "user.password_change",
-            OffsetDateTime::now_utc().unix_timestamp(),
-        )
-        .await?;
     Ok(())
+}
+
+/// Generates an RFC-compatible SHA-1 TOTP secret and authenticator QR payload.
+pub fn generate_two_factor_enrollment(email: &str) -> Result<TwoFactorEnrollment, AuthError> {
+    let secret = Secret::generate();
+    let totp = TotpBuilder::new()
+        .with_secret(secret.clone())
+        .with_account_name(email)
+        .with_issuer(Some("Depot"))
+        .build()
+        .map_err(|_| AuthError::TwoFactorConfiguration)?;
+    Ok(TwoFactorEnrollment {
+        secret_base32: secret.to_base32(),
+        otpauth_uri: totp
+            .to_url()
+            .map_err(|_| AuthError::TwoFactorConfiguration)?,
+        qr_base64: totp
+            .to_qr_base64()
+            .map_err(|_| AuthError::TwoFactorConfiguration)?,
+    })
+}
+
+/// Checks a six-digit TOTP with one 30-second step of clock skew.
+pub fn verify_totp(secret: &[u8], code: &str, now_unix: i64) -> Option<u64> {
+    let Ok(timestamp) = u64::try_from(now_unix) else {
+        return None;
+    };
+    TotpBuilder::new()
+        .with_secret(secret)
+        .build()
+        .ok()
+        .and_then(|totp| totp.check(code.trim(), timestamp))
+}
+
+/// Decodes a stored Base32 TOTP secret after authenticated decryption.
+pub fn decode_two_factor_secret(encoded: &str) -> Result<Vec<u8>, AuthError> {
+    Secret::try_from_base32(encoded)
+        .map(|secret| secret.as_bytes().to_vec())
+        .map_err(|_| AuthError::TwoFactorConfiguration)
+}
+
+/// Generates high-entropy single-use recovery codes for one-time display.
+pub fn generate_recovery_codes() -> Vec<String> {
+    (0..RECOVERY_CODE_COUNT)
+        .map(|_| {
+            let encoded = encode_hex(&rand::random::<[u8; RECOVERY_CODE_BYTES]>());
+            format!(
+                "{}-{}-{}-{}",
+                &encoded[0..4],
+                &encoded[4..8],
+                &encoded[8..12],
+                &encoded[12..16]
+            )
+        })
+        .collect()
+}
+
+/// Hashes a normalized recovery code for constant-size durable storage.
+pub fn hash_recovery_code(code: &str) -> [u8; 32] {
+    let normalized = code
+        .chars()
+        .filter(|character| !character.is_ascii_whitespace() && *character != '-')
+        .flat_map(char::to_lowercase)
+        .collect::<String>();
+    hash_token(&normalized)
 }
 
 /// Replaces a selected local password from the trusted server console.
@@ -386,7 +494,10 @@ fn encode_hex(bytes: &[u8]) -> String {
 mod tests {
     use argon2::{Argon2, PasswordVerifier, password_hash::phc::PasswordHash};
 
-    use super::{AuthError, encode_hex, hash_password, normalize_email, verify_password};
+    use super::{
+        AuthError, TotpBuilder, encode_hex, hash_password, hash_recovery_code, normalize_email,
+        verify_password, verify_totp,
+    };
 
     /// Ensures passwords are stored as verifiable Argon2id PHC strings.
     #[test]
@@ -427,5 +538,29 @@ mod tests {
     #[test]
     fn hexadecimal_encoding_is_stable() {
         assert_eq!(encode_hex(&[0, 15, 16, 255]), "000f10ff");
+    }
+
+    /// Ensures TOTP verification accepts the current step and rejects another code.
+    #[test]
+    fn totp_verification_uses_the_expected_time_step() {
+        let secret = b"01234567890123456789";
+        let timestamp = 1_700_000_000;
+        let code = TotpBuilder::new()
+            .with_secret(secret.as_slice())
+            .build()
+            .expect("TOTP builds")
+            .generate(timestamp)
+            .to_string();
+        assert!(verify_totp(secret, &code, timestamp as i64).is_some());
+        assert!(verify_totp(secret, "000000", timestamp as i64).is_none());
+    }
+
+    /// Ensures recovery-code presentation separators never affect its durable digest.
+    #[test]
+    fn recovery_code_hash_normalizes_case_and_separators() {
+        assert_eq!(
+            hash_recovery_code("ABCD-EF12-3456-7890"),
+            hash_recovery_code("abcdef1234567890")
+        );
     }
 }

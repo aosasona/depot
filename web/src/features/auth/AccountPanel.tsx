@@ -3,6 +3,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { z } from "zod";
 import { ApiError, changePassword, type User } from "../../lib/api/client";
+import { TwoFactorPanel } from "./TwoFactorPanel";
 
 const passwordSchema = z
   .object({
@@ -57,72 +58,75 @@ export function AccountPanel({ user }: { user: User }) {
         </div>
         <span className="deployment-status active">{user.role}</span>
       </div>
-      <form
-        className="password-form"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void form.handleSubmit();
-        }}
-      >
-        <div className="password-form-heading">
-          <strong>Change password</strong>
-          <span>
-            Changing it signs this account out everywhere, including this
-            browser.
-          </span>
-        </div>
-        <form.Field name="currentPassword">
-          {(field) => (
-            <label>
-              Current password
-              <input
-                type="password"
-                autoComplete="current-password"
-                value={field.state.value}
-                onChange={(event) => field.handleChange(event.target.value)}
-              />
-            </label>
-          )}
-        </form.Field>
-        <form.Field name="newPassword">
-          {(field) => (
-            <label>
-              New password
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={field.state.value}
-                onChange={(event) => field.handleChange(event.target.value)}
-              />
-            </label>
-          )}
-        </form.Field>
-        <form.Field name="confirmPassword">
-          {(field) => (
-            <label>
-              Confirm new password
-              <input
-                type="password"
-                autoComplete="new-password"
-                value={field.state.value}
-                onChange={(event) => field.handleChange(event.target.value)}
-              />
-            </label>
-          )}
-        </form.Field>
-        {error && (
-          <p className="notice danger" role="alert">
-            {error}
-          </p>
-        )}
-        <button
-          className="primary-action"
-          type="submit"
-          disabled={mutation.isPending}
+      <div className="account-security-stack">
+        <form
+          className="password-form"
+          onSubmit={(event) => {
+            event.preventDefault();
+            void form.handleSubmit();
+          }}
         >
-          {mutation.isPending ? "Changing password…" : "Change password"}
-        </button>
-      </form>
+          <div className="password-form-heading">
+            <strong>Change password</strong>
+            <span>
+              Changing it signs this account out everywhere, including this
+              browser.
+            </span>
+          </div>
+          <form.Field name="currentPassword">
+            {(field) => (
+              <label>
+                Current password
+                <input
+                  type="password"
+                  autoComplete="current-password"
+                  value={field.state.value}
+                  onChange={(event) => field.handleChange(event.target.value)}
+                />
+              </label>
+            )}
+          </form.Field>
+          <form.Field name="newPassword">
+            {(field) => (
+              <label>
+                New password
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={field.state.value}
+                  onChange={(event) => field.handleChange(event.target.value)}
+                />
+              </label>
+            )}
+          </form.Field>
+          <form.Field name="confirmPassword">
+            {(field) => (
+              <label>
+                Confirm new password
+                <input
+                  type="password"
+                  autoComplete="new-password"
+                  value={field.state.value}
+                  onChange={(event) => field.handleChange(event.target.value)}
+                />
+              </label>
+            )}
+          </form.Field>
+          {error && (
+            <p className="notice danger" role="alert">
+              {error}
+            </p>
+          )}
+          <button
+            className="primary-action"
+            type="submit"
+            disabled={mutation.isPending}
+          >
+            {mutation.isPending ? "Changing password…" : "Change password"}
+          </button>
+        </form>
+        <TwoFactorPanel />
+      </div>
     </section>
   );
 }

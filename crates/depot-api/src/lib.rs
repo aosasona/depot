@@ -17,8 +17,9 @@ use axum_extra::extract::{
 };
 use depot_auth::{
     AuthError, authenticate_deploy_token, authenticate_session, change_password,
-    create_first_admin, create_managed_user, issue_deploy_token, login as authenticate_login,
-    logout as revoke_login, validate_csrf,
+    create_first_admin, create_managed_user, decode_two_factor_secret, generate_recovery_codes,
+    generate_two_factor_enrollment, hash_recovery_code, issue_deploy_token, issue_session,
+    logout as revoke_login, validate_csrf, verify_credentials, verify_totp, verify_user_password,
 };
 use depot_core::{
     ProjectValidationError, ShellHandshake, WorkerOperation, valid_container_path,
@@ -121,6 +122,15 @@ struct BootstrapResponse {
 struct LoginRequest {
     email: String,
     password: String,
+    code: Option<String>,
+}
+
+/// Password-authenticated login result which may require a second factor.
+#[derive(Debug, Serialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum LoginResponse {
+    Authenticated { user: UserResponse },
+    TwoFactorRequired,
 }
 
 /// Current and replacement credentials accepted from an authenticated account.
@@ -134,6 +144,40 @@ struct ChangePasswordRequest {
 #[derive(Debug, Serialize)]
 struct ChangePasswordResponse {
     changed: bool,
+}
+
+/// Current two-factor state safe to display on the account page.
+#[derive(Debug, Serialize)]
+struct TwoFactorStatusResponse {
+    enabled: bool,
+    recovery_codes_remaining: i64,
+}
+
+/// One-time authenticator enrollment material returned before confirmation.
+#[derive(Debug, Serialize)]
+struct TwoFactorEnrollmentResponse {
+    secret: String,
+    otpauth_uri: String,
+    qr_base64: String,
+}
+
+/// Authenticator code used to confirm a pending enrollment.
+#[derive(Debug, Deserialize)]
+struct TwoFactorCodeRequest {
+    code: String,
+}
+
+/// One-time recovery codes returned only when generated or regenerated.
+#[derive(Debug, Serialize)]
+struct RecoveryCodesResponse {
+    recovery_codes: Vec<String>,
+}
+
+/// Password and second factor required for destructive 2FA changes.
+#[derive(Debug, Deserialize)]
+struct TwoFactorSensitiveRequest {
+    current_password: String,
+    code: String,
 }
 
 /// Safe user identity returned to the authenticated browser.
@@ -288,6 +332,7 @@ enum ApiError {
     Github(GithubError),
     ShellUnavailable,
     ShellNotRunning,
+    InvalidSecondFactor,
     InvalidShellOrigin,
     InvalidContainerPath,
     FileBroker,
@@ -564,6 +609,13 @@ pub fn router_with_shell_and_domains(
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/me", get(current_user))
         .route("/api/v1/auth/password", axum::routing::put(update_password))
+        .route("/api/v1/auth/2fa", get(two_factor_status).delete(disable_two_factor))
+        .route("/api/v1/auth/2fa/enroll", post(begin_two_factor_enrollment))
+        .route("/api/v1/auth/2fa/confirm", post(confirm_two_factor_enrollment))
+        .route(
+            "/api/v1/auth/2fa/recovery-codes",
+            post(regenerate_two_factor_recovery_codes),
+        )
         .route("/api/v1/system/readiness", get(system_readiness))
         .route("/api/v1/users", get(list_users).post(create_user))
         .route("/api/v1/users/{user_id}", axum::routing::patch(update_user))
@@ -2358,18 +2410,29 @@ async fn login(
     State(state): State<ApiState>,
     jar: CookieJar,
     Json(request): Json<LoginRequest>,
-) -> Result<(CookieJar, Json<UserResponse>), ApiError> {
-    let issued = authenticate_login(
-        &state.store,
-        &request.email,
-        request.password,
-        time::Duration::hours(SESSION_HOURS),
-    )
-    .await?;
+) -> Result<(CookieJar, Json<LoginResponse>), ApiError> {
+    let user = verify_credentials(&state.store, &request.email, request.password).await?;
+    if state
+        .store
+        .user_two_factor(&user.id)
+        .await?
+        .is_some_and(|two_factor| two_factor.enabled)
+    {
+        let Some(code) = request.code else {
+            return Ok((jar, Json(LoginResponse::TwoFactorRequired)));
+        };
+        verify_second_factor(&state, &user.id, &code).await?;
+    }
+    let issued = issue_session(&state.store, user, time::Duration::hours(SESSION_HOURS)).await?;
     let jar = jar
         .add(session_cookie(issued.token))
         .add(csrf_cookie(issued.csrf_token));
-    Ok((jar, Json(user_response(issued.user))))
+    Ok((
+        jar,
+        Json(LoginResponse::Authenticated {
+            user: user_response(issued.user),
+        }),
+    ))
 }
 
 /// Returns the identity attached to the active opaque session cookie.
@@ -2402,6 +2465,183 @@ async fn update_password(
             .remove(removal_cookie(CSRF_COOKIE)),
         Json(ChangePasswordResponse { changed: true }),
     ))
+}
+
+/// Reports whether the signed-in account currently requires a second factor.
+async fn two_factor_status(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+) -> Result<Json<TwoFactorStatusResponse>, ApiError> {
+    let user = authenticate_session(&state.store, session_token(&jar)?).await?;
+    let two_factor = state.store.user_two_factor(&user.id).await?;
+    Ok(Json(TwoFactorStatusResponse {
+        enabled: two_factor.as_ref().is_some_and(|value| value.enabled),
+        recovery_codes_remaining: two_factor
+            .filter(|value| value.enabled)
+            .map_or(0, |value| value.recovery_codes_remaining),
+    }))
+}
+
+/// Creates a pending encrypted TOTP secret without enabling it prematurely.
+async fn begin_two_factor_enrollment(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+) -> Result<Json<TwoFactorEnrollmentResponse>, ApiError> {
+    let user = require_mutation(&state.store, &jar, &headers).await?;
+    let cipher = state.secrets.as_ref().ok_or(ApiError::SecretsUnavailable)?;
+    let enrollment = generate_two_factor_enrollment(&user.email)?;
+    let context = two_factor_context(&user.id);
+    let encrypted = cipher
+        .encrypt(&enrollment.secret_base32, context.as_bytes())
+        .map_err(|_| ApiError::SecretsUnavailable)?;
+    state
+        .store
+        .begin_two_factor_enrollment(
+            &user.id,
+            &encrypted.ciphertext,
+            &encrypted.nonce,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(Json(TwoFactorEnrollmentResponse {
+        secret: enrollment.secret_base32,
+        otpauth_uri: enrollment.otpauth_uri,
+        qr_base64: enrollment.qr_base64,
+    }))
+}
+
+/// Enables a pending TOTP enrollment only after a current code succeeds.
+async fn confirm_two_factor_enrollment(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Json(request): Json<TwoFactorCodeRequest>,
+) -> Result<Json<RecoveryCodesResponse>, ApiError> {
+    let user = require_mutation(&state.store, &jar, &headers).await?;
+    let two_factor = state
+        .store
+        .user_two_factor(&user.id)
+        .await?
+        .filter(|value| !value.enabled)
+        .ok_or(StoreError::TwoFactorNotConfigured)?;
+    let secret = decrypt_two_factor_secret(&state, &user.id, &two_factor)?;
+    if verify_totp(
+        &secret,
+        &request.code,
+        time::OffsetDateTime::now_utc().unix_timestamp(),
+    )
+    .is_none()
+    {
+        return Err(ApiError::InvalidSecondFactor);
+    }
+    let recovery_codes = generate_recovery_codes();
+    let recovery_hashes = recovery_codes
+        .iter()
+        .map(|code| hash_recovery_code(code))
+        .collect::<Vec<_>>();
+    state
+        .store
+        .confirm_two_factor_enrollment(
+            &user.id,
+            &recovery_hashes,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(Json(RecoveryCodesResponse { recovery_codes }))
+}
+
+/// Regenerates recovery codes after password and authenticator reauthentication.
+async fn regenerate_two_factor_recovery_codes(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Json(request): Json<TwoFactorSensitiveRequest>,
+) -> Result<Json<RecoveryCodesResponse>, ApiError> {
+    let user = require_mutation(&state.store, &jar, &headers).await?;
+    verify_user_password(&state.store, &user, request.current_password).await?;
+    verify_second_factor(&state, &user.id, &request.code).await?;
+    let recovery_codes = generate_recovery_codes();
+    let recovery_hashes = recovery_codes
+        .iter()
+        .map(|code| hash_recovery_code(code))
+        .collect::<Vec<_>>();
+    state
+        .store
+        .replace_two_factor_recovery_codes(
+            &user.id,
+            &recovery_hashes,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(Json(RecoveryCodesResponse { recovery_codes }))
+}
+
+/// Disables 2FA after both existing factors succeed and expires every session.
+async fn disable_two_factor(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Json(request): Json<TwoFactorSensitiveRequest>,
+) -> Result<(CookieJar, StatusCode), ApiError> {
+    let user = require_mutation(&state.store, &jar, &headers).await?;
+    verify_user_password(&state.store, &user, request.current_password).await?;
+    verify_second_factor(&state, &user.id, &request.code).await?;
+    state
+        .store
+        .disable_two_factor(&user.id, time::OffsetDateTime::now_utc().unix_timestamp())
+        .await?;
+    Ok((
+        jar.remove(removal_cookie(SESSION_COOKIE))
+            .remove(removal_cookie(CSRF_COOKIE)),
+        StatusCode::NO_CONTENT,
+    ))
+}
+
+/// Verifies TOTP or atomically consumes one recovery code for an enabled account.
+async fn verify_second_factor(state: &ApiState, user_id: &str, code: &str) -> Result<(), ApiError> {
+    let two_factor = state
+        .store
+        .user_two_factor(user_id)
+        .await?
+        .filter(|value| value.enabled)
+        .ok_or(ApiError::InvalidSecondFactor)?;
+    let now_unix = time::OffsetDateTime::now_utc().unix_timestamp();
+    let secret = decrypt_two_factor_secret(state, user_id, &two_factor)?;
+    if verify_totp(&secret, code, now_unix).is_some() {
+        return Ok(());
+    }
+    if state
+        .store
+        .consume_two_factor_recovery_code(user_id, &hash_recovery_code(code), now_unix)
+        .await?
+    {
+        return Ok(());
+    }
+    Err(ApiError::InvalidSecondFactor)
+}
+
+/// Decrypts one user's TOTP secret with identity-bound authenticated context.
+fn decrypt_two_factor_secret(
+    state: &ApiState,
+    user_id: &str,
+    two_factor: &depot_store::UserTwoFactor,
+) -> Result<Vec<u8>, ApiError> {
+    let cipher = state.secrets.as_ref().ok_or(ApiError::SecretsUnavailable)?;
+    let context = two_factor_context(user_id);
+    let base32 = cipher
+        .decrypt(
+            &two_factor.secret_ciphertext,
+            &two_factor.secret_nonce,
+            context.as_bytes(),
+        )
+        .map_err(|_| ApiError::SecretsUnavailable)?;
+    decode_two_factor_secret(&base32).map_err(|_| ApiError::SecretsUnavailable)
+}
+
+/// Builds the authenticated-encryption context binding a TOTP secret to one user.
+fn two_factor_context(user_id: &str) -> String {
+    format!("depot:totp:v1:{user_id}")
 }
 
 /// Validates the session-bound CSRF header, revokes the session, and expires cookies.
@@ -2837,6 +3077,11 @@ impl IntoResponse for ApiError {
                 "invalid_credentials",
                 "Email or password is incorrect.",
             ),
+            Self::InvalidSecondFactor | Self::Auth(AuthError::InvalidSecondFactor) => (
+                StatusCode::UNAUTHORIZED,
+                "invalid_second_factor",
+                "The authenticator or recovery code is invalid.",
+            ),
             Self::Auth(AuthError::InvalidSession) => (
                 StatusCode::UNAUTHORIZED,
                 "invalid_session",
@@ -2898,6 +3143,18 @@ impl IntoResponse for ApiError {
                 "user_not_found",
                 "The requested user does not exist.",
             ),
+            Self::Store(StoreError::TwoFactorNotConfigured)
+            | Self::Auth(AuthError::Store(StoreError::TwoFactorNotConfigured)) => (
+                StatusCode::CONFLICT,
+                "two_factor_not_configured",
+                "Two-factor authentication is not configured for this account.",
+            ),
+            Self::Store(StoreError::TwoFactorAlreadyEnabled)
+            | Self::Auth(AuthError::Store(StoreError::TwoFactorAlreadyEnabled)) => (
+                StatusCode::CONFLICT,
+                "two_factor_already_enabled",
+                "Two-factor authentication is already enabled for this account.",
+            ),
             Self::Store(StoreError::ProjectSlugAlreadyExists)
             | Self::Auth(AuthError::Store(StoreError::ProjectSlugAlreadyExists)) => (
                 StatusCode::CONFLICT,
@@ -2953,7 +3210,7 @@ impl IntoResponse for ApiError {
             Self::SecretsUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "secrets_unavailable",
-                "Project secret encryption is not configured.",
+                "Secret encryption is not configured on this Depot instance.",
             ),
             Self::InvalidWebhook => (
                 StatusCode::UNAUTHORIZED,
@@ -3076,6 +3333,7 @@ mod tests {
     use http_body_util::BodyExt;
     use serde_json::{Value, json};
     use time::Duration;
+    use totp_rs::{Builder as TotpBuilder, Secret};
     use tower::ServiceExt;
 
     use super::{
@@ -3104,6 +3362,148 @@ mod tests {
             .filter_map(|value| value.to_str().ok()?.split(';').next())
             .collect::<Vec<_>>()
             .join("; ")
+    }
+
+    /// Loads a deterministic test-only secret cipher without retaining a temporary key.
+    fn test_secret_cipher() -> SecretCipher {
+        let key_path = std::env::temp_dir().join(format!(
+            "depot-api-2fa-key-{}",
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        fs::write(&key_path, "22".repeat(32)).expect("key writes");
+        let cipher = SecretCipher::load(&key_path).expect("key loads");
+        fs::remove_file(key_path).expect("temporary key is removed");
+        cipher
+    }
+
+    /// Proves TOTP blocks session issuance and recovery codes are single-use.
+    #[tokio::test]
+    async fn two_factor_enrollment_guards_login_and_consumes_recovery_codes() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let bootstrap = issue_bootstrap_token(&store, Duration::minutes(5))
+            .await
+            .expect("bootstrap token issues");
+        create_first_admin(
+            &store,
+            &bootstrap.token,
+            "admin@example.com",
+            "a secure initial password".to_owned(),
+        )
+        .await
+        .expect("admin is created");
+        let session = login(
+            &store,
+            "admin@example.com",
+            "a secure initial password".to_owned(),
+            Duration::hours(1),
+        )
+        .await
+        .expect("initial login succeeds");
+        let app = router_with_secrets(store, Some(test_secret_cipher()));
+        let cookie = format!("depot_session={}", session.token);
+
+        let enrollment = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth/2fa/enroll")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", &session.csrf_token)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(enrollment.status(), StatusCode::OK);
+        let enrollment = json_body(enrollment).await;
+        let secret = Secret::try_from_base32(enrollment["secret"].as_str().expect("secret exists"))
+            .expect("secret decodes");
+        let code = TotpBuilder::new()
+            .with_secret(secret)
+            .build()
+            .expect("TOTP builds")
+            .generate_current()
+            .to_string();
+
+        let confirmation = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth/2fa/confirm")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie)
+                    .header("x-csrf-token", &session.csrf_token)
+                    .body(Body::from(json!({ "code": code }).to_string()))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(confirmation.status(), StatusCode::OK);
+        let confirmation = json_body(confirmation).await;
+        let recovery_code = confirmation["recovery_codes"][0]
+            .as_str()
+            .expect("recovery code exists")
+            .to_owned();
+
+        let password_only = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "email": "admin@example.com",
+                            "password": "a secure initial password"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(password_only.status(), StatusCode::OK);
+        assert!(request_cookie_header(&password_only).is_empty());
+        assert_eq!(
+            json_body(password_only).await["status"],
+            "two_factor_required"
+        );
+
+        let recovery_login = app
+            .clone()
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "email": "admin@example.com",
+                            "password": "a secure initial password",
+                            "code": recovery_code
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(recovery_login.status(), StatusCode::OK);
+        assert!(!request_cookie_header(&recovery_login).is_empty());
+        assert_eq!(json_body(recovery_login).await["status"], "authenticated");
+
+        let replay = app
+            .oneshot(
+                Request::post("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "email": "admin@example.com",
+                            "password": "a secure initial password",
+                            "code": recovery_code
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(replay.status(), StatusCode::UNAUTHORIZED);
     }
 
     /// Proves a project bearer credential can deploy an exact SHA and fails after revocation.

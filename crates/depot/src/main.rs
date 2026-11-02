@@ -92,6 +92,9 @@ enum Command {
         /// TOML configuration path; local development defaults apply when omitted.
         #[arg(long, env = "DEPOT_CONFIG")]
         config: Option<PathBuf>,
+        /// Also remove authenticator and recovery-code requirements for the selected user.
+        #[arg(long)]
+        disable_two_factor: bool,
     },
     /// Validates a configuration file without opening the database or binding a port.
     ValidateConfig {
@@ -217,7 +220,10 @@ async fn main() -> Result<(), AppError> {
         Command::Serve { config } => serve(load_config(config.as_deref())?).await,
         Command::Migrate { config } => migrate(load_config(config.as_deref())?).await,
         Command::Doctor { config } => doctor(load_config(config.as_deref())?).await,
-        Command::ResetPassword { config } => reset_password(load_config(config.as_deref())?).await,
+        Command::ResetPassword {
+            config,
+            disable_two_factor,
+        } => reset_password(load_config(config.as_deref())?, disable_two_factor).await,
         Command::ValidateConfig { config } => {
             Config::load(&config)?;
             println!("Configuration is valid.");
@@ -233,7 +239,7 @@ async fn main() -> Result<(), AppError> {
 }
 
 /// Selects one local account and rotates its password without echoing either entry.
-async fn reset_password(config: Config) -> Result<(), AppError> {
+async fn reset_password(config: Config, disable_two_factor: bool) -> Result<(), AppError> {
     use std::io::Write;
 
     let store = Store::connect(&config.database.url).await?;
@@ -267,11 +273,47 @@ async fn reset_password(config: Config) -> Result<(), AppError> {
         return Err(AppError::PasswordMismatch);
     }
     depot_auth::recover_password(&store, &users[selected].id, password).await?;
+    let two_factor_enabled = store
+        .user_two_factor(&users[selected].id)
+        .await?
+        .is_some_and(|two_factor| two_factor.enabled);
+    let disable_two_factor = two_factor_enabled
+        && (disable_two_factor
+            || prompt_confirmation("Also disable two-factor authentication? [y/N]: ")?);
+    if disable_two_factor {
+        store
+            .disable_two_factor(
+                &users[selected].id,
+                time::OffsetDateTime::now_utc().unix_timestamp(),
+            )
+            .await?;
+    }
     println!(
-        "Password reset for {}. All existing sessions were revoked.",
-        users[selected].email
+        "Password reset for {}. All existing sessions were revoked.{}",
+        users[selected].email,
+        if disable_two_factor {
+            " Two-factor authentication was disabled."
+        } else {
+            ""
+        }
     );
     Ok(())
+}
+
+/// Reads a conservative interactive yes/no confirmation with a default of no.
+fn prompt_confirmation(prompt: &str) -> Result<bool, AppError> {
+    use std::io::Write;
+
+    print!("{prompt}");
+    std::io::stdout().flush().map_err(AppError::Interactive)?;
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(AppError::Interactive)?;
+    Ok(matches!(
+        answer.trim().to_ascii_lowercase().as_str(),
+        "y" | "yes"
+    ))
 }
 
 /// Parses a one-based menu selection without accepting signs or trailing input.

@@ -196,15 +196,26 @@ function SetupForm() {
 function LoginForm() {
   const queryClient = useQueryClient();
   const [error, setError] = useState<string>();
+  const [requiresTwoFactor, setRequiresTwoFactor] = useState(false);
   const mutation = useMutation({ mutationFn: login });
   const form = useForm({
-    defaultValues: { email: "", password: "" },
+    defaultValues: { email: "", password: "", code: "" },
     onSubmit: async ({ value }) => {
       setError(undefined);
       const parsed = loginSchema.safeParse(value);
       if (!parsed.success) return setError(parsed.error.issues[0]?.message);
+      if (requiresTwoFactor && !value.code.trim()) {
+        return setError("Enter your authenticator or recovery code.");
+      }
       try {
-        await mutation.mutateAsync(parsed.data);
+        const response = await mutation.mutateAsync({
+          ...parsed.data,
+          code: requiresTwoFactor ? value.code.trim() : undefined,
+        });
+        if (response.status === "two_factor_required") {
+          setRequiresTwoFactor(true);
+          return;
+        }
         await queryClient.invalidateQueries({
           queryKey: ["auth", "current-user"],
         });
@@ -218,7 +229,9 @@ function LoginForm() {
       <p className="step-label">ACCESS / CONTROL PLANE</p>
       <h2>Welcome back</h2>
       <p className="panel-copy">
-        Use your local Depot account. Sessions remain on this instance.
+        {requiresTwoFactor
+          ? "Enter the current code from your authenticator app, or one unused recovery code."
+          : "Use your local Depot account. Sessions remain on this instance."}
       </p>
       <form
         onSubmit={(event) => {
@@ -226,30 +239,48 @@ function LoginForm() {
           void form.handleSubmit();
         }}
       >
-        <form.Field name="email">
-          {(field) => (
-            <LabeledInput
-              label="Email"
-              type="email"
-              value={field.state.value}
-              onBlur={field.handleBlur}
-              onChange={field.handleChange}
-              autoComplete="email"
-            />
-          )}
-        </form.Field>
-        <form.Field name="password">
-          {(field) => (
-            <LabeledInput
-              label="Password"
-              type="password"
-              value={field.state.value}
-              onBlur={field.handleBlur}
-              onChange={field.handleChange}
-              autoComplete="current-password"
-            />
-          )}
-        </form.Field>
+        {!requiresTwoFactor && (
+          <>
+            <form.Field name="email">
+              {(field) => (
+                <LabeledInput
+                  label="Email"
+                  type="email"
+                  value={field.state.value}
+                  onBlur={field.handleBlur}
+                  onChange={field.handleChange}
+                  autoComplete="email"
+                />
+              )}
+            </form.Field>
+            <form.Field name="password">
+              {(field) => (
+                <LabeledInput
+                  label="Password"
+                  type="password"
+                  value={field.state.value}
+                  onBlur={field.handleBlur}
+                  onChange={field.handleChange}
+                  autoComplete="current-password"
+                />
+              )}
+            </form.Field>
+          </>
+        )}
+        {requiresTwoFactor && (
+          <form.Field name="code">
+            {(field) => (
+              <LabeledInput
+                label="Authenticator or recovery code"
+                type="text"
+                value={field.state.value}
+                onBlur={field.handleBlur}
+                onChange={field.handleChange}
+                autoComplete="one-time-code"
+              />
+            )}
+          </form.Field>
+        )}
         {error && (
           <p className="notice danger" role="alert">
             {error}
@@ -260,8 +291,21 @@ function LoginForm() {
           type="submit"
           disabled={mutation.isPending}
         >
-          Sign in →
+          {requiresTwoFactor ? "Verify and sign in →" : "Sign in →"}
         </button>
+        {requiresTwoFactor && (
+          <button
+            className="quiet-button"
+            type="button"
+            onClick={() => {
+              setRequiresTwoFactor(false);
+              setError(undefined);
+              form.reset();
+            }}
+          >
+            Use another account
+          </button>
+        )}
       </form>
     </AuthFrame>
   );

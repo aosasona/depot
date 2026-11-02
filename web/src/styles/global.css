@@ -1252,9 +1252,14 @@ td {
   gap: 1rem;
 }
 .account-summary,
-.password-form {
+.password-form,
+.two-factor-panel {
   border: 1px solid var(--border);
   background: var(--surface);
+}
+.account-security-stack {
+  display: grid;
+  gap: 1rem;
 }
 .account-summary {
   display: grid;
@@ -1312,12 +1317,104 @@ td {
 .password-form .primary-action {
   justify-self: start;
 }
+.two-factor-panel {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+.two-factor-panel label {
+  display: grid;
+  gap: 0.4rem;
+  color: var(--muted);
+  font-size: 0.68rem;
+}
+.two-factor-panel input {
+  min-height: 40px;
+  padding: 0 0.75rem;
+  border: 1px solid var(--border);
+  background: #0d0d0d;
+  color: var(--text);
+}
+.two-factor-callout,
+.two-factor-enabled,
+.recovery-codes {
+  display: grid;
+  gap: 0.8rem;
+}
+.two-factor-callout p,
+.two-factor-enabled p,
+.recovery-codes p,
+.two-factor-enrollment p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.76rem;
+  line-height: 1.55;
+}
+.two-factor-enrollment {
+  display: grid;
+  grid-template-columns: 12rem minmax(0, 1fr);
+  gap: 1rem;
+}
+.two-factor-enrollment > img {
+  width: 12rem;
+  height: 12rem;
+  padding: 0.5rem;
+  background: #fff;
+  image-rendering: pixelated;
+}
+.two-factor-enrollment > div {
+  display: grid;
+  gap: 0.75rem;
+}
+.two-factor-enrollment code,
+.recovery-codes code {
+  font-family: var(--mono-font);
+}
+.two-factor-enrollment > div > code {
+  overflow-wrap: anywhere;
+  padding: 0.65rem;
+  border: 1px solid var(--border);
+  background: #0d0d0d;
+  color: var(--accent);
+  font-size: 0.72rem;
+}
+.two-factor-state,
+.two-factor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.7rem;
+  align-items: center;
+}
+.two-factor-state > span:last-child {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.recovery-codes {
+  padding: 1rem;
+  border: 1px solid var(--warning);
+  background: rgb(240 189 101 / 6%);
+}
+.recovery-codes > div:first-of-type {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 1px;
+  background: var(--border);
+}
+.recovery-codes > div:first-of-type code {
+  padding: 0.65rem;
+  background: #0d0d0d;
+  color: var(--text);
+  text-align: center;
+}
 @media (max-width: 760px) {
   .account-panel {
     grid-template-columns: 1fr;
   }
   .account-copy {
     display: none;
+  }
+  .two-factor-enrollment {
+    grid-template-columns: 1fr;
   }
 }
 .app-content {

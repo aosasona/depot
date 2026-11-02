@@ -13,6 +13,22 @@ const userSchema = z.object({
   email: z.email(),
   role: z.enum(["admin", "member"]),
 });
+const loginResponseSchema = z.discriminatedUnion("status", [
+  z.object({ status: z.literal("authenticated"), user: userSchema }),
+  z.object({ status: z.literal("two_factor_required") }),
+]);
+const twoFactorStatusSchema = z.object({
+  enabled: z.boolean(),
+  recovery_codes_remaining: z.number().int().nonnegative(),
+});
+const twoFactorEnrollmentSchema = z.object({
+  secret: z.string(),
+  otpauth_uri: z.string(),
+  qr_base64: z.string(),
+});
+const recoveryCodesSchema = z.object({
+  recovery_codes: z.array(z.string()),
+});
 const adminUserSchema = userSchema.extend({
   active: z.boolean(),
   created_at: z.number(),
@@ -249,11 +265,63 @@ export function bootstrapAdmin(input: {
 }
 
 /** Creates a revocable browser session using local account credentials. */
-export function login(input: { email: string; password: string }) {
-  return request("/api/v1/auth/login", userSchema, {
+export function login(input: {
+  email: string;
+  password: string;
+  code?: string;
+}) {
+  return request("/api/v1/auth/login", loginResponseSchema, {
     method: "POST",
     body: JSON.stringify(input),
   });
+}
+
+/** Returns the signed-in account's non-secret 2FA state. */
+export function getTwoFactorStatus() {
+  return request("/api/v1/auth/2fa", twoFactorStatusSchema);
+}
+
+/** Starts a replaceable TOTP enrollment and returns its one-time setup material. */
+export function beginTwoFactorEnrollment() {
+  return request("/api/v1/auth/2fa/enroll", twoFactorEnrollmentSchema, {
+    method: "POST",
+    headers: csrfHeaders(),
+  });
+}
+
+/** Confirms a pending TOTP enrollment and returns recovery codes once. */
+export function confirmTwoFactorEnrollment(code: string) {
+  return request("/api/v1/auth/2fa/confirm", recoveryCodesSchema, {
+    method: "POST",
+    headers: csrfHeaders(),
+    body: JSON.stringify({ code }),
+  });
+}
+
+/** Replaces all unused recovery codes after full reauthentication. */
+export function regenerateTwoFactorRecoveryCodes(input: {
+  current_password: string;
+  code: string;
+}) {
+  return request("/api/v1/auth/2fa/recovery-codes", recoveryCodesSchema, {
+    method: "POST",
+    headers: csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
+/** Disables 2FA after password and second-factor verification. */
+export async function disableTwoFactor(input: {
+  current_password: string;
+  code: string;
+}) {
+  const response = await fetch("/api/v1/auth/2fa", {
+    method: "DELETE",
+    credentials: "same-origin",
+    headers: { "Content-Type": "application/json", ...csrfHeaders() },
+    body: JSON.stringify(input),
+  });
+  if (!response.ok) await throwFileResponseError(response);
 }
 
 /** Returns the identity associated with the current session cookie. */
