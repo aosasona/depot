@@ -540,7 +540,7 @@ checksum = "4583a4551df46e2792f82ceeac45e850d2e2d5debba0b91f102385cda5b11f06"
 
 [[package]]
 name = "depot"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "axum",
  "clap",
@@ -571,7 +571,7 @@ dependencies = [
 
 [[package]]
 name = "depot-api"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "axum",
  "axum-extra",
@@ -596,7 +596,7 @@ dependencies = [
 
 [[package]]
 name = "depot-auth"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "argon2",
  "depot-store",
@@ -611,7 +611,7 @@ dependencies = [
 
 [[package]]
 name = "depot-build"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "serde",
  "thiserror",
@@ -621,7 +621,7 @@ dependencies = [
 
 [[package]]
 name = "depot-caddy"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "axum",
  "depot-core",
@@ -636,7 +636,7 @@ dependencies = [
 
 [[package]]
 name = "depot-core"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "hmac 0.13.0",
  "serde",
@@ -648,7 +648,7 @@ dependencies = [
 
 [[package]]
 name = "depot-git"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "depot-core",
  "serde",
@@ -660,7 +660,7 @@ dependencies = [
 
 [[package]]
 name = "depot-github"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "jsonwebtoken",
  "reqwest",
@@ -672,7 +672,7 @@ dependencies = [
 
 [[package]]
 name = "depot-runtime"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "serde",
  "thiserror",
@@ -682,7 +682,7 @@ dependencies = [
 
 [[package]]
 name = "depot-secrets"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "chacha20poly1305",
  "rand 0.10.3",
@@ -691,7 +691,7 @@ dependencies = [
 
 [[package]]
 name = "depot-store"
-version = "0.6.1"
+version = "0.6.2"
 dependencies = [
  "sqlx",
  "thiserror",
