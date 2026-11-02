@@ -261,6 +261,22 @@ export function getCurrentUser() {
   return request("/api/v1/auth/me", userSchema);
 }
 
+/** Changes the signed-in account password and expires every existing session. */
+export function changePassword(input: {
+  current_password: string;
+  new_password: string;
+}) {
+  return request(
+    "/api/v1/auth/password",
+    z.object({ changed: z.literal(true) }),
+    {
+      method: "PUT",
+      headers: csrfHeaders(),
+      body: JSON.stringify(input),
+    },
+  );
+}
+
 /** Reads one non-HttpOnly cookie by exact name. */
 function readCookie(name: string) {
   const prefix = `${name}=`;

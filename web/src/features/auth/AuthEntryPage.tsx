@@ -14,6 +14,7 @@ import {
 import { ProjectsPanel, type ProjectTab } from "../projects/ProjectsPanel";
 import { TemplatesPanel } from "../templates/TemplatesPanel";
 import { UsersPanel } from "../users/UsersPanel";
+import { AccountPanel } from "./AccountPanel";
 import { bootstrapStatusQuery, currentUserQuery } from "./queries";
 
 const setupSchema = z.object({
@@ -37,7 +38,8 @@ export type DashboardLocation =
       deploymentId?: string;
     }
   | { kind: "templates" }
-  | { kind: "team" };
+  | { kind: "team" }
+  | { kind: "account" };
 
 /** Selects setup, login, or the requested dashboard location from real API state. */
 export function AuthEntryPage({
@@ -394,6 +396,9 @@ function Dashboard({
               <strong>{user.email}</strong>
               <small>{user.role}</small>
             </span>
+            <Link className="quiet-button" to="/account">
+              Account
+            </Link>
             <button
               className="quiet-button"
               onClick={() => mutation.mutate()}
@@ -412,7 +417,9 @@ function Dashboard({
                     ? "// Deployments"
                     : location.kind === "team"
                       ? "// Access"
-                      : "// Architecture"}
+                      : location.kind === "account"
+                        ? "// Identity"
+                        : "// Architecture"}
                 </p>
                 <h1>{pageTitle(location)}</h1>
                 <p>{pageDescription(location)}</p>
@@ -428,7 +435,9 @@ function Dashboard({
               </span>
             </section>
           )}
-          {location.kind === "templates" ? (
+          {location.kind === "account" ? (
+            <AccountPanel user={user} />
+          ) : location.kind === "templates" ? (
             <TemplatesPanel />
           ) : location.kind === "team" ? (
             user.role === "admin" ? (
@@ -481,6 +490,7 @@ function NavigationIcon({ name }: { name: "projects" | "team" | "templates" }) {
 
 /** Returns a stable heading for every URL-backed workspace page. */
 function pageTitle(location: DashboardLocation) {
+  if (location.kind === "account") return "Account";
   if (location.kind === "team") return "Team";
   if (location.kind === "templates") return "Templates";
   return "Projects";
@@ -488,6 +498,8 @@ function pageTitle(location: DashboardLocation) {
 
 /** Describes the job of each top-level workspace page. */
 function pageDescription(location: DashboardLocation) {
+  if (location.kind === "account")
+    return "Manage your local identity and security settings.";
   if (location.kind === "team")
     return "Manage the people who can access this Depot instance.";
   if (location.kind === "templates")

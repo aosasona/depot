@@ -16,9 +16,9 @@ use axum_extra::extract::{
     cookie::{Cookie, SameSite},
 };
 use depot_auth::{
-    AuthError, authenticate_deploy_token, authenticate_session, create_first_admin,
-    create_managed_user, issue_deploy_token, login as authenticate_login, logout as revoke_login,
-    validate_csrf,
+    AuthError, authenticate_deploy_token, authenticate_session, change_password,
+    create_first_admin, create_managed_user, issue_deploy_token, login as authenticate_login,
+    logout as revoke_login, validate_csrf,
 };
 use depot_core::{
     ProjectValidationError, ShellHandshake, WorkerOperation, valid_container_path,
@@ -121,6 +121,19 @@ struct BootstrapResponse {
 struct LoginRequest {
     email: String,
     password: String,
+}
+
+/// Current and replacement credentials accepted from an authenticated account.
+#[derive(Debug, Deserialize)]
+struct ChangePasswordRequest {
+    current_password: String,
+    new_password: String,
+}
+
+/// Explicit success body returned before the caller's sessions are expired.
+#[derive(Debug, Serialize)]
+struct ChangePasswordResponse {
+    changed: bool,
 }
 
 /// Safe user identity returned to the authenticated browser.
@@ -550,6 +563,7 @@ pub fn router_with_shell_and_domains(
         .route("/api/v1/auth/login", post(login))
         .route("/api/v1/auth/logout", post(logout))
         .route("/api/v1/auth/me", get(current_user))
+        .route("/api/v1/auth/password", axum::routing::put(update_password))
         .route("/api/v1/system/readiness", get(system_readiness))
         .route("/api/v1/users", get(list_users).post(create_user))
         .route("/api/v1/users/{user_id}", axum::routing::patch(update_user))
@@ -2368,6 +2382,28 @@ async fn current_user(
     Ok(Json(user_response(user)))
 }
 
+/// Changes the signed-in user's password and expires every session for that account.
+async fn update_password(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    Json(request): Json<ChangePasswordRequest>,
+) -> Result<(CookieJar, Json<ChangePasswordResponse>), ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    change_password(
+        &state.store,
+        &actor,
+        request.current_password,
+        request.new_password,
+    )
+    .await?;
+    Ok((
+        jar.remove(removal_cookie(SESSION_COOKIE))
+            .remove(removal_cookie(CSRF_COOKIE)),
+        Json(ChangePasswordResponse { changed: true }),
+    ))
+}
+
 /// Validates the session-bound CSRF header, revokes the session, and expires cookies.
 async fn logout(
     State(state): State<ApiState>,
@@ -3500,6 +3536,127 @@ mod tests {
             .await
             .expect("request completes");
         assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    /// Proves password changes require the current credential and revoke existing sessions.
+    #[tokio::test]
+    async fn password_change_reauthenticates_and_revokes_sessions() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let issued = issue_bootstrap_token(&store, Duration::minutes(5))
+            .await
+            .expect("token issues");
+        create_first_admin(
+            &store,
+            &issued.token,
+            "admin@example.com",
+            "correct horse battery staple".to_owned(),
+        )
+        .await
+        .expect("admin is created");
+        let app = router(store);
+        let login = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "email": "admin@example.com",
+                            "password": "correct horse battery staple"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        let cookie_header = request_cookie_header(&login);
+        let csrf_token = login
+            .headers()
+            .get_all(header::SET_COOKIE)
+            .iter()
+            .filter_map(|value| value.to_str().ok())
+            .find_map(|value| value.strip_prefix("depot_csrf="))
+            .and_then(|value| value.split(';').next())
+            .expect("CSRF cookie exists")
+            .to_owned();
+
+        let changed = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("PUT")
+                    .uri("/api/v1/auth/password")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .header(header::COOKIE, &cookie_header)
+                    .header("x-csrf-token", csrf_token)
+                    .body(Body::from(
+                        json!({
+                            "current_password": "correct horse battery staple",
+                            "new_password": "an even safer replacement password"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(changed.status(), StatusCode::OK);
+        assert_eq!(json_body(changed).await["changed"], true);
+
+        let revoked = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/auth/me")
+                    .header(header::COOKIE, cookie_header)
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(revoked.status(), StatusCode::UNAUTHORIZED);
+
+        let old_password = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "email": "admin@example.com",
+                            "password": "correct horse battery staple"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(old_password.status(), StatusCode::UNAUTHORIZED);
+
+        let new_password = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/v1/auth/login")
+                    .header(header::CONTENT_TYPE, "application/json")
+                    .body(Body::from(
+                        json!({
+                            "email": "admin@example.com",
+                            "password": "an even safer replacement password"
+                        })
+                        .to_string(),
+                    ))
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(new_password.status(), StatusCode::OK);
     }
 
     /// Proves a valid member session cannot access administrator user APIs.

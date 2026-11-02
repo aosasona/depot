@@ -270,6 +270,46 @@ pub async fn logout(store: &Store, token: &str, csrf_token: &str) -> Result<(), 
     Ok(())
 }
 
+/// Verifies the current credential, hashes its replacement, and revokes all sessions.
+pub async fn change_password(
+    store: &Store,
+    user: &SessionUser,
+    current_password: String,
+    new_password: String,
+) -> Result<(), AuthError> {
+    if new_password.chars().count() < MINIMUM_PASSWORD_LENGTH {
+        return Err(AuthError::WeakPassword);
+    }
+    let candidate = store.auth_user_by_email(&user.email).await?;
+    let verification_hash = candidate
+        .as_ref()
+        .filter(|candidate| candidate.id == user.id)
+        .map(|candidate| candidate.password_hash.clone());
+    let password_matches = tokio::task::spawn_blocking(move || match verification_hash {
+        Some(encoded) => verify_password(&current_password, &encoded),
+        None => {
+            let _ = hash_password(&current_password);
+            false
+        }
+    })
+    .await
+    .map_err(|_| AuthError::PasswordHash)?;
+    if !password_matches {
+        return Err(AuthError::InvalidCredentials);
+    }
+    let password_hash = tokio::task::spawn_blocking(move || hash_password(&new_password))
+        .await
+        .map_err(|_| AuthError::PasswordHash)??;
+    store
+        .update_user_password(
+            &user.id,
+            &password_hash,
+            OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(())
+}
+
 /// Applies a deliberately conservative email normalization for local identities.
 fn normalize_email(email: &str) -> Result<String, AuthError> {
     let normalized = email.trim().to_lowercase();

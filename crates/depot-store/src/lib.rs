@@ -1312,6 +1312,42 @@ impl Store {
         Ok(())
     }
 
+    /// Replaces one active user's password and revokes every outstanding session atomically.
+    pub async fn update_user_password(
+        &self,
+        user_id: &str,
+        password_hash: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let updated = sqlx::query(
+            "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ? AND active = 1",
+        )
+        .bind(password_hash)
+        .bind(now_unix)
+        .bind(user_id)
+        .execute(&mut *transaction)
+        .await?;
+        if updated.rows_affected() != 1 {
+            return Err(StoreError::UserNotFound);
+        }
+        sqlx::query("UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL")
+            .bind(now_unix)
+            .bind(user_id)
+            .execute(&mut *transaction)
+            .await?;
+        insert_user_audit(
+            &mut transaction,
+            user_id,
+            "user.password_change",
+            user_id,
+            now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(())
+    }
+
     /// Lists users in stable creation order without exposing credential fields.
     pub async fn list_users(&self) -> Result<Vec<UserSummary>, StoreError> {
         let rows = sqlx::query(

@@ -114,6 +114,12 @@ const templatesRoute = createRoute({
   component: () => <DashboardPage location={{ kind: "templates" }} />,
 });
 
+const accountRoute = createRoute({
+  getParentRoute: () => rootRoute,
+  path: "/account",
+  component: () => <DashboardPage location={{ kind: "account" }} />,
+});
+
 const routeTree = rootRoute.addChildren([
   indexRoute,
   projectsRoute,
@@ -122,6 +128,7 @@ const routeTree = rootRoute.addChildren([
   deploymentDetailRoute,
   templatesRoute,
   teamRoute,
+  accountRoute,
 ]);
 
 export const router = createRouter({ routeTree });
