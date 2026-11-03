@@ -96,6 +96,12 @@ enum Command {
         #[arg(long)]
         disable_two_factor: bool,
     },
+    /// Inspects every managed hostname and verifies live service routes through the worker.
+    Routes {
+        /// TOML configuration path; local development defaults apply when omitted.
+        #[arg(long, env = "DEPOT_CONFIG")]
+        config: Option<PathBuf>,
+    },
     /// Validates a configuration file without opening the database or binding a port.
     ValidateConfig {
         #[arg(long, env = "DEPOT_CONFIG")]
@@ -224,6 +230,7 @@ async fn main() -> Result<(), AppError> {
             config,
             disable_two_factor,
         } => reset_password(load_config(config.as_deref())?, disable_two_factor).await,
+        Command::Routes { config } => inspect_routes(load_config(config.as_deref())?).await,
         Command::ValidateConfig { config } => {
             Config::load(&config)?;
             println!("Configuration is valid.");
@@ -236,6 +243,49 @@ async fn main() -> Result<(), AppError> {
             check,
         } => caddy_agent(&config, domains_file.as_deref(), check).await,
     }
+}
+
+/// Prints the complete hostname-to-runtime chain and fails closed verification state.
+async fn inspect_routes(config: Config) -> Result<(), AppError> {
+    let store = Store::connect(&config.database.url).await?;
+    let mut master_key = depot_secrets::load_key(Path::new(&config.security.master_key_file))?;
+    let signing_key = depot_core::derive_shell_signing_key(&master_key);
+    master_key.zeroize();
+    let broker = depot_api::ShellBroker {
+        socket_path: Arc::from(config.worker.shell_socket),
+        public_origin: Arc::from(config.security.public_origin),
+        signing_key: Arc::new(signing_key),
+    };
+    println!("HOSTNAME\tPROJECT\tDEPLOYMENT\tCONTAINER\tTARGET\tSTATE");
+    for hostname in store.all_domain_hostnames().await? {
+        match store.gateway_target(&hostname).await? {
+            Some(depot_store::GatewayTarget::Service {
+                project_id,
+                deployment_id,
+                container_id,
+                host_port,
+            }) => {
+                let verified = verify_gateway_route(
+                    &broker,
+                    &project_id,
+                    &deployment_id,
+                    &container_id,
+                    host_port,
+                )
+                .await;
+                println!(
+                    "{hostname}\t{project_id}\t{deployment_id}\t{container_id}\t127.0.0.1:{host_port}\t{}",
+                    if verified { "verified" } else { "blocked" }
+                );
+            }
+            Some(depot_store::GatewayTarget::Static {
+                deployment_id,
+                release_path,
+            }) => println!("{hostname}\t-\t{deployment_id}\t-\t{release_path}\tstatic"),
+            None => println!("{hostname}\t-\t-\t-\t-\tundeployed"),
+        }
+    }
+    Ok(())
 }
 
 /// Selects one local account and rotates its password without echoing either entry.
@@ -623,6 +673,9 @@ async fn serve_shell_connection(
         .as_ref()
         .and_then(|deployment| deployment.container_id.as_deref())
         != Some(handshake.container_id.as_str())
+        || (matches!(handshake.operation, WorkerOperation::VerifyRoute { .. })
+            && active.as_ref().map(|deployment| deployment.id.as_str())
+                != Some(handshake.session_id.as_str()))
     {
         return Err(std::io::Error::new(
             std::io::ErrorKind::PermissionDenied,
@@ -633,8 +686,45 @@ async fn serve_shell_connection(
         WorkerOperation::Shell => {
             serve_interactive_shell(stream, store, docker_binary, handshake, now).await
         }
+        WorkerOperation::VerifyRoute { host_port } => {
+            serve_route_verification(&mut stream, &docker_binary, &handshake, host_port).await
+        }
         operation => serve_file_operation(&mut stream, &docker_binary, &handshake, operation).await,
     }
+}
+
+/// Confirms a stored route still names the same running, labeled Docker container.
+async fn serve_route_verification(
+    stream: &mut UnixStream,
+    docker_binary: &str,
+    handshake: &ShellHandshake,
+    host_port: u16,
+) -> Result<(), std::io::Error> {
+    let result = depot_runtime::verify_route(
+        docker_binary,
+        depot_runtime::RouteIdentity {
+            deployment_id: &handshake.session_id,
+            container_id: &handshake.container_id,
+            host_port,
+        },
+        std::time::Duration::from_secs(5),
+    )
+    .await;
+    let response = match result {
+        Ok(()) => serde_json::json!({"ok": true, "host_port": host_port}),
+        Err(error) => {
+            tracing::warn!(
+                project_id = %handshake.project_id,
+                deployment_id = %handshake.session_id,
+                container_id = %handshake.container_id,
+                %host_port,
+                %error,
+                "runtime route verification failed"
+            );
+            serde_json::json!({"ok": false})
+        }
+    };
+    write_broker_response(stream, &response).await
 }
 
 /// Streams an interactive shell after the shared worker capability checks pass.
@@ -833,7 +923,9 @@ done"#;
             .await?;
             write_broker_response(stream, &serde_json::json!({"ok": true})).await?;
         }
-        WorkerOperation::Shell => unreachable!("shell operations are dispatched separately"),
+        WorkerOperation::Shell | WorkerOperation::VerifyRoute { .. } => {
+            unreachable!("non-file operations are dispatched separately")
+        }
     }
     Ok(())
 }
@@ -1522,6 +1614,7 @@ async fn serve(config: Config) -> Result<(), AppError> {
         public_origin: Arc::from(config.security.public_origin.clone()),
         signing_key: Arc::new(shell_key),
     };
+    reconcile_runtime_routes(&store, &shell).await?;
 
     let dashboard_hostname = config
         .security
@@ -1553,10 +1646,12 @@ async fn serve(config: Config) -> Result<(), AppError> {
 
     // Run hostname routing BEFORE Depot's API routes can match.
     let gateway_store = store.clone();
+    let gateway_broker = shell.clone();
 
     let app = management_router.layer(middleware::from_fn(
         move |request: Request<Body>, next: Next| {
             let store = gateway_store.clone();
+            let broker = gateway_broker.clone();
             let dashboard = dashboard_hostname.clone();
 
             async move {
@@ -1575,7 +1670,7 @@ async fn serve(config: Config) -> Result<(), AppError> {
                 }
 
                 // Application hostname: bypass Depot's API entirely.
-                gateway_or_spa(store, request).await
+                gateway_or_spa(store, broker, request).await
             }
         },
     ));
@@ -1652,14 +1747,56 @@ async fn system_health() -> Json<HealthResponse> {
 ///
 /// This is called only for non-dashboard hostnames, so application
 /// paths can never conflict with Depot's management API.
-async fn gateway_or_spa(store: Store, request: Request<Body>) -> Response {
+async fn gateway_or_spa(
+    store: Store,
+    broker: depot_api::ShellBroker,
+    request: Request<Body>,
+) -> Response {
     let Some(hostname) = request_hostname(request.headers()) else {
         return StatusCode::BAD_REQUEST.into_response();
     };
 
     match store.gateway_target(&hostname).await {
-        Ok(Some(depot_store::GatewayTarget::Service { host_port, .. })) => {
-            proxy_to_runtime(request, host_port).await
+        Ok(Some(depot_store::GatewayTarget::Service {
+            project_id,
+            deployment_id,
+            container_id,
+            host_port,
+        })) => {
+            let verified = verify_gateway_route(
+                &broker,
+                &project_id,
+                &deployment_id,
+                &container_id,
+                host_port,
+            )
+            .await;
+            let route_error = (!verified)
+                .then_some("Container identity or published loopback port does not match Docker.");
+            if let Err(error) = store
+                .record_runtime_route_health(
+                    &deployment_id,
+                    verified,
+                    route_error,
+                    time::OffsetDateTime::now_utc().unix_timestamp(),
+                )
+                .await
+            {
+                tracing::warn!(%error, %deployment_id, "could not persist runtime route health");
+            }
+            if verified {
+                proxy_to_runtime(request, host_port).await
+            } else {
+                tracing::error!(
+                    %hostname,
+                    %project_id,
+                    %deployment_id,
+                    %container_id,
+                    %host_port,
+                    "gateway refused an unverified runtime route"
+                );
+                StatusCode::SERVICE_UNAVAILABLE.into_response()
+            }
         }
 
         Ok(Some(depot_store::GatewayTarget::Static { release_path, .. })) => {
@@ -1678,6 +1815,110 @@ async fn gateway_or_spa(store: Store, request: Request<Body>) -> Response {
             StatusCode::SERVICE_UNAVAILABLE.into_response()
         }
     }
+}
+
+/// Invalidates old checks and reconciles every active service before serving traffic.
+async fn reconcile_runtime_routes(
+    store: &Store,
+    broker: &depot_api::ShellBroker,
+) -> Result<(), AppError> {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    store.reset_active_runtime_route_health(now).await?;
+    for runtime in store.active_service_runtimes().await? {
+        let verified = verify_gateway_route(
+            broker,
+            &runtime.project_id,
+            &runtime.deployment_id,
+            &runtime.container_id,
+            runtime.host_port,
+        )
+        .await;
+        let error = (!verified)
+            .then_some("Container identity or published loopback port does not match Docker.");
+        store
+            .record_runtime_route_health(
+                &runtime.deployment_id,
+                verified,
+                error,
+                time::OffsetDateTime::now_utc().unix_timestamp(),
+            )
+            .await?;
+        if verified {
+            info!(
+                project_id = %runtime.project_id,
+                deployment_id = %runtime.deployment_id,
+                container_id = %runtime.container_id,
+                host_port = %runtime.host_port,
+                "active runtime route verified"
+            );
+        } else {
+            tracing::error!(
+                project_id = %runtime.project_id,
+                deployment_id = %runtime.deployment_id,
+                container_id = %runtime.container_id,
+                host_port = %runtime.host_port,
+                "active runtime route blocked during startup reconciliation"
+            );
+        }
+    }
+    Ok(())
+}
+
+/// Requests a fresh Docker identity check through the authenticated worker socket.
+async fn verify_gateway_route(
+    broker: &depot_api::ShellBroker,
+    project_id: &str,
+    deployment_id: &str,
+    container_id: &str,
+    host_port: u16,
+) -> bool {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let mut handshake = ShellHandshake {
+        session_id: deployment_id.to_owned(),
+        project_id: project_id.to_owned(),
+        container_id: container_id.to_owned(),
+        actor_user_id: "gateway".to_owned(),
+        operation: WorkerOperation::VerifyRoute { host_port },
+        expires_at: now + 10,
+        nonce: uuid::Uuid::now_v7().to_string(),
+        signature: String::new(),
+    };
+    handshake.sign(&broker.signing_key);
+    let exchange = async {
+        let mut worker = UnixStream::connect(broker.socket_path.as_ref()).await?;
+        let mut request = serde_json::to_vec(&handshake).map_err(std::io::Error::other)?;
+        request.push(b'\n');
+        worker.write_all(&request).await?;
+        let mut response = Vec::with_capacity(64);
+        loop {
+            let byte = worker.read_u8().await?;
+            if byte == b'\n' {
+                break;
+            }
+            if response.len() >= 1024 {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    "route verification response is too large",
+                ));
+            }
+            response.push(byte);
+        }
+        let response: serde_json::Value =
+            serde_json::from_slice(&response).map_err(std::io::Error::other)?;
+        Ok::<bool, std::io::Error>(
+            response.get("ok").and_then(serde_json::Value::as_bool) == Some(true)
+                && response
+                    .get("host_port")
+                    .and_then(serde_json::Value::as_u64)
+                    == Some(u64::from(host_port)),
+        )
+    };
+    matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(6), exchange).await,
+        Ok(Ok(true))
+    )
 }
 
 /// Serves a safe branded response when a routed application hostname has no live target.

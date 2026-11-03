@@ -204,6 +204,33 @@ deployment is marked successful. The second command also validates Caddy's TLS
 route; it requires working public DNS/ACME reachability or an already issued
 certificate.
 
+### Inspect and safely repair a blocked runtime route
+
+Depot verifies each active service's container ID, deployment label, running
+state, and loopback port mapping at startup and immediately before proxying a
+request. Inspect the full hostname-to-container chain without exposing secrets:
+
+```sh
+sudo -u depot /usr/local/bin/depot routes --config /etc/depot/config.toml
+sudo journalctl -u depot.service -u depot-worker.service --since "10 minutes ago"
+```
+
+A `blocked` route returns 503 instead of falling through to whichever container
+currently owns the stale port. Do not edit the SQLite deployment record or
+manually reassign the port. First confirm Docker is running, then restart
+Depot's two processes so they repeat reconciliation:
+
+```sh
+sudo docker ps -a --filter label=depot.deployment
+sudo systemctl is-active docker
+sudo systemctl restart depot-worker.service depot.service
+sudo -u depot /usr/local/bin/depot routes --config /etc/depot/config.toml
+```
+
+If the recorded container is missing or still fails verification, deploy the
+project again from Depot. A successful deployment atomically records a fresh
+container and port mapping; only then does the old release become inactive.
+
 ## 4. Update and rollback the Depot binary
 
 The recommended update is:

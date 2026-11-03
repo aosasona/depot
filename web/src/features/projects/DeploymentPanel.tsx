@@ -140,6 +140,12 @@ function DeploymentRow({
       {deployment.failure_reason && (
         <p className="inspection-error">{deployment.failure_reason}</p>
       )}
+      {deployment.active && deployment.runtime_route_status === "error" && (
+        <p className="inspection-error">
+          Route blocked:{" "}
+          {deployment.runtime_route_error ?? "runtime identity did not verify"}
+        </p>
+      )}
     </div>
   );
 }

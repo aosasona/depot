@@ -217,11 +217,23 @@ pub struct Deployment {
     pub image_id: Option<String>,
     pub container_id: Option<String>,
     pub host_port: Option<i64>,
+    pub runtime_route_status: String,
+    pub runtime_route_error: Option<String>,
+    pub runtime_route_checked_at: Option<i64>,
     pub static_release_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
     pub finished_at: Option<i64>,
     pub active: bool,
+}
+
+/// Stored identity for one active service runtime awaiting live Docker verification.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct ActiveServiceRuntime {
+    pub project_id: String,
+    pub deployment_id: String,
+    pub container_id: String,
+    pub host_port: u16,
 }
 
 /// Validated values used to atomically create a manual deployment and build job.
@@ -402,7 +414,9 @@ pub struct Domain {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum GatewayTarget {
     Service {
+        project_id: String,
         deployment_id: String,
+        container_id: String,
         host_port: u16,
     },
     Static {
@@ -2007,7 +2021,8 @@ impl Store {
         hostname: &str,
     ) -> Result<Option<GatewayTarget>, StoreError> {
         let row = sqlx::query(
-            "SELECT deployments.id, deployments.host_port,
+            "SELECT deployments.id, deployments.project_id, deployments.container_id,
+                    deployments.host_port,
                     deployments.static_release_path
              FROM domains
              JOIN deployments ON deployments.project_id = domains.project_id
@@ -2015,7 +2030,8 @@ impl Store {
                AND deployments.status = 'succeeded'
                AND deployments.active = 1
                AND (deployments.static_release_path IS NOT NULL
-                    OR deployments.host_port IS NOT NULL)
+                    OR (deployments.host_port IS NOT NULL
+                        AND deployments.container_id IS NOT NULL))
              LIMIT 1",
         )
         .bind(hostname)
@@ -2039,12 +2055,80 @@ impl Store {
                     ))
                 })?;
                 Ok(GatewayTarget::Service {
+                    project_id: row.try_get("project_id")?,
                     deployment_id,
+                    container_id: row.try_get("container_id")?,
                     host_port,
                 })
             }
         })
         .transpose()
+    }
+
+    /// Lists every active service identity, including projects without a hostname.
+    pub async fn active_service_runtimes(&self) -> Result<Vec<ActiveServiceRuntime>, StoreError> {
+        let rows = sqlx::query(
+            "SELECT project_id, id, container_id, host_port
+             FROM deployments
+             WHERE active = 1 AND status = 'succeeded'
+               AND container_id IS NOT NULL AND host_port IS NOT NULL
+             ORDER BY project_id, id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let port: i64 = row.try_get("host_port")?;
+                Ok(ActiveServiceRuntime {
+                    project_id: row.try_get("project_id")?,
+                    deployment_id: row.try_get("id")?,
+                    container_id: row.try_get("container_id")?,
+                    host_port: u16::try_from(port).map_err(|_| {
+                        StoreError::Database(sqlx::Error::Protocol(
+                            "stored deployment port is invalid".to_owned(),
+                        ))
+                    })?,
+                })
+            })
+            .collect()
+    }
+
+    /// Invalidates prior runtime checks before startup reconciliation begins.
+    pub async fn reset_active_runtime_route_health(&self, now_unix: i64) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE deployments
+             SET runtime_route_status = 'pending', runtime_route_error = NULL,
+                 runtime_route_checked_at = NULL, updated_at = ?
+             WHERE active = 1 AND container_id IS NOT NULL",
+        )
+        .bind(now_unix)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
+    /// Persists a safe, non-secret route-health result for the dashboard and operators.
+    pub async fn record_runtime_route_health(
+        &self,
+        deployment_id: &str,
+        verified: bool,
+        error: Option<&str>,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "UPDATE deployments
+             SET runtime_route_status = ?, runtime_route_error = ?,
+                 runtime_route_checked_at = ?, updated_at = ?
+             WHERE id = ? AND active = 1",
+        )
+        .bind(if verified { "verified" } else { "error" })
+        .bind(error)
+        .bind(now_unix)
+        .bind(now_unix)
+        .bind(deployment_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
 
     /// Enqueues an independent full-domain reconciliation snapshot.
@@ -2193,6 +2277,7 @@ impl Store {
         let existing = sqlx::query(
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
                     failure_reason, image_id, container_id, host_port,
+                    runtime_route_status, runtime_route_error, runtime_route_checked_at,
                     static_release_path, created_at, updated_at, finished_at, active
              FROM deployments
              WHERE project_id = ? AND commit_sha = ? AND trigger_kind = 'manual'
@@ -2220,7 +2305,9 @@ impl Store {
         self.project_by_id(project_id).await?;
         let rows = sqlx::query(
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
-                    failure_reason, image_id, container_id, host_port, static_release_path,
+                    failure_reason, image_id, container_id, host_port,
+                    runtime_route_status, runtime_route_error, runtime_route_checked_at,
+                    static_release_path,
                     created_at, updated_at, finished_at, active
              FROM deployments WHERE project_id = ? ORDER BY created_at DESC, id DESC",
         )
@@ -2234,7 +2321,9 @@ impl Store {
     pub async fn deployment_by_id(&self, deployment_id: &str) -> Result<Deployment, StoreError> {
         let row = sqlx::query(
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
-                    failure_reason, image_id, container_id, host_port, static_release_path,
+                    failure_reason, image_id, container_id, host_port,
+                    runtime_route_status, runtime_route_error, runtime_route_checked_at,
+                    static_release_path,
                     created_at, updated_at, finished_at, active
              FROM deployments WHERE id = ?",
         )
@@ -2881,6 +2970,9 @@ fn deployment_from_row(row: SqliteRow) -> Result<Deployment, StoreError> {
         image_id: row.try_get("image_id")?,
         container_id: row.try_get("container_id")?,
         host_port: row.try_get("host_port")?,
+        runtime_route_status: row.try_get("runtime_route_status")?,
+        runtime_route_error: row.try_get("runtime_route_error")?,
+        runtime_route_checked_at: row.try_get("runtime_route_checked_at")?,
         static_release_path: row.try_get("static_release_path")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
@@ -3423,9 +3515,102 @@ mod tests {
         assert_eq!(
             target,
             GatewayTarget::Service {
+                project_id: project.id,
                 deployment_id: deployment.id,
+                container_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+                    .to_owned(),
                 host_port: 43123,
             }
+        );
+    }
+
+    /// Keeps exact hostnames bound to their own active project runtime identities.
+    #[tokio::test]
+    async fn gateway_targets_cannot_cross_project_boundaries() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let first = store
+            .create_project(NewProject {
+                slug: "first-route",
+                name: "First route",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/first.git",
+                branch: "main",
+                now_unix: 100,
+            })
+            .await
+            .expect("first project is created");
+        let second = store
+            .create_project(NewProject {
+                slug: "second-route",
+                name: "Second route",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/second.git",
+                branch: "main",
+                now_unix: 101,
+            })
+            .await
+            .expect("second project is created");
+        store
+            .create_domain(&first.id, "first.example.com", &admin_id, 102)
+            .await
+            .expect("first domain is created");
+        store
+            .create_domain(&second.id, "second.example.com", &admin_id, 103)
+            .await
+            .expect("second domain is created");
+
+        let first_deployment = create_test_deployment(&store, &first.id, &admin_id, 'a', 110).await;
+        let first_job = store
+            .claim_job("worker", 111, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("first deployment is claimed");
+        record_test_runtime(&store, &first_deployment.id, &"a".repeat(64), 41_001, 112).await;
+        store
+            .complete_job(&first_job.id, "worker", Some("{}"), 113)
+            .await
+            .expect("first deployment promotes");
+
+        let second_deployment =
+            create_test_deployment(&store, &second.id, &admin_id, 'b', 120).await;
+        let second_job = store
+            .claim_job("worker", 121, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("second deployment is claimed");
+        record_test_runtime(&store, &second_deployment.id, &"b".repeat(64), 41_002, 122).await;
+        store
+            .complete_job(&second_job.id, "worker", Some("{}"), 123)
+            .await
+            .expect("second deployment promotes");
+
+        let first_target = store
+            .gateway_target("first.example.com")
+            .await
+            .expect("first lookup succeeds")
+            .expect("first target exists");
+        let second_target = store
+            .gateway_target("second.example.com")
+            .await
+            .expect("second lookup succeeds")
+            .expect("second target exists");
+        assert!(matches!(
+            first_target,
+            GatewayTarget::Service { project_id, deployment_id, host_port: 41_001, .. }
+                if project_id == first.id && deployment_id == first_deployment.id
+        ));
+        assert!(matches!(
+            second_target,
+            GatewayTarget::Service { project_id, deployment_id, host_port: 41_002, .. }
+                if project_id == second.id && deployment_id == second_deployment.id
+        ));
+        assert!(
+            store
+                .gateway_target("missing.example.com")
+                .await
+                .expect("lookup succeeds")
+                .is_none()
         );
     }
 

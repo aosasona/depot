@@ -126,6 +126,9 @@ pub struct ShellHandshake {
 pub enum WorkerOperation {
     #[default]
     Shell,
+    VerifyRoute {
+        host_port: u16,
+    },
     List {
         path: String,
     },
@@ -224,6 +227,9 @@ impl WorkerOperation {
         let mut value = String::new();
         match self {
             Self::Shell => value.push_str("shell|"),
+            Self::VerifyRoute { host_port } => {
+                value.push_str(&format!("verify_route|{host_port}|"));
+            }
             Self::List { path } => {
                 value.push_str("list|");
                 field(&mut value, path);

@@ -2,7 +2,7 @@
 
 use std::{process::Stdio, time::Duration};
 
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -28,6 +28,22 @@ pub struct RunningContainer {
     pub host_port: u16,
 }
 
+/// Expected immutable identity for one active service route.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RouteIdentity<'a> {
+    pub deployment_id: &'a str,
+    pub container_id: &'a str,
+    pub host_port: u16,
+}
+
+/// One published Docker port returned by the structured inspect template.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct PublishedPort {
+    host_ip: String,
+    host_port: String,
+}
+
 /// Safe failures from Docker execution, runtime identity parsing, or readiness.
 #[derive(Debug, Error)]
 pub enum RuntimeError {
@@ -45,6 +61,55 @@ pub enum RuntimeError {
     InvalidEnvironment,
     #[error("Docker could not read release container logs")]
     LogsFailed,
+    #[error("active runtime identity does not match the requested route")]
+    RouteMismatch,
+}
+
+/// Verifies a route against the live Docker container identity and loopback mapping.
+pub async fn verify_route(
+    docker_binary: &str,
+    identity: RouteIdentity<'_>,
+    timeout: Duration,
+) -> Result<(), RuntimeError> {
+    let template = r#"{{.Id}}
+{{.State.Running}}
+{{index .Config.Labels "depot.deployment"}}
+{{json .NetworkSettings.Ports}}"#;
+    let mut inspect = Command::new(docker_binary);
+    inspect
+        .args(["inspect", "--format", template, identity.container_id])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = command_output(&mut inspect, timeout).await?;
+    if !output.status.success() {
+        return Err(RuntimeError::RouteMismatch);
+    }
+    let output = String::from_utf8(output.stdout).map_err(|_| RuntimeError::RouteMismatch)?;
+    let mut lines = output.lines();
+    let container_id = lines.next().ok_or(RuntimeError::RouteMismatch)?;
+    let running = lines.next().ok_or(RuntimeError::RouteMismatch)?;
+    let deployment_id = lines.next().ok_or(RuntimeError::RouteMismatch)?;
+    let ports = lines.collect::<Vec<_>>().join("\n");
+    if container_id != identity.container_id
+        || running != "true"
+        || deployment_id != identity.deployment_id
+    {
+        return Err(RuntimeError::RouteMismatch);
+    }
+    let ports: std::collections::HashMap<String, Option<Vec<PublishedPort>>> =
+        serde_json::from_str(&ports).map_err(|_| RuntimeError::RouteMismatch)?;
+    let expected = identity.host_port.to_string();
+    let matches = ports
+        .values()
+        .filter_map(Option::as_ref)
+        .flatten()
+        .filter(|binding| {
+            binding.host_port == expected && matches!(binding.host_ip.as_str(), "127.0.0.1" | "::1")
+        })
+        .count();
+    (matches == 1)
+        .then_some(())
+        .ok_or(RuntimeError::RouteMismatch)
 }
 
 /// Starts an image with an ephemeral loopback-only port and resolves its runtime identity.
@@ -290,7 +355,10 @@ fn healthy_http_response(response: &[u8]) -> bool {
 mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
-    use super::{StartContainerRequest, container_logs, healthy_http_response, start_container};
+    use super::{
+        RouteIdentity, StartContainerRequest, container_logs, healthy_http_response,
+        start_container, verify_route,
+    };
 
     /// Proves runtime identity and ephemeral port mappings are strictly parsed.
     #[tokio::test]
@@ -316,6 +384,62 @@ mod tests {
         .await
         .expect("container starts");
         assert_eq!(running.host_port, 43123);
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Rejects port reuse unless Docker confirms every persisted identity field.
+    #[tokio::test]
+    async fn route_verification_fails_closed_on_identity_mismatch() {
+        let root =
+            std::env::temp_dir().join(format!("depot-runtime-route-test-{}", uuid::Uuid::now_v7()));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' 'true' 'other-deployment' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}'\n",
+        )
+        .expect("fake Docker writes");
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        let result = verify_route(
+            fake.to_str().expect("path is UTF-8"),
+            RouteIdentity {
+                deployment_id: "deployment",
+                container_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                host_port: 43123,
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(result.is_err());
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Accepts exactly one matching loopback mapping for the expected container.
+    #[tokio::test]
+    async fn route_verification_accepts_exact_runtime_identity() {
+        let root = std::env::temp_dir().join(format!(
+            "depot-runtime-route-ok-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'true' 'deployment' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}'\n",
+        )
+        .expect("fake Docker writes");
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        verify_route(
+            fake.to_str().expect("path is UTF-8"),
+            RouteIdentity {
+                deployment_id: "deployment",
+                container_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                host_port: 43123,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("identity matches");
         fs::remove_dir_all(root).expect("test root is removed");
     }
 
