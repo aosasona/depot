@@ -231,6 +231,13 @@ If the recorded container is missing or still fails verification, deploy the
 project again from Depot. A successful deployment atomically records a fresh
 container and port mapping; only then does the old release become inactive.
 
+Routine service controls are available on the active deployment in the
+dashboard. Stop intentionally makes its domains return 503; Start restores the
+same verified container and waits for its configured readiness path. Restart
+briefly interrupts active requests. Redeploy rebuilds the same commit through
+the normal immutable promotion path. Each operation is durable and audited;
+only one lifecycle operation per project can run at a time.
+
 ## 4. Update and rollback the Depot binary
 
 The recommended update is:

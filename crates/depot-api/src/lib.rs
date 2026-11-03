@@ -324,6 +324,7 @@ enum ApiError {
     InvalidProjectField(&'static str),
     ProjectNotInspected,
     InvalidDeployRequest,
+    InvalidRuntimeAction,
     InvalidVariable,
     SecretsUnavailable,
     InvalidWebhook,
@@ -409,6 +410,7 @@ struct DeploymentResponse {
     runtime_route_status: String,
     runtime_route_error: Option<String>,
     runtime_route_checked_at: Option<i64>,
+    runtime_desired_state: String,
     created_at: i64,
     updated_at: i64,
     finished_at: Option<i64>,
@@ -673,6 +675,14 @@ pub fn router_with_shell_and_domains(
         .route(
             "/api/v1/projects/{project_id}/runtime-logs",
             post(enqueue_runtime_logs),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/runtime-action",
+            get(latest_runtime_action),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/runtime/{action}",
+            post(enqueue_runtime_action),
         )
         .route("/api/v1/projects/{project_id}/shell", get(project_shell))
         .route(
@@ -1551,6 +1561,46 @@ async fn get_job_status(
     let status = state.store.job_status(&job_id).await?;
     let events = state.store.job_events(&job_id).await?;
     Ok(Json(job_status_response(status, events)))
+}
+
+/// Returns the newest durable lifecycle action so progress survives page reloads.
+async fn latest_runtime_action(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    axum::extract::Path(project_id): axum::extract::Path<String>,
+) -> Result<Json<Option<JobStatusResponse>>, ApiError> {
+    require_user(&state.store, &jar).await?;
+    let Some(status) = state.store.latest_runtime_action_job(&project_id).await? else {
+        return Ok(Json(None));
+    };
+    let events = state.store.job_events(&status.id).await?;
+    Ok(Json(Some(job_status_response(status, events))))
+}
+
+/// Queues one validated fixed lifecycle action for the active service container.
+async fn enqueue_runtime_action(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path((project_id, action)): axum::extract::Path<(String, String)>,
+) -> Result<(StatusCode, Json<EnqueuedJobResponse>), ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    if !matches!(action.as_str(), "start" | "stop" | "restart") {
+        return Err(ApiError::InvalidRuntimeAction);
+    }
+    let job = state
+        .store
+        .enqueue_runtime_action(
+            &project_id,
+            &action,
+            &actor.id,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(EnqueuedJobResponse { job_id: job.id }),
+    ))
 }
 
 /// Lists projects for any authenticated member of the shared v0.1 workspace.
@@ -2869,6 +2919,7 @@ fn deployment_response(deployment: Deployment) -> DeploymentResponse {
         runtime_route_status: deployment.runtime_route_status,
         runtime_route_error: deployment.runtime_route_error,
         runtime_route_checked_at: deployment.runtime_route_checked_at,
+        runtime_desired_state: deployment.runtime_desired_state,
         created_at: deployment.created_at,
         updated_at: deployment.updated_at,
         finished_at: deployment.finished_at,
@@ -3188,6 +3239,11 @@ impl IntoResponse for ApiError {
                 "deployment_runtime_missing",
                 "The deployment runtime is not ready to complete.",
             ),
+            Self::Store(StoreError::RuntimeActionInProgress) => (
+                StatusCode::CONFLICT,
+                "runtime_action_in_progress",
+                "Wait for the current service operation to finish before starting another.",
+            ),
             Self::Store(StoreError::DomainAlreadyExists) => (
                 StatusCode::CONFLICT,
                 "domain_already_exists",
@@ -3207,6 +3263,11 @@ impl IntoResponse for ApiError {
                 StatusCode::UNPROCESSABLE_ENTITY,
                 "invalid_deploy_request",
                 "Provide a 40-character Git commit SHA and a valid token label.",
+            ),
+            Self::InvalidRuntimeAction => (
+                StatusCode::UNPROCESSABLE_ENTITY,
+                "invalid_runtime_action",
+                "Choose start, stop, or restart for the active service.",
             ),
             Self::InvalidVariable => (
                 StatusCode::UNPROCESSABLE_ENTITY,

@@ -613,6 +613,18 @@ h1 {
 .deployment-row > .text-action {
   margin: 0 0.75rem 0.75rem;
 }
+.deployment-runtime-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  padding: 0 0.75rem 0.75rem;
+}
+.deployment-runtime-actions .text-action {
+  margin: 0;
+}
+.deployment-runtime-actions .danger-action {
+  padding: 0.35rem 0.6rem;
+}
 .deployment-row .inspection-error {
   grid-column: 1 / -1;
 }

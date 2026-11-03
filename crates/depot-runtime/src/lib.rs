@@ -36,6 +36,20 @@ pub struct RouteIdentity<'a> {
     pub host_port: u16,
 }
 
+/// Current running state for an otherwise exact Docker route identity.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct RouteState {
+    pub running: bool,
+}
+
+/// Fixed lifecycle operations accepted from Depot's durable worker queue.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum ContainerAction {
+    Start,
+    Stop,
+    Restart,
+}
+
 /// One published Docker port returned by the structured inspect template.
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "PascalCase")]
@@ -53,6 +67,8 @@ pub enum RuntimeError {
     Timeout,
     #[error("Docker could not start the release container")]
     StartFailed,
+    #[error("Docker could not apply the requested container lifecycle action")]
+    ControlFailed,
     #[error("Docker returned an invalid container identity or port mapping")]
     InvalidRuntimeIdentity,
     #[error("release container did not become HTTP-ready before its deadline")]
@@ -71,10 +87,24 @@ pub async fn verify_route(
     identity: RouteIdentity<'_>,
     timeout: Duration,
 ) -> Result<(), RuntimeError> {
+    let state = inspect_route(docker_binary, identity, timeout).await?;
+    state
+        .running
+        .then_some(())
+        .ok_or(RuntimeError::RouteMismatch)
+}
+
+/// Inspects an exact container, label, and port mapping even while it is stopped.
+pub async fn inspect_route(
+    docker_binary: &str,
+    identity: RouteIdentity<'_>,
+    timeout: Duration,
+) -> Result<RouteState, RuntimeError> {
     let template = r#"{{.Id}}
 {{.State.Running}}
 {{index .Config.Labels "depot.deployment"}}
-{{json .NetworkSettings.Ports}}"#;
+{{json .NetworkSettings.Ports}}
+{{json .HostConfig.PortBindings}}"#;
     let mut inspect = Command::new(docker_binary);
     inspect
         .args(["inspect", "--format", template, identity.container_id])
@@ -89,15 +119,21 @@ pub async fn verify_route(
     let container_id = lines.next().ok_or(RuntimeError::RouteMismatch)?;
     let running = lines.next().ok_or(RuntimeError::RouteMismatch)?;
     let deployment_id = lines.next().ok_or(RuntimeError::RouteMismatch)?;
-    let ports = lines.collect::<Vec<_>>().join("\n");
-    if container_id != identity.container_id
-        || running != "true"
-        || deployment_id != identity.deployment_id
-    {
+    let network_ports = lines.next().ok_or(RuntimeError::RouteMismatch)?;
+    let configured_ports = lines.next().ok_or(RuntimeError::RouteMismatch)?;
+    if lines.next().is_some() {
         return Err(RuntimeError::RouteMismatch);
     }
+    if container_id != identity.container_id || deployment_id != identity.deployment_id {
+        return Err(RuntimeError::RouteMismatch);
+    }
+    let selected_ports = if running == "true" {
+        network_ports
+    } else {
+        configured_ports
+    };
     let ports: std::collections::HashMap<String, Option<Vec<PublishedPort>>> =
-        serde_json::from_str(&ports).map_err(|_| RuntimeError::RouteMismatch)?;
+        serde_json::from_str(selected_ports).map_err(|_| RuntimeError::RouteMismatch)?;
     let expected = identity.host_port.to_string();
     let matches = ports
         .values()
@@ -108,8 +144,39 @@ pub async fn verify_route(
         })
         .count();
     (matches == 1)
-        .then_some(())
+        .then_some(RouteState {
+            running: running == "true",
+        })
         .ok_or(RuntimeError::RouteMismatch)
+}
+
+/// Applies one idempotent fixed lifecycle action to a verified Depot container.
+pub async fn control_container(
+    docker_binary: &str,
+    identity: RouteIdentity<'_>,
+    action: ContainerAction,
+    timeout: Duration,
+) -> Result<RouteState, RuntimeError> {
+    let state = inspect_route(docker_binary, identity.clone(), timeout).await?;
+    let command_name = match action {
+        ContainerAction::Start if state.running => None,
+        ContainerAction::Stop if !state.running => None,
+        ContainerAction::Start => Some("start"),
+        ContainerAction::Stop => Some("stop"),
+        ContainerAction::Restart => Some("restart"),
+    };
+    if let Some(command_name) = command_name {
+        let mut command = Command::new(docker_binary);
+        command
+            .args([command_name, identity.container_id])
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        let output = command_output(&mut command, timeout).await?;
+        if !output.status.success() {
+            return Err(RuntimeError::ControlFailed);
+        }
+    }
+    inspect_route(docker_binary, identity, timeout).await
 }
 
 /// Starts an image with an ephemeral loopback-only port and resolves its runtime identity.
@@ -356,7 +423,7 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
     use super::{
-        RouteIdentity, StartContainerRequest, container_logs, healthy_http_response,
+        RouteIdentity, StartContainerRequest, container_logs, healthy_http_response, inspect_route,
         start_container, verify_route,
     };
 
@@ -396,7 +463,7 @@ mod tests {
         let fake = root.join("fake-docker");
         fs::write(
             &fake,
-            "#!/bin/sh\nprintf '%s\\n' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' 'true' 'other-deployment' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}'\n",
+            "#!/bin/sh\nprintf '%s\\n' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' 'true' 'other-deployment' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}'\n",
         )
         .expect("fake Docker writes");
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
@@ -425,7 +492,7 @@ mod tests {
         let fake = root.join("fake-docker");
         fs::write(
             &fake,
-            "#!/bin/sh\nprintf '%s\\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'true' 'deployment' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}'\n",
+            "#!/bin/sh\nprintf '%s\\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'true' 'deployment' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}'\n",
         )
         .expect("fake Docker writes");
         fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
@@ -440,6 +507,36 @@ mod tests {
         )
         .await
         .expect("identity matches");
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Uses persistent host port bindings to identify an intentionally stopped service.
+    #[tokio::test]
+    async fn stopped_route_identity_uses_configured_port_binding() {
+        let root = std::env::temp_dir().join(format!(
+            "depot-runtime-route-stopped-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'false' 'deployment' '{}' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}'\n",
+        )
+        .expect("fake Docker writes");
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        let state = inspect_route(
+            fake.to_str().expect("path is UTF-8"),
+            RouteIdentity {
+                deployment_id: "deployment",
+                container_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                host_port: 43123,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("stopped identity matches");
+        assert!(!state.running);
         fs::remove_dir_all(root).expect("test root is removed");
     }
 

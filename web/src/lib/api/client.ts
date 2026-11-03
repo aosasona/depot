@@ -79,6 +79,12 @@ const runtimeLogsSchema = z.object({
   logs: z.string(),
   fetched_at: z.number(),
 });
+const runtimeActionResultSchema = z.object({
+  action: z.enum(["start", "stop", "restart"]),
+  deployment_id: z.string(),
+  container_id: z.string(),
+  state: z.enum(["running", "stopped"]),
+});
 const jobStatusSchema = z.object({
   id: z.string(),
   kind: z.string(),
@@ -92,6 +98,7 @@ const jobStatusSchema = z.object({
       dockerBuildResultSchema,
       staticBuildResultSchema,
       runtimeLogsSchema,
+      runtimeActionResultSchema,
     ])
     .nullable(),
   last_error: z.string().nullable(),
@@ -120,6 +127,7 @@ const deploymentSchema = z.object({
   runtime_route_status: z.enum(["pending", "verified", "error"]),
   runtime_route_error: z.string().nullable(),
   runtime_route_checked_at: z.number().int().nullable(),
+  runtime_desired_state: z.enum(["running", "stopped"]),
   created_at: z.number(),
   updated_at: z.number(),
   finished_at: z.number().nullable(),
@@ -567,6 +575,26 @@ export function getProjectGithubSource(projectId: string) {
 /** Returns durable state, structured inspection result, and ordered events. */
 export function getJobStatus(jobId: string) {
   return request(`/api/v1/jobs/${jobId}`, jobStatusSchema);
+}
+
+/** Loads the newest durable service lifecycle operation for one project. */
+export function getLatestRuntimeAction(projectId: string) {
+  return request(
+    `/api/v1/projects/${projectId}/runtime-action`,
+    jobStatusSchema.nullable(),
+  );
+}
+
+/** Queues a fixed lifecycle operation for the active service container. */
+export function controlProjectRuntime(
+  projectId: string,
+  action: "start" | "stop" | "restart",
+) {
+  return request(
+    `/api/v1/projects/${projectId}/runtime/${action}`,
+    z.object({ job_id: z.string() }),
+    { method: "POST", headers: csrfHeaders() },
+  );
 }
 
 /** Loads one project's persisted build and runtime settings. */

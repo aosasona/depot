@@ -152,6 +152,13 @@ struct InspectionJobPayload {
     requested_by_user_id: Option<String>,
 }
 
+/// Fixed lifecycle action bound to the active deployment selected by the API.
+#[derive(Debug, Deserialize)]
+struct RuntimeActionJobPayload {
+    action: String,
+    deployment_id: String,
+}
+
 /// Embeds the production Vite output into the release executable.
 #[derive(Embed)]
 #[folder = "../../web/dist"]
@@ -264,7 +271,14 @@ async fn inspect_routes(config: Config) -> Result<(), AppError> {
                 deployment_id,
                 container_id,
                 host_port,
+                desired_state,
             }) => {
+                if desired_state == "stopped" {
+                    println!(
+                        "{hostname}\t{project_id}\t{deployment_id}\t{container_id}\t127.0.0.1:{host_port}\tstopped"
+                    );
+                    continue;
+                }
                 let verified = verify_gateway_route(
                     &broker,
                     &project_id,
@@ -1070,6 +1084,7 @@ async fn process_job(
             let completion_message = match job.kind.as_str() {
                 "inspect_repository" => "Repository inspection completed.",
                 "runtime_logs" => "Runtime logs collected.",
+                "runtime_action" => "Runtime lifecycle action completed.",
                 _ => "Deployment work completed.",
             };
             store
@@ -1180,9 +1195,91 @@ async fn execute_job(
         }
         "deploy_project" => execute_deployment(store, worker_config, secrets, github, job).await,
         "runtime_logs" => execute_runtime_logs(store, worker_config, job).await,
+        "runtime_action" => execute_runtime_action(store, worker_config, job).await,
         "reconcile_domains" => execute_domain_reconciliation(store, worker_config).await,
         _ => Err(format!("Unsupported job kind: {}", job.kind)),
     }
+}
+
+/// Applies one fixed lifecycle command only to the still-active stored container.
+async fn execute_runtime_action(
+    store: &Store,
+    worker_config: &depot_core::WorkerConfig,
+    job: &depot_store::Job,
+) -> Result<String, String> {
+    let project_id = job
+        .project_id
+        .as_deref()
+        .ok_or_else(|| "Runtime action is missing its project.".to_owned())?;
+    let payload: RuntimeActionJobPayload = serde_json::from_str(&job.payload_json)
+        .map_err(|_| "Runtime action payload is invalid.".to_owned())?;
+    let deployment = store
+        .deployment_by_id(&payload.deployment_id)
+        .await
+        .map_err(|_| "Runtime deployment no longer exists.".to_owned())?;
+    if deployment.project_id != project_id || !deployment.active || deployment.status != "succeeded"
+    {
+        return Err("Runtime deployment is no longer active.".to_owned());
+    }
+    let container_id = deployment
+        .container_id
+        .as_deref()
+        .ok_or_else(|| "Active deployment has no service container.".to_owned())?;
+    let host_port = deployment
+        .host_port
+        .and_then(|port| u16::try_from(port).ok())
+        .ok_or_else(|| "Active deployment has no valid runtime port.".to_owned())?;
+    let (action, desired_state) = match payload.action.as_str() {
+        "start" => (depot_runtime::ContainerAction::Start, "running"),
+        "stop" => (depot_runtime::ContainerAction::Stop, "stopped"),
+        "restart" => (depot_runtime::ContainerAction::Restart, "running"),
+        _ => return Err("Runtime action is unsupported.".to_owned()),
+    };
+    let state = depot_runtime::control_container(
+        &worker_config.docker_binary,
+        depot_runtime::RouteIdentity {
+            deployment_id: &deployment.id,
+            container_id,
+            host_port,
+        },
+        action,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if desired_state == "running" {
+        if !state.running {
+            return Err("Docker did not leave the service running.".to_owned());
+        }
+        let config = store
+            .service_config(project_id)
+            .await
+            .map_err(|_| "Runtime configuration could not be loaded.".to_owned())?;
+        depot_runtime::wait_for_http_ready(
+            host_port,
+            config.healthcheck_path.as_deref().unwrap_or("/"),
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .map_err(|error| error.to_string())?;
+    } else if state.running {
+        return Err("Docker did not stop the service.".to_owned());
+    }
+    store
+        .record_runtime_desired_state(
+            &deployment.id,
+            desired_state,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await
+        .map_err(|_| "Runtime state could not be persisted.".to_owned())?;
+    serde_json::to_string(&serde_json::json!({
+        "action": payload.action,
+        "deployment_id": deployment.id,
+        "container_id": container_id,
+        "state": desired_state,
+    }))
+    .map_err(|_| "Runtime action result could not be encoded.".to_owned())
 }
 
 /// Reads bounded active-container output without granting Docker access to the API process.
@@ -1762,7 +1859,11 @@ async fn gateway_or_spa(
             deployment_id,
             container_id,
             host_port,
+            desired_state,
         })) => {
+            if desired_state == "stopped" {
+                return StatusCode::SERVICE_UNAVAILABLE.into_response();
+            }
             let verified = verify_gateway_route(
                 &broker,
                 &project_id,

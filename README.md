@@ -140,6 +140,10 @@ leave the current release untouched, and switched-out containers are retired.
 Any prior successful commit can be rebuilt and promoted from the deployment
 history with the rollback action. Depot retains at most five successful service
 images per project while keeping deployment metadata for audit and diagnosis.
+Active service deployments can also be stopped, started, restarted, or
+redeployed from the deployment page. Lifecycle commands run as durable worker
+jobs, revalidate the exact active container before touching Docker, wait for
+HTTP readiness after start/restart, and retain their progress across reloads.
 
 ### 5. Deploy with curl or GitHub Actions
 

@@ -1,10 +1,13 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
+import { useEffect } from "react";
 import {
   ApiError,
+  controlProjectRuntime,
   createDeployment,
   type Deployment,
   getJobStatus,
+  getLatestRuntimeAction,
   listDeployments,
   rollbackDeployment,
 } from "../../lib/api/client";
@@ -37,6 +40,45 @@ export function DeploymentPanel({
       });
     },
   });
+  const runtimeAction = useQuery({
+    queryKey: ["projects", projectId, "runtime-action"],
+    queryFn: () => getLatestRuntimeAction(projectId),
+    refetchInterval: (query) =>
+      query.state.data && ["queued", "running"].includes(query.state.data.state)
+        ? 1_500
+        : false,
+  });
+  const control = useMutation({
+    mutationFn: (action: "start" | "stop" | "restart") =>
+      controlProjectRuntime(projectId, action),
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["projects", projectId, "runtime-action"],
+      });
+      await queryClient.invalidateQueries({
+        queryKey: ["projects", projectId, "deployments"],
+      });
+    },
+  });
+  const actionRunning =
+    control.isPending ||
+    (runtimeAction.data &&
+      ["queued", "running"].includes(runtimeAction.data.state));
+  useEffect(() => {
+    if (
+      runtimeAction.data &&
+      !["queued", "running"].includes(runtimeAction.data.state)
+    ) {
+      void queryClient.invalidateQueries({
+        queryKey: ["projects", projectId, "deployments"],
+      });
+    }
+  }, [projectId, queryClient, runtimeAction.data]);
+  const runtimeResult = runtimeAction.data?.result;
+  const runtimeActionName =
+    runtimeResult && "action" in runtimeResult
+      ? runtimeResult.action
+      : "operation";
   return (
     <div className="deployment-panel">
       <div className="deployment-heading">
@@ -58,6 +100,23 @@ export function DeploymentPanel({
       {create.error && (
         <p className="inspection-error">{deploymentError(create.error)}</p>
       )}
+      {runtimeAction.data && (
+        <p
+          className={
+            runtimeAction.data.state === "failed"
+              ? "inspection-error"
+              : "config-message"
+          }
+        >
+          Service {runtimeActionName} {runtimeAction.data.state}.
+          {runtimeAction.data.events.at(-1)?.message &&
+            ` ${runtimeAction.data.events.at(-1)?.message}`}
+          {runtimeAction.data.last_error && ` ${runtimeAction.data.last_error}`}
+        </p>
+      )}
+      {control.error && (
+        <p className="inspection-error">{deploymentError(control.error)}</p>
+      )}
       {deployments.isPending && (
         <p className="config-message">Loading deployment history…</p>
       )}
@@ -77,6 +136,8 @@ export function DeploymentPanel({
             key={deployment.id}
             deployment={deployment}
             projectId={projectId}
+            actionRunning={Boolean(actionRunning)}
+            onControl={(action) => control.mutate(action)}
           />
         ))}
       </div>
@@ -88,9 +149,13 @@ export function DeploymentPanel({
 function DeploymentRow({
   deployment,
   projectId,
+  actionRunning,
+  onControl,
 }: {
   deployment: Deployment;
   projectId: string;
+  actionRunning: boolean;
+  onControl: (action: "start" | "stop" | "restart") => void;
 }) {
   const queryClient = useQueryClient();
   const rollback = useMutation({
@@ -100,6 +165,15 @@ function DeploymentRow({
         queryKey: ["projects", projectId, "deployments"],
       }),
   });
+  const confirmRollback = (label: string) => {
+    if (
+      window.confirm(
+        `${label} this service from commit ${deployment.commit_sha.slice(0, 12)}?`,
+      )
+    ) {
+      rollback.mutate();
+    }
+  };
   const job = useQuery({
     queryKey: ["jobs", deployment.job_id],
     queryFn: () => getJobStatus(deployment.job_id),
@@ -115,8 +189,18 @@ function DeploymentRow({
         params={{ projectId, deploymentId: deployment.id }}
         aria-label={`View logs for deployment ${deployment.commit_sha.slice(0, 12)}`}
       >
-        <span className={`deployment-status ${deployment.status}`}>
-          {deployment.active ? "active" : deployment.status}
+        <span
+          className={`deployment-status ${
+            deployment.active && deployment.runtime_desired_state === "stopped"
+              ? "failed"
+              : deployment.status
+          }`}
+        >
+          {deployment.active && deployment.runtime_desired_state === "stopped"
+            ? "stopped"
+            : deployment.active
+              ? "active"
+              : deployment.status}
         </span>
         <code>{deployment.commit_sha.slice(0, 12)}</code>
         <span>{deployment.trigger_kind}</span>
@@ -129,10 +213,65 @@ function DeploymentRow({
           className="text-action"
           type="button"
           disabled={rollback.isPending}
-          onClick={() => rollback.mutate()}
+          onClick={() => confirmRollback("Roll back")}
         >
           {rollback.isPending ? "Queueing…" : "Roll back"}
         </button>
+      )}
+      {deployment.active && deployment.container_id && (
+        <div className="deployment-runtime-actions">
+          {deployment.runtime_desired_state === "stopped" ? (
+            <button
+              className="text-action"
+              type="button"
+              disabled={actionRunning}
+              onClick={() => onControl("start")}
+            >
+              Start
+            </button>
+          ) : (
+            <>
+              <button
+                className="text-action"
+                type="button"
+                disabled={actionRunning}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "Restart this service now? Active requests may be interrupted.",
+                    )
+                  )
+                    onControl("restart");
+                }}
+              >
+                Restart
+              </button>
+              <button
+                className="text-action danger-action"
+                type="button"
+                disabled={actionRunning}
+                onClick={() => {
+                  if (
+                    window.confirm(
+                      "Stop this service? Its domains will return unavailable until it is started again.",
+                    )
+                  )
+                    onControl("stop");
+                }}
+              >
+                Stop
+              </button>
+              <button
+                className="text-action"
+                type="button"
+                disabled={rollback.isPending || actionRunning}
+                onClick={() => confirmRollback("Redeploy")}
+              >
+                {rollback.isPending ? "Queueing…" : "Redeploy"}
+              </button>
+            </>
+          )}
+        </div>
       )}
       {rollback.error && (
         <p className="inspection-error">{deploymentError(rollback.error)}</p>
@@ -140,12 +279,15 @@ function DeploymentRow({
       {deployment.failure_reason && (
         <p className="inspection-error">{deployment.failure_reason}</p>
       )}
-      {deployment.active && deployment.runtime_route_status === "error" && (
-        <p className="inspection-error">
-          Route blocked:{" "}
-          {deployment.runtime_route_error ?? "runtime identity did not verify"}
-        </p>
-      )}
+      {deployment.active &&
+        deployment.runtime_desired_state === "running" &&
+        deployment.runtime_route_status === "error" && (
+          <p className="inspection-error">
+            Route blocked:{" "}
+            {deployment.runtime_route_error ??
+              "runtime identity did not verify"}
+          </p>
+        )}
     </div>
   );
 }

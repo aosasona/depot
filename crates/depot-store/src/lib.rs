@@ -220,6 +220,7 @@ pub struct Deployment {
     pub runtime_route_status: String,
     pub runtime_route_error: Option<String>,
     pub runtime_route_checked_at: Option<i64>,
+    pub runtime_desired_state: String,
     pub static_release_path: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
@@ -418,6 +419,7 @@ pub enum GatewayTarget {
         deployment_id: String,
         container_id: String,
         host_port: u16,
+        desired_state: String,
     },
     Static {
         deployment_id: String,
@@ -475,6 +477,8 @@ pub enum StoreError {
     DeploymentNotFound,
     #[error("deployment runtime artifacts must be recorded before completion")]
     DeploymentRuntimeMissing,
+    #[error("another runtime lifecycle action is already queued or running")]
+    RuntimeActionInProgress,
     #[error("a domain with that hostname already exists")]
     DomainAlreadyExists,
     #[error("the requested domain does not exist")]
@@ -2023,6 +2027,7 @@ impl Store {
         let row = sqlx::query(
             "SELECT deployments.id, deployments.project_id, deployments.container_id,
                     deployments.host_port,
+                    deployments.runtime_desired_state,
                     deployments.static_release_path
              FROM domains
              JOIN deployments ON deployments.project_id = domains.project_id
@@ -2059,6 +2064,7 @@ impl Store {
                     deployment_id,
                     container_id: row.try_get("container_id")?,
                     host_port,
+                    desired_state: row.try_get("runtime_desired_state")?,
                 })
             }
         })
@@ -2129,6 +2135,132 @@ impl Store {
         .execute(&self.pool)
         .await?;
         Ok(())
+    }
+
+    /// Persists the operator-requested state after the Docker action succeeds.
+    pub async fn record_runtime_desired_state(
+        &self,
+        deployment_id: &str,
+        desired_state: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "UPDATE deployments
+             SET runtime_desired_state = ?,
+                 runtime_route_status = CASE WHEN ? = 'running' THEN 'verified' ELSE 'error' END,
+                 runtime_route_error = CASE WHEN ? = 'running' THEN NULL ELSE 'Service stopped by an operator.' END,
+                 runtime_route_checked_at = ?, updated_at = ?
+             WHERE id = ? AND active = 1",
+        )
+        .bind(desired_state)
+        .bind(desired_state)
+        .bind(desired_state)
+        .bind(now_unix)
+        .bind(now_unix)
+        .bind(deployment_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() == 0 {
+            return Err(StoreError::DeploymentNotFound);
+        }
+        Ok(())
+    }
+
+    /// Returns the newest lifecycle job so UI state survives reloads.
+    pub async fn latest_runtime_action_job(
+        &self,
+        project_id: &str,
+    ) -> Result<Option<JobStatus>, StoreError> {
+        self.project_by_id(project_id).await?;
+        let row = sqlx::query(
+            "SELECT id, kind, project_id, state, attempts, max_attempts,
+                    result_json, last_error, created_at, updated_at
+             FROM jobs WHERE project_id = ? AND kind = 'runtime_action'
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(JobStatus {
+                id: row.try_get("id")?,
+                kind: row.try_get("kind")?,
+                project_id: row.try_get("project_id")?,
+                state: row.try_get("state")?,
+                attempts: row.try_get("attempts")?,
+                max_attempts: row.try_get("max_attempts")?,
+                result_json: row.try_get("result_json")?,
+                last_error: row.try_get("last_error")?,
+                created_at: row.try_get("created_at")?,
+                updated_at: row.try_get("updated_at")?,
+            })
+        })
+        .transpose()
+    }
+
+    /// Atomically queues one non-overlapping runtime lifecycle operation and audits it.
+    pub async fn enqueue_runtime_action(
+        &self,
+        project_id: &str,
+        action: &str,
+        actor_user_id: &str,
+        now_unix: i64,
+    ) -> Result<Job, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let deployment_id = sqlx::query_scalar::<_, String>(
+            "SELECT id FROM deployments
+             WHERE project_id = ? AND active = 1 AND status = 'succeeded'
+               AND container_id IS NOT NULL AND host_port IS NOT NULL",
+        )
+        .bind(project_id)
+        .fetch_optional(&mut *transaction)
+        .await?
+        .ok_or(StoreError::DeploymentNotFound)?;
+        let existing = sqlx::query_scalar::<_, i64>(
+            "SELECT 1 FROM jobs WHERE project_id = ? AND kind = 'runtime_action'
+               AND state IN ('queued', 'running') LIMIT 1",
+        )
+        .bind(project_id)
+        .fetch_optional(&mut *transaction)
+        .await?;
+        if existing.is_some() {
+            transaction.rollback().await?;
+            return Err(StoreError::RuntimeActionInProgress);
+        }
+        let job_id = Uuid::now_v7().to_string();
+        let payload = format!(r#"{{"action":"{action}","deployment_id":"{deployment_id}"}}"#);
+        sqlx::query(
+            "INSERT INTO jobs
+             (id, kind, project_id, payload_json, state, deduplication_key,
+              attempts, max_attempts, available_at, created_at, updated_at)
+             VALUES (?, 'runtime_action', ?, ?, 'queued', ?, 0, 3, ?, ?, ?)",
+        )
+        .bind(&job_id)
+        .bind(project_id)
+        .bind(&payload)
+        .bind(format!("runtime:{project_id}:{job_id}"))
+        .bind(now_unix)
+        .bind(now_unix)
+        .bind(now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        insert_project_audit(
+            &mut transaction,
+            actor_user_id,
+            &format!("runtime.{action}"),
+            project_id,
+            now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(Job {
+            id: job_id,
+            kind: "runtime_action".to_owned(),
+            project_id: Some(project_id.to_owned()),
+            payload_json: payload,
+            attempts: 0,
+            max_attempts: 3,
+        })
     }
 
     /// Enqueues an independent full-domain reconciliation snapshot.
@@ -2278,6 +2410,7 @@ impl Store {
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
                     failure_reason, image_id, container_id, host_port,
                     runtime_route_status, runtime_route_error, runtime_route_checked_at,
+                    runtime_desired_state,
                     static_release_path, created_at, updated_at, finished_at, active
              FROM deployments
              WHERE project_id = ? AND commit_sha = ? AND trigger_kind = 'manual'
@@ -2307,6 +2440,7 @@ impl Store {
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
                     failure_reason, image_id, container_id, host_port,
                     runtime_route_status, runtime_route_error, runtime_route_checked_at,
+                    runtime_desired_state,
                     static_release_path,
                     created_at, updated_at, finished_at, active
              FROM deployments WHERE project_id = ? ORDER BY created_at DESC, id DESC",
@@ -2323,6 +2457,7 @@ impl Store {
             "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
                     failure_reason, image_id, container_id, host_port,
                     runtime_route_status, runtime_route_error, runtime_route_checked_at,
+                    runtime_desired_state,
                     static_release_path,
                     created_at, updated_at, finished_at, active
              FROM deployments WHERE id = ?",
@@ -2973,6 +3108,7 @@ fn deployment_from_row(row: SqliteRow) -> Result<Deployment, StoreError> {
         runtime_route_status: row.try_get("runtime_route_status")?,
         runtime_route_error: row.try_get("runtime_route_error")?,
         runtime_route_checked_at: row.try_get("runtime_route_checked_at")?,
+        runtime_desired_state: row.try_get("runtime_desired_state")?,
         static_release_path: row.try_get("static_release_path")?,
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
@@ -3520,6 +3656,7 @@ mod tests {
                 container_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
                     .to_owned(),
                 host_port: 43123,
+                desired_state: "running".to_owned(),
             }
         );
     }
@@ -3611,6 +3748,49 @@ mod tests {
                 .await
                 .expect("lookup succeeds")
                 .is_none()
+        );
+
+        let action = store
+            .enqueue_runtime_action(&first.id, "stop", &admin_id, 130)
+            .await
+            .expect("runtime action queues");
+        assert_eq!(action.kind, "runtime_action");
+        assert!(matches!(
+            store
+                .enqueue_runtime_action(&first.id, "restart", &admin_id, 131)
+                .await,
+            Err(StoreError::RuntimeActionInProgress)
+        ));
+        let claimed = store
+            .claim_job("runtime-worker", 132, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("runtime action is claimed");
+        assert_eq!(claimed.id, action.id);
+        store
+            .record_runtime_desired_state(&first_deployment.id, "stopped", 133)
+            .await
+            .expect("desired state records");
+        store
+            .complete_job(&action.id, "runtime-worker", Some("{}"), 134)
+            .await
+            .expect("runtime action completes");
+        assert_eq!(
+            store
+                .deployment_by_id(&first_deployment.id)
+                .await
+                .expect("deployment reloads")
+                .runtime_desired_state,
+            "stopped"
+        );
+        assert_eq!(
+            store
+                .latest_runtime_action_job(&first.id)
+                .await
+                .expect("latest action loads")
+                .expect("action exists")
+                .state,
+            "succeeded"
         );
     }
 
