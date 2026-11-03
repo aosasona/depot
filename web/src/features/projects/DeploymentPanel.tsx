@@ -1,13 +1,10 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "@tanstack/react-router";
-import { useEffect } from "react";
 import {
   ApiError,
-  controlProjectRuntime,
   createDeployment,
   type Deployment,
   getJobStatus,
-  getLatestRuntimeAction,
   listDeployments,
   rollbackDeployment,
 } from "../../lib/api/client";
@@ -40,45 +37,6 @@ export function DeploymentPanel({
       });
     },
   });
-  const runtimeAction = useQuery({
-    queryKey: ["projects", projectId, "runtime-action"],
-    queryFn: () => getLatestRuntimeAction(projectId),
-    refetchInterval: (query) =>
-      query.state.data && ["queued", "running"].includes(query.state.data.state)
-        ? 1_500
-        : false,
-  });
-  const control = useMutation({
-    mutationFn: (action: "start" | "stop" | "restart") =>
-      controlProjectRuntime(projectId, action),
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({
-        queryKey: ["projects", projectId, "runtime-action"],
-      });
-      await queryClient.invalidateQueries({
-        queryKey: ["projects", projectId, "deployments"],
-      });
-    },
-  });
-  const actionRunning =
-    control.isPending ||
-    (runtimeAction.data &&
-      ["queued", "running"].includes(runtimeAction.data.state));
-  useEffect(() => {
-    if (
-      runtimeAction.data &&
-      !["queued", "running"].includes(runtimeAction.data.state)
-    ) {
-      void queryClient.invalidateQueries({
-        queryKey: ["projects", projectId, "deployments"],
-      });
-    }
-  }, [projectId, queryClient, runtimeAction.data]);
-  const runtimeResult = runtimeAction.data?.result;
-  const runtimeActionName =
-    runtimeResult && "action" in runtimeResult
-      ? runtimeResult.action
-      : "operation";
   return (
     <div className="deployment-panel">
       <div className="deployment-heading">
@@ -100,23 +58,6 @@ export function DeploymentPanel({
       {create.error && (
         <p className="inspection-error">{deploymentError(create.error)}</p>
       )}
-      {runtimeAction.data && (
-        <p
-          className={
-            runtimeAction.data.state === "failed"
-              ? "inspection-error"
-              : "config-message"
-          }
-        >
-          Service {runtimeActionName} {runtimeAction.data.state}.
-          {runtimeAction.data.events.at(-1)?.message &&
-            ` ${runtimeAction.data.events.at(-1)?.message}`}
-          {runtimeAction.data.last_error && ` ${runtimeAction.data.last_error}`}
-        </p>
-      )}
-      {control.error && (
-        <p className="inspection-error">{deploymentError(control.error)}</p>
-      )}
       {deployments.isPending && (
         <p className="config-message">Loading deployment history…</p>
       )}
@@ -136,8 +77,6 @@ export function DeploymentPanel({
             key={deployment.id}
             deployment={deployment}
             projectId={projectId}
-            actionRunning={Boolean(actionRunning)}
-            onControl={(action) => control.mutate(action)}
           />
         ))}
       </div>
@@ -149,13 +88,9 @@ export function DeploymentPanel({
 function DeploymentRow({
   deployment,
   projectId,
-  actionRunning,
-  onControl,
 }: {
   deployment: Deployment;
   projectId: string;
-  actionRunning: boolean;
-  onControl: (action: "start" | "stop" | "restart") => void;
 }) {
   const queryClient = useQueryClient();
   const rollback = useMutation({
@@ -165,10 +100,10 @@ function DeploymentRow({
         queryKey: ["projects", projectId, "deployments"],
       }),
   });
-  const confirmRollback = (label: string) => {
+  const confirmRollback = () => {
     if (
       window.confirm(
-        `${label} this service from commit ${deployment.commit_sha.slice(0, 12)}?`,
+        `Roll back this service to commit ${deployment.commit_sha.slice(0, 12)}?`,
       )
     ) {
       rollback.mutate();
@@ -213,65 +148,10 @@ function DeploymentRow({
           className="text-action"
           type="button"
           disabled={rollback.isPending}
-          onClick={() => confirmRollback("Roll back")}
+          onClick={confirmRollback}
         >
           {rollback.isPending ? "Queueing…" : "Roll back"}
         </button>
-      )}
-      {deployment.active && deployment.container_id && (
-        <div className="deployment-runtime-actions">
-          {deployment.runtime_desired_state === "stopped" ? (
-            <button
-              className="text-action"
-              type="button"
-              disabled={actionRunning}
-              onClick={() => onControl("start")}
-            >
-              Start
-            </button>
-          ) : (
-            <>
-              <button
-                className="text-action"
-                type="button"
-                disabled={actionRunning}
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      "Restart this service now? Active requests may be interrupted.",
-                    )
-                  )
-                    onControl("restart");
-                }}
-              >
-                Restart
-              </button>
-              <button
-                className="text-action danger-action"
-                type="button"
-                disabled={actionRunning}
-                onClick={() => {
-                  if (
-                    window.confirm(
-                      "Stop this service? Its domains will return unavailable until it is started again.",
-                    )
-                  )
-                    onControl("stop");
-                }}
-              >
-                Stop
-              </button>
-              <button
-                className="text-action"
-                type="button"
-                disabled={rollback.isPending || actionRunning}
-                onClick={() => confirmRollback("Redeploy")}
-              >
-                {rollback.isPending ? "Queueing…" : "Redeploy"}
-              </button>
-            </>
-          )}
-        </div>
       )}
       {rollback.error && (
         <p className="inspection-error">{deploymentError(rollback.error)}</p>

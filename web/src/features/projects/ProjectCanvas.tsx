@@ -2,11 +2,14 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
+  controlProjectRuntime,
   createProject,
+  getLatestRuntimeAction,
   getServiceConfig,
   listDeployments,
   listDomains,
   listVariables,
+  rollbackDeployment,
   type Project,
   updateServiceConfig,
   upsertVariable,
@@ -14,6 +17,15 @@ import {
 import { ContainerFileBrowser } from "./ContainerFileBrowser";
 
 type NodeKind = "app" | "database" | "redis" | "storage" | "domain";
+type NodeAction =
+  | "inspect"
+  | "clone"
+  | "shell"
+  | "files"
+  | "start"
+  | "stop"
+  | "restart"
+  | "redeploy";
 type CanvasNode = {
   id: string;
   kind: NodeKind;
@@ -43,6 +55,14 @@ export function ProjectCanvas({ project }: { project: Project }) {
     queryKey: ["projects", project.id, "deployments"],
     queryFn: () => listDeployments(project.id),
   });
+  const runtimeAction = useQuery({
+    queryKey: ["projects", project.id, "runtime-action"],
+    queryFn: () => getLatestRuntimeAction(project.id),
+    refetchInterval: (query) =>
+      query.state.data && ["queued", "running"].includes(query.state.data.state)
+        ? 1_500
+        : false,
+  });
   const [selected, setSelected] = useState<CanvasNode>();
   const [menu, setMenu] = useState<{
     node: CanvasNode;
@@ -57,13 +77,37 @@ export function ProjectCanvas({ project }: { project: Project }) {
   const [filesOpen, setFilesOpen] = useState(false);
   const [message, setMessage] = useState<string>();
   const active = deployments.data?.find((deployment) => deployment.active);
+  const control = useMutation({
+    mutationFn: (action: "start" | "stop" | "restart") =>
+      controlProjectRuntime(project.id, action),
+    onSuccess: async () => {
+      await client.invalidateQueries({
+        queryKey: ["projects", project.id, "runtime-action"],
+      });
+    },
+  });
+  const redeploy = useMutation({
+    mutationFn: (deploymentId: string) => rollbackDeployment(deploymentId),
+    onSuccess: async () => {
+      await client.invalidateQueries({
+        queryKey: ["projects", project.id, "deployments"],
+      });
+    },
+  });
+  const serviceBusy =
+    control.isPending ||
+    redeploy.isPending ||
+    Boolean(
+      runtimeAction.data &&
+        ["queued", "running"].includes(runtimeAction.data.state),
+    );
   const nodes = useMemo(
     () =>
       buildNodes(
         project,
         variables.data ?? [],
         domains.data ?? [],
-        Boolean(active),
+        active?.runtime_desired_state,
       ),
     [active, domains.data, project, variables.data],
   );
@@ -76,6 +120,17 @@ export function ProjectCanvas({ project }: { project: Project }) {
     document.addEventListener("click", closeMenu);
     return () => document.removeEventListener("click", closeMenu);
   }, []);
+
+  useEffect(() => {
+    if (
+      runtimeAction.data &&
+      !["queued", "running"].includes(runtimeAction.data.state)
+    ) {
+      void client.invalidateQueries({
+        queryKey: ["projects", project.id, "deployments"],
+      });
+    }
+  }, [client, project.id, runtimeAction.data]);
 
   useEffect(() => {
     const parameters = new URLSearchParams(window.location.search);
@@ -97,7 +152,7 @@ export function ProjectCanvas({ project }: { project: Project }) {
     setMenu({
       node,
       x: Math.min(event.clientX, window.innerWidth - 190),
-      y: Math.min(event.clientY, window.innerHeight - 180),
+      y: Math.min(event.clientY, window.innerHeight - 330),
     });
   }
 
@@ -136,14 +191,34 @@ export function ProjectCanvas({ project }: { project: Project }) {
   }
 
   /** Dispatches a context action for the selected topology node. */
-  function act(
-    action: "inspect" | "clone" | "shell" | "files",
-    node: CanvasNode,
-  ) {
+  function act(action: NodeAction, node: CanvasNode) {
     setMenu(undefined);
     if (action === "inspect") return setSelected(node);
     if (action === "shell" && node.kind === "app") return setShellOpen(true);
     if (action === "files" && node.kind === "app") return setFilesOpen(true);
+    if (
+      node.kind === "app" &&
+      (action === "start" || action === "stop" || action === "restart")
+    ) {
+      const confirmed =
+        action === "start" ||
+        window.confirm(
+          action === "stop"
+            ? "Stop this service? Its domains will return unavailable until it is started again."
+            : "Restart this service now? Active requests may be interrupted.",
+        );
+      if (confirmed) control.mutate(action);
+      return;
+    }
+    if (action === "redeploy" && node.kind === "app" && active) {
+      if (
+        window.confirm(
+          `Redeploy commit ${active.commit_sha.slice(0, 12)} for this service?`,
+        )
+      )
+        redeploy.mutate(active.id);
+      return;
+    }
     if (action === "clone" && node.kind === "app") {
       void cloneProject();
       return;
@@ -166,9 +241,12 @@ export function ProjectCanvas({ project }: { project: Project }) {
           <button
             className="table-action file-action"
             type="button"
-            disabled={!active?.container_id}
+            disabled={
+              !active?.container_id ||
+              active.runtime_desired_state === "stopped"
+            }
             title={
-              active?.container_id
+              active?.container_id && active.runtime_desired_state !== "stopped"
                 ? "Browse files in the active release container"
                 : "Deploy the project before browsing files"
             }
@@ -182,9 +260,12 @@ export function ProjectCanvas({ project }: { project: Project }) {
           <button
             className="table-action shell-action"
             type="button"
-            disabled={!active?.container_id}
+            disabled={
+              !active?.container_id ||
+              active.runtime_desired_state === "stopped"
+            }
             title={
-              active?.container_id
+              active?.container_id && active.runtime_desired_state !== "stopped"
                 ? "Open a command shell in the active release container"
                 : "Deploy the project before opening a shell"
             }
@@ -238,7 +319,35 @@ export function ProjectCanvas({ project }: { project: Project }) {
           {message}
         </p>
       )}
-      {menu && <NodeMenu menu={menu} onAction={act} />}
+      {runtimeAction.data && (
+        <p
+          className={
+            runtimeAction.data.state === "failed"
+              ? "notice danger"
+              : "notice success"
+          }
+          role="status"
+        >
+          Service operation {runtimeAction.data.state}.
+          {runtimeAction.data.last_error && ` ${runtimeAction.data.last_error}`}
+        </p>
+      )}
+      {(control.error || redeploy.error) && (
+        <p className="notice danger" role="alert">
+          {errorMessage(control.error ?? redeploy.error)}
+        </p>
+      )}
+      {menu && (
+        <NodeMenu
+          menu={menu}
+          onAction={act}
+          service={{
+            available: Boolean(active?.container_id),
+            stopped: active?.runtime_desired_state === "stopped",
+            busy: serviceBusy,
+          }}
+        />
+      )}
       {selected && (
         <InspectDrawer
           node={selected}
@@ -265,14 +374,18 @@ export function ProjectCanvas({ project }: { project: Project }) {
       {shellOpen && (
         <ShellDialog
           projectId={project.id}
-          available={Boolean(active?.container_id)}
+          available={Boolean(
+            active?.container_id && active.runtime_desired_state !== "stopped",
+          )}
           onClose={() => setShellOpen(false)}
         />
       )}
       {filesOpen && (
         <ContainerFileBrowser
           projectId={project.id}
-          available={Boolean(active?.container_id)}
+          available={Boolean(
+            active?.container_id && active.runtime_desired_state !== "stopped",
+          )}
           onClose={() => setFilesOpen(false)}
         />
       )}
@@ -285,15 +398,21 @@ function buildNodes(
   project: Project,
   variables: Awaited<ReturnType<typeof listVariables>>,
   domains: Awaited<ReturnType<typeof listDomains>>,
-  active: boolean,
+  runtimeState?: string,
 ): CanvasNode[] {
+  const running = runtimeState === "running";
   const nodes: CanvasNode[] = [
     {
       id: project.id,
       kind: "app",
       label: project.name,
-      detail: active ? "Active application" : "Application not deployed",
-      active,
+      detail:
+        runtimeState === "stopped"
+          ? "Stopped application"
+          : running
+            ? "Active application"
+            : "Application not deployed",
+      active: running,
     },
   ];
   for (const candidate of resourcePatterns) {
@@ -356,12 +475,11 @@ function CanvasCard({
 function NodeMenu({
   menu,
   onAction,
+  service,
 }: {
   menu: { node: CanvasNode; x: number; y: number };
-  onAction: (
-    action: "inspect" | "clone" | "shell" | "files",
-    node: CanvasNode,
-  ) => void;
+  onAction: (action: NodeAction, node: CanvasNode) => void;
+  service: { available: boolean; stopped: boolean; busy: boolean };
 }) {
   return (
     <div
@@ -388,9 +506,50 @@ function NodeMenu({
       )}
       {menu.node.kind === "app" && (
         <>
+          {service.available &&
+            (service.stopped ? (
+              <button
+                type="button"
+                role="menuitem"
+                disabled={service.busy}
+                onClick={() => onAction("start", menu.node)}
+              >
+                Start service
+              </button>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={service.busy}
+                  onClick={() => onAction("restart", menu.node)}
+                >
+                  Restart service
+                </button>
+                <button
+                  type="button"
+                  role="menuitem"
+                  disabled={service.busy}
+                  onClick={() => onAction("stop", menu.node)}
+                >
+                  Stop service
+                </button>
+              </>
+            ))}
+          {service.available && (
+            <button
+              type="button"
+              role="menuitem"
+              disabled={service.busy}
+              onClick={() => onAction("redeploy", menu.node)}
+            >
+              Redeploy
+            </button>
+          )}
           <button
             type="button"
             role="menuitem"
+            disabled={!service.available || service.stopped}
             onClick={() => onAction("files", menu.node)}
           >
             Browse files
@@ -398,6 +557,7 @@ function NodeMenu({
           <button
             type="button"
             role="menuitem"
+            disabled={!service.available || service.stopped}
             onClick={() => onAction("shell", menu.node)}
           >
             Open shell
