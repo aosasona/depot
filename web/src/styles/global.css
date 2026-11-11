@@ -509,6 +509,27 @@ h1 {
   letter-spacing: normal;
   text-transform: none;
 }
+.config-form label > small {
+  color: var(--muted);
+  font-family: var(--ui-font);
+  font-size: 0.68rem;
+  font-weight: 400;
+  letter-spacing: normal;
+  line-height: 1.45;
+  text-transform: none;
+}
+.config-port-options {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  color: var(--muted);
+  letter-spacing: normal;
+  text-transform: none;
+}
+.config-port-options .table-action {
+  min-height: 28px;
+  padding: 0 0.55rem;
+}
 .config-path-field {
   display: grid;
   grid-column: 1 / -1;

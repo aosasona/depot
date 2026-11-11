@@ -30,6 +30,7 @@ pub struct RepositoryInspection {
     pub builder: DetectedBuilder,
     pub reason: String,
     pub has_mise_config: bool,
+    pub exposed_ports: Vec<u16>,
 }
 
 /// Decrypted SSH material borrowed only for the duration of one Git operation.
@@ -87,6 +88,8 @@ pub enum GitError {
 pub async fn inspect_repository(
     repository_url: &str,
     branch: &str,
+    context_path: &str,
+    dockerfile_path: &str,
     workspace_root: &Path,
     timeout: Duration,
     ssh_credentials: Option<GitSshCredentials<'_>>,
@@ -138,13 +141,17 @@ pub async fn inspect_repository(
     if commit_sha.len() != 40 || !commit_sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(GitError::InvalidCommit);
     }
-    let (builder, reason) = detect_builder(workspace.path());
+    let context = workspace.path().join(context_path);
+    let dockerfile = workspace.path().join(dockerfile_path);
+    let (builder, reason) = detect_builder(&context, &dockerfile);
+    let exposed_ports = dockerfile_exposed_ports(&dockerfile);
     Ok(RepositoryInspection {
         commit_sha,
         builder,
         reason,
-        has_mise_config: workspace.path().join("mise.toml").is_file()
-            || workspace.path().join(".mise.toml").is_file(),
+        has_mise_config: context.join("mise.toml").is_file()
+            || context.join(".mise.toml").is_file(),
+        exposed_ports,
     })
 }
 
@@ -315,20 +322,20 @@ async fn run_status(command: &mut Command, timeout: Duration) -> Result<(), GitE
 }
 
 /// Detects the most explicit supported builder and records why it was selected.
-fn detect_builder(repository: &Path) -> (DetectedBuilder, String) {
-    if repository.join("Dockerfile").is_file() {
+fn detect_builder(context: &Path, dockerfile: &Path) -> (DetectedBuilder, String) {
+    if dockerfile.is_file() {
         return (
             DetectedBuilder::Dockerfile,
-            "Dockerfile exists at the repository root.".to_owned(),
+            "The configured Dockerfile exists.".to_owned(),
         );
     }
-    if repository.join("package.json").is_file() || repository.join("Cargo.toml").is_file() {
+    if context.join("package.json").is_file() || context.join("Cargo.toml").is_file() {
         return (
             DetectedBuilder::Railpack,
             "A supported application manifest is available for Railpack detection.".to_owned(),
         );
     }
-    if repository.join("index.html").is_file() {
+    if context.join("index.html").is_file() {
         return (
             DetectedBuilder::Static,
             "A root index.html is available as a static artifact.".to_owned(),
@@ -338,6 +345,63 @@ fn detect_builder(repository: &Path) -> (DetectedBuilder, String) {
         DetectedBuilder::Unknown,
         "No Dockerfile or supported application/static manifest was detected.".to_owned(),
     )
+}
+
+/// Returns the distinct TCP ports declared by EXPOSE in the Dockerfile's final stage.
+fn dockerfile_exposed_ports(path: &Path) -> Vec<u16> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut logical_lines = Vec::new();
+    let mut current = String::new();
+    for raw in contents.lines() {
+        let line = raw.trim();
+        if line.is_empty() || (current.is_empty() && line.starts_with('#')) {
+            continue;
+        }
+        let continued = line.ends_with('\\');
+        let fragment = line.strip_suffix('\\').unwrap_or(line).trim();
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(fragment);
+        if !continued {
+            logical_lines.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        logical_lines.push(current);
+    }
+
+    let mut ports = Vec::new();
+    for line in logical_lines {
+        let mut fields = line.split_ascii_whitespace();
+        let Some(instruction) = fields.next() else {
+            continue;
+        };
+        if instruction.eq_ignore_ascii_case("FROM") {
+            ports.clear();
+            continue;
+        }
+        if !instruction.eq_ignore_ascii_case("EXPOSE") {
+            continue;
+        }
+        for value in fields {
+            let value = value.trim_matches([',', '"', '[', ']']);
+            let (port, protocol) = value.split_once('/').unwrap_or((value, "tcp"));
+            if !protocol.eq_ignore_ascii_case("tcp") {
+                continue;
+            }
+            if let Ok(port) = port.parse::<u16>()
+                && port > 0
+                && !ports.contains(&port)
+            {
+                ports.push(port);
+            }
+        }
+    }
+    ports.sort_unstable();
+    ports
 }
 
 /// Removes the isolated checkout on every success and error path.
@@ -436,8 +500,8 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt};
 
     use super::{
-        DetectedBuilder, GitError, GitSshCredentials, detect_builder, prepare_ssh_command,
-        require_ssh_credentials,
+        DetectedBuilder, GitError, GitSshCredentials, detect_builder, dockerfile_exposed_ports,
+        prepare_ssh_command, require_ssh_credentials,
     };
 
     /// Creates an isolated test directory without adding a runtime temp dependency.
@@ -453,7 +517,10 @@ mod tests {
         let path = test_directory();
         fs::write(path.join("Dockerfile"), "FROM scratch").expect("Dockerfile writes");
         fs::write(path.join("package.json"), "{}").expect("manifest writes");
-        assert_eq!(detect_builder(&path).0, DetectedBuilder::Dockerfile);
+        assert_eq!(
+            detect_builder(&path, &path.join("Dockerfile")).0,
+            DetectedBuilder::Dockerfile
+        );
         fs::remove_dir_all(path).expect("test directory is removed");
     }
 
@@ -462,7 +529,24 @@ mod tests {
     fn root_html_detects_static_site() {
         let path = test_directory();
         fs::write(path.join("index.html"), "<!doctype html>").expect("HTML writes");
-        assert_eq!(detect_builder(&path).0, DetectedBuilder::Static);
+        assert_eq!(
+            detect_builder(&path, &path.join("Dockerfile")).0,
+            DetectedBuilder::Static
+        );
+        fs::remove_dir_all(path).expect("test directory is removed");
+    }
+
+    /// Uses only valid TCP declarations from the final Docker build stage.
+    #[test]
+    fn dockerfile_ports_are_deduplicated_and_stage_aware() {
+        let path = test_directory();
+        let dockerfile = path.join("Containerfile");
+        fs::write(
+            &dockerfile,
+            "FROM node AS build\nEXPOSE 9999\nFROM alpine\nEXPOSE 3000 3000/tcp 5353/udp \\\n+             8080\nEXPOSE $PORT\n",
+        )
+        .expect("Dockerfile writes");
+        assert_eq!(dockerfile_exposed_ports(&dockerfile), vec![3000, 8080]);
         fs::remove_dir_all(path).expect("test directory is removed");
     }
 
@@ -518,6 +602,8 @@ mod tests {
         let result = super::inspect_repository(
             &repository_url,
             "main",
+            ".",
+            "Dockerfile",
             &workspace,
             std::time::Duration::from_secs(120),
             None,

@@ -240,6 +240,16 @@ function ProjectWorkspace({
                   {inspectionResult.has_mise_config && (
                     <span>mise configuration detected.</span>
                   )}
+                  {inspectionResult.exposed_ports.length > 0 && (
+                    <span>
+                      Dockerfile ports: {inspectionResult.exposed_ports.join(", ")}
+                      {inspectionResult.inferred_port
+                        ? ` — ${inspectionResult.inferred_port} selected automatically.`
+                        : inspectionResult.exposed_ports.length > 1
+                          ? " — choose the service port in Settings before deploying."
+                          : ""}
+                    </span>
+                  )}
                 </div>
               ) : (
                 <p className="surface-empty">
@@ -312,7 +322,10 @@ function ProjectWorkspace({
                   <span>Builder, paths, port, and health checks.</span>
                 </div>
               </div>
-              <ServiceConfigForm projectId={project.id} />
+              <ServiceConfigForm
+                projectId={project.id}
+                suggestedPorts={inspectionResult?.exposed_ports ?? []}
+              />
             </section>
             {project.repository_url.startsWith("ssh://") && (
               <section className="project-surface">

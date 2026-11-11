@@ -1399,6 +1399,10 @@ async fn execute_inspection(
         .project_by_id(project_id)
         .await
         .map_err(|_| "Inspection project no longer exists.".to_owned())?;
+    let mut config = store
+        .service_config(project_id)
+        .await
+        .map_err(|_| "Inspection configuration is unavailable.".to_owned())?;
     let mut ssh =
         load_project_ssh_credentials(store, secrets, project_id, &project.repository_url).await?;
     let git_credentials =
@@ -1414,6 +1418,8 @@ async fn execute_inspection(
     let inspection = depot_git::inspect_repository(
         &project.repository_url,
         &project.branch,
+        &config.context_path,
+        &config.dockerfile_path,
         std::path::Path::new(&worker_config.workspace_root),
         std::time::Duration::from_secs(worker_config.git_timeout_seconds),
         git_credentials,
@@ -1429,11 +1435,44 @@ async fn execute_inspection(
     let inspection = inspection.map_err(|error| error.to_string())?;
     let mut result = serde_json::to_value(&inspection)
         .map_err(|_| "Repository inspection result could not be encoded.".to_owned())?;
+    if config.exposed_port.is_none()
+        && inspection.exposed_ports.len() == 1
+        && config.project_kind != "static"
+        && let Some(actor) = payload.requested_by_user_id.as_deref()
+    {
+        config = store
+            .update_service_config(
+                project_id,
+                depot_store::UpdateServiceConfig {
+                    project_kind: &config.project_kind,
+                    builder: &config.builder,
+                    context_path: &config.context_path,
+                    dockerfile_path: &config.dockerfile_path,
+                    static_output_dir: config.static_output_dir.as_deref(),
+                    exposed_port: Some(i64::from(inspection.exposed_ports[0])),
+                    healthcheck_path: config.healthcheck_path.as_deref(),
+                    actor_user_id: actor,
+                    now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
+                },
+            )
+            .await
+            .map_err(|_| "Detected service port could not be saved.".to_owned())?;
+        result["inferred_port"] = serde_json::json!(config.exposed_port);
+    }
     if payload.deploy_after_inspection {
         let actor = payload
             .requested_by_user_id
             .as_deref()
             .ok_or_else(|| "Initial deployment has no requesting user.".to_owned())?;
+        if config.project_kind != "static" && config.exposed_port.is_none() {
+            return Err(match inspection.exposed_ports.as_slice() {
+                [] => "Choose the service's internal container port before deploying; the configured Dockerfile has no usable EXPOSE instruction.".to_owned(),
+                ports => format!(
+                    "Choose the service's internal container port before deploying. The configured Dockerfile exposes: {}.",
+                    ports.iter().map(u16::to_string).collect::<Vec<_>>().join(", ")
+                ),
+            });
+        }
         let deployment = store
             .create_initial_deployment(
                 project_id,

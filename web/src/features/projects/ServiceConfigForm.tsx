@@ -53,7 +53,13 @@ const configFormSchema = z
   });
 
 /** Loads and reveals the editable service configuration for one project. */
-export function ServiceConfigForm({ projectId }: { projectId: string }) {
+export function ServiceConfigForm({
+  projectId,
+  suggestedPorts = [],
+}: {
+  projectId: string;
+  suggestedPorts?: number[];
+}) {
   const [expanded, setExpanded] = useState(false);
   const config = useQuery({
     queryKey: ["projects", projectId, "config"],
@@ -86,6 +92,7 @@ export function ServiceConfigForm({ projectId }: { projectId: string }) {
           key={config.data.updated_at}
           config={config.data}
           githubSource={githubSource.data ?? null}
+          suggestedPorts={suggestedPorts}
         />
       )}
     </div>
@@ -96,9 +103,11 @@ export function ServiceConfigForm({ projectId }: { projectId: string }) {
 function LoadedConfigForm({
   config,
   githubSource,
+  suggestedPorts,
 }: {
   config: ServiceConfig;
   githubSource: ProjectGithubSource | null;
+  suggestedPorts: number[];
 }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<string>();
@@ -117,7 +126,9 @@ function LoadedConfigForm({
       context_path: config.context_path,
       dockerfile_path: config.dockerfile_path,
       static_output_dir: config.static_output_dir ?? "",
-      exposed_port: config.exposed_port?.toString() ?? "",
+      exposed_port:
+        config.exposed_port?.toString() ??
+        (suggestedPorts.length === 1 ? String(suggestedPorts[0]) : ""),
       healthcheck_path: config.healthcheck_path ?? "",
     },
     onSubmit: async ({ value }) => {
@@ -337,7 +348,7 @@ function LoadedConfigForm({
       <form.Field name="exposed_port">
         {(field) => (
           <label>
-            Service port
+            Internal container port
             <input
               type="number"
               min="1"
@@ -346,6 +357,25 @@ function LoadedConfigForm({
               value={field.state.value}
               onChange={(event) => field.handleChange(event.target.value)}
             />
+            <small>
+              The port the application listens on inside its container, not a
+              public host port.
+            </small>
+            {suggestedPorts.length > 1 && (
+              <span className="config-port-options">
+                Detected in Dockerfile:{" "}
+                {suggestedPorts.map((port) => (
+                  <button
+                    className="table-action"
+                    type="button"
+                    key={port}
+                    onClick={() => field.handleChange(String(port))}
+                  >
+                    {port}
+                  </button>
+                ))}
+              </span>
+            )}
           </label>
         )}
       </form.Field>

@@ -1497,7 +1497,7 @@ async fn enqueue_project_inspection(
     headers: HeaderMap,
     axum::extract::Path(project_id): axum::extract::Path<String>,
 ) -> Result<(StatusCode, Json<EnqueuedJobResponse>), ApiError> {
-    require_mutation(&state.store, &jar, &headers).await?;
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
     let project = state.store.project_by_id(&project_id).await?;
     let now = time::OffsetDateTime::now_utc().unix_timestamp();
     let deduplication_key = format!("inspect:{}:{}", project.id, project.updated_at);
@@ -1506,7 +1506,10 @@ async fn enqueue_project_inspection(
         .enqueue_job(NewJob {
             kind: "inspect_repository",
             project_id: Some(&project.id),
-            payload_json: "{}",
+            payload_json: &serde_json::json!({
+                "requested_by_user_id": actor.id,
+            })
+            .to_string(),
             deduplication_key: &deduplication_key,
             max_attempts: 3,
             now_unix: now,
@@ -2117,6 +2120,19 @@ async fn create_deployment(
         .and_then(serde_json::Value::as_str)
         .filter(|value| value.len() == 40 && value.bytes().all(|byte| byte.is_ascii_hexdigit()))
         .ok_or(ApiError::ProjectNotInspected)?;
+    let config = state.store.service_config(&project_id).await?;
+    if config.project_kind != "static" && config.exposed_port.is_none() {
+        return Err(ApiError::InvalidProjectField(
+            "Choose the service's internal container port before deploying.",
+        ));
+    }
+    if let Some(path) = config.healthcheck_path.as_deref()
+        && (!path.starts_with('/') || path.len() > 255 || path.chars().any(char::is_control))
+    {
+        return Err(ApiError::InvalidProjectField(
+            "Health-check path is invalid.",
+        ));
+    }
     let deployment = state
         .store
         .create_deployment(NewDeployment {

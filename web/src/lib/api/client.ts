@@ -60,6 +60,8 @@ const inspectionResultSchema = z.object({
   builder: z.enum(["dockerfile", "railpack", "static", "unknown"]),
   reason: z.string(),
   has_mise_config: z.boolean(),
+  exposed_ports: z.array(z.number().int()).default([]),
+  inferred_port: z.number().int().optional(),
   initial_deployment_id: z.string().optional(),
 });
 const dockerBuildResultSchema = z.object({
