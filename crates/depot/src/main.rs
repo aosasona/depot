@@ -8,7 +8,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     body::Body,
-    http::{HeaderMap, Request, StatusCode, Uri, header},
+    http::{HeaderMap, HeaderValue, Request, StatusCode, Uri, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::get,
@@ -2118,7 +2118,12 @@ fn request_hostname(headers: &HeaderMap) -> Option<String> {
 
 /// Proxies one request to a database-selected loopback port using an HTTP/1 connection.
 async fn proxy_to_runtime(mut request: Request<Body>, host_port: u16) -> Response {
+    let websocket = websocket_upgrade_requested(request.headers());
+    let downstream_upgrade = websocket.then(|| hyper::upgrade::on(&mut request));
     strip_hop_by_hop_headers(request.headers_mut());
+    if websocket {
+        set_websocket_upgrade_headers(request.headers_mut());
+    }
     let stream = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         tokio::net::TcpStream::connect((std::net::Ipv4Addr::LOCALHOST, host_port)),
@@ -2133,7 +2138,7 @@ async fn proxy_to_runtime(mut request: Request<Body>, host_port: u16) -> Respons
         Err(_) => return StatusCode::BAD_GATEWAY.into_response(),
     };
     tokio::spawn(async move {
-        if let Err(error) = connection.await {
+        if let Err(error) = connection.with_upgrades().await {
             tracing::debug!(%error, "gateway upstream connection closed");
         }
     });
@@ -2143,7 +2148,35 @@ async fn proxy_to_runtime(mut request: Request<Body>, host_port: u16) -> Respons
     )
     .await
     {
-        Ok(Ok(upstream)) => {
+        Ok(Ok(mut upstream)) => {
+            if websocket
+                && upstream.status() == StatusCode::SWITCHING_PROTOCOLS
+                && websocket_upgrade_requested(upstream.headers())
+            {
+                let upstream_upgrade = hyper::upgrade::on(&mut upstream);
+                let downstream_upgrade = downstream_upgrade
+                    .expect("WebSocket requests always retain their downstream upgrade");
+                tokio::spawn(async move {
+                    match tokio::try_join!(downstream_upgrade, upstream_upgrade) {
+                        Ok((downstream, upstream)) => {
+                            let mut downstream = TokioIo::new(downstream);
+                            let mut upstream = TokioIo::new(upstream);
+                            if let Err(error) =
+                                tokio::io::copy_bidirectional(&mut downstream, &mut upstream).await
+                            {
+                                tracing::debug!(%error, "gateway WebSocket tunnel closed");
+                            }
+                        }
+                        Err(error) => {
+                            tracing::debug!(%error, "gateway WebSocket upgrade failed");
+                        }
+                    }
+                });
+                let (mut parts, body) = upstream.into_parts();
+                strip_hop_by_hop_headers(&mut parts.headers);
+                set_websocket_upgrade_headers(&mut parts.headers);
+                return Response::from_parts(parts, Body::new(body));
+            }
             let (mut parts, body) = upstream.into_parts();
             strip_hop_by_hop_headers(&mut parts.headers);
             Response::from_parts(parts, Body::new(body))
@@ -2152,8 +2185,44 @@ async fn proxy_to_runtime(mut request: Request<Body>, host_port: u16) -> Respons
     }
 }
 
+/// Recognizes only the HTTP/1 WebSocket upgrade handshake understood by the tunnel.
+fn websocket_upgrade_requested(headers: &HeaderMap) -> bool {
+    header_contains_token(headers, header::CONNECTION, "upgrade")
+        && headers
+            .get(header::UPGRADE)
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| value.trim().eq_ignore_ascii_case("websocket"))
+}
+
+/// Replaces untrusted connection metadata with the minimum WebSocket handshake pair.
+fn set_websocket_upgrade_headers(headers: &mut HeaderMap) {
+    headers.insert(header::CONNECTION, HeaderValue::from_static("upgrade"));
+    headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+}
+
+/// Tests one comma-delimited HTTP header for an ASCII case-insensitive token.
+fn header_contains_token(headers: &HeaderMap, name: header::HeaderName, expected: &str) -> bool {
+    headers.get_all(name).iter().any(|value| {
+        value.to_str().ok().is_some_and(|value| {
+            value
+                .split(',')
+                .any(|token| token.trim().eq_ignore_ascii_case(expected))
+        })
+    })
+}
+
 /// Removes connection-specific headers which cannot cross proxy hops safely.
 fn strip_hop_by_hop_headers(headers: &mut HeaderMap) {
+    let connection_headers = headers
+        .get_all(header::CONNECTION)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .filter_map(|name| header::HeaderName::from_bytes(name.trim().as_bytes()).ok())
+        .collect::<Vec<_>>();
+    for name in connection_headers {
+        headers.remove(name);
+    }
     for name in [
         header::CONNECTION,
         header::PROXY_AUTHENTICATE,
@@ -2226,7 +2295,8 @@ mod tests {
 
     use super::{
         content_type, managed_not_found_response, parse_file_entries, parse_user_selection,
-        request_hostname, serve_static_release,
+        request_hostname, serve_static_release, set_websocket_upgrade_headers,
+        strip_hop_by_hop_headers, websocket_upgrade_requested,
     };
 
     /// Keeps recovery selection deliberately one-based and bounded to listed users.
@@ -2270,6 +2340,43 @@ mod tests {
         );
         headers.insert(header::HOST, HeaderValue::from_static("invalid host"));
         assert!(request_hostname(&headers).is_none());
+    }
+
+    /// Keeps the WebSocket handshake while removing unrelated connection-scoped headers.
+    #[test]
+    fn websocket_proxy_headers_are_canonical_and_bounded() {
+        let mut headers = HeaderMap::new();
+        headers.insert(
+            header::CONNECTION,
+            HeaderValue::from_static("keep-alive, Upgrade, x-remove-me"),
+        );
+        headers.insert(header::UPGRADE, HeaderValue::from_static("WebSocket"));
+        headers.insert("x-remove-me", HeaderValue::from_static("private-hop"));
+        headers.insert(
+            "sec-websocket-protocol",
+            HeaderValue::from_static("depot.v1"),
+        );
+        assert!(websocket_upgrade_requested(&headers));
+
+        strip_hop_by_hop_headers(&mut headers);
+        set_websocket_upgrade_headers(&mut headers);
+
+        assert_eq!(headers[header::CONNECTION], "upgrade");
+        assert_eq!(headers[header::UPGRADE], "websocket");
+        assert!(!headers.contains_key("x-remove-me"));
+        assert_eq!(headers["sec-websocket-protocol"], "depot.v1");
+    }
+
+    /// Refuses ordinary HTTP requests that merely contain WebSocket metadata.
+    #[test]
+    fn websocket_proxy_requires_connection_upgrade_token() {
+        let mut headers = HeaderMap::new();
+        headers.insert(header::CONNECTION, HeaderValue::from_static("keep-alive"));
+        headers.insert(header::UPGRADE, HeaderValue::from_static("websocket"));
+        assert!(!websocket_upgrade_requested(&headers));
+        strip_hop_by_hop_headers(&mut headers);
+        assert!(!headers.contains_key(header::CONNECTION));
+        assert!(!headers.contains_key(header::UPGRADE));
     }
 
     /// Parses whitespace-bearing file names without treating them as command structure.
