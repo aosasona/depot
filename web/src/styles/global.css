@@ -2119,7 +2119,8 @@ td {
   color: #7ee2a8;
   font: 0.76rem var(--mono-font);
 }
-.browser-shell-input input {
+.app-content .browser-shell-input input {
+  width: 100%;
   min-width: 0;
   min-height: 2.7rem;
   padding: 0 1.1rem 0 0.55rem;
@@ -2129,10 +2130,19 @@ td {
   caret-color: #7ee2a8;
   font: 0.76rem var(--mono-font);
   outline: 0;
+  transition: none;
 }
-.browser-shell-input input:focus-visible {
+.app-content .browser-shell-input input:hover:not(:disabled),
+.app-content .browser-shell-input input:focus,
+.app-content .browser-shell-input input:focus-visible {
+  border: 0;
+  background: transparent;
   outline: 0;
   box-shadow: none;
+}
+.app-content .browser-shell-input input:disabled {
+  background: transparent;
+  opacity: 1;
 }
 .browser-shell footer {
   justify-content: space-between;
@@ -2291,93 +2301,119 @@ td {
 }
 .volumes-panel {
   display: grid;
+  gap: 1rem;
 }
 .volumes-panel > .surface-heading {
-  border-bottom: 1px solid var(--border);
+  margin: 0;
 }
 .volume-count {
   color: var(--muted);
-  font: 0.64rem var(--mono-font);
+  font: 0.72rem var(--mono-font);
 }
 .volume-summary {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
-  gap: 1px;
-  border-bottom: 1px solid var(--border);
-  background: var(--border);
+  align-items: stretch;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
 }
 .volume-summary > span {
   display: grid;
-  gap: 0.3rem;
-  padding: 1rem;
+  gap: 0.35rem;
+  padding: 0.9rem 1rem;
+  border-right: 1px solid var(--border);
   background: var(--surface);
   color: var(--muted);
-  font-size: 0.7rem;
+  font-size: 0.76rem;
+  line-height: 1.45;
 }
 .volume-summary strong {
   color: var(--text);
-  font: 0.64rem var(--mono-font);
-  text-transform: uppercase;
+  font-family: var(--ui-font);
+  font-size: 0.8rem;
+  font-weight: 650;
 }
 .volume-summary > button {
-  margin: 1rem;
+  align-self: center;
+  min-height: 38px;
+  margin: 0 0.9rem;
+  padding: 0 0.8rem;
+  white-space: nowrap;
 }
 .volume-add-form {
   display: grid;
-  gap: 0.45rem;
+  gap: 0.55rem;
   padding: 1rem;
-  border-bottom: 1px solid var(--border);
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
 }
-.volume-add-form > label,
+.volume-add-form > label {
+  color: var(--text);
+  font-size: 0.76rem;
+  font-weight: 600;
+}
 .volume-add-form > small {
   color: var(--muted);
-  font: 0.62rem var(--mono-font);
+  font-size: 0.7rem;
+  line-height: 1.45;
 }
 .volume-add-form > span {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
+  gap: 0.5rem;
 }
 .volume-add-form input {
   min-width: 0;
   min-height: 40px;
   padding: 0 0.75rem;
   border: 1px solid var(--border);
-  border-right: 0;
   background: var(--surface);
   color: var(--text);
   font-family: var(--mono-font);
+  font-size: 0.78rem;
+}
+.volume-add-form .primary-action {
+  width: auto;
+  min-height: 40px;
+  margin: 0;
+  padding: 0 1rem;
+  font-size: 0.68rem;
 }
 .volume-list {
   display: grid;
   gap: 1px;
+  overflow: hidden;
+  border: 1px solid var(--border);
   background: var(--border);
 }
 .volume-row {
   display: grid;
   grid-template-columns: auto minmax(0, 1fr) auto auto;
-  gap: 0.8rem;
+  gap: 1rem;
   align-items: center;
-  padding: 0.8rem 1rem;
+  min-height: 64px;
+  padding: 0.75rem 1rem;
   background: var(--surface);
 }
 .volume-icon {
   display: grid;
   place-items: center;
-  width: 2.25rem;
-  height: 2.25rem;
+  width: 2.4rem;
+  height: 2.4rem;
   border: 1px solid var(--border);
   color: var(--accent);
-  font: 0.55rem var(--mono-font);
+  font: 0.6rem var(--mono-font);
+  letter-spacing: 0.04em;
 }
 .volume-row > span:nth-child(2) {
   display: grid;
-  gap: 0.25rem;
+  gap: 0.3rem;
   min-width: 0;
 }
 .volume-row code {
   overflow: hidden;
   color: var(--text);
-  font: 0.74rem var(--mono-font);
+  font: 0.8rem var(--mono-font);
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -2385,29 +2421,50 @@ td {
 .volume-retention-note,
 .volume-empty {
   color: var(--muted);
-  font-size: 0.68rem;
+  font-size: 0.72rem;
+  line-height: 1.5;
 }
 .volume-empty {
   display: grid;
-  gap: 0.35rem;
-  padding: 2rem 1rem;
+  gap: 0.45rem;
+  padding: 2.5rem 1rem;
+  border: 1px dashed var(--border);
   text-align: center;
 }
 .volume-empty strong {
   color: var(--text);
+  font-size: 0.82rem;
 }
 .volume-retention-note,
 .volumes-panel > .config-message {
   margin: 0;
-  padding: 0.8rem 1rem;
-  border-top: 1px solid var(--border);
+  padding: 0.85rem 1rem;
+  border-left: 2px solid var(--border);
+  background: var(--surface-raised);
+}
+.volume-row .deployment-status {
+  font-size: 0.62rem;
+}
+.volume-row .danger-action {
+  min-height: 36px;
+  padding: 0 0.75rem;
+  font-size: 0.64rem;
 }
 @media (max-width: 760px) {
   .volume-summary {
     grid-template-columns: 1fr;
   }
+  .volume-summary > span {
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .volume-summary > button {
+    justify-self: stretch;
+    margin: 0.75rem;
+  }
   .volume-row {
     grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 0.75rem;
   }
   .volume-row .deployment-status {
     display: none;
@@ -2416,8 +2473,10 @@ td {
     grid-template-columns: 1fr;
   }
   .volume-add-form input {
-    border-right: 1px solid var(--border);
-    border-bottom: 0;
+    min-height: 42px;
+  }
+  .volume-add-form .primary-action {
+    width: 100%;
   }
 }
 
