@@ -694,6 +694,7 @@ version = "0.6.9"
 dependencies = [
  "depot-core",
  "serde",
+ "serde_json",
  "thiserror",
  "tokio",
  "tracing",
@@ -718,6 +719,7 @@ version = "0.6.9"
 dependencies = [
  "serde",
  "serde_json",
+ "sha2 0.11.1",
  "thiserror",
  "tokio",
  "uuid",
@@ -736,6 +738,7 @@ dependencies = [
 name = "depot-store"
 version = "0.6.9"
 dependencies = [
+ "serde_json",
  "sqlx",
  "thiserror",
  "time",

@@ -82,9 +82,42 @@ provide the same Railpack CLI and BuildKit endpoint before selecting that
 builder.
 
 Never store `master.key` beside an unencrypted SQLite backup. A minimal backup
-set contains `/var/lib/depot/depot.db` (captured with SQLite's backup command)
-and `/etc/depot/master.key` in separate protected locations. Restore the key
-with owner `root`, group `depot`, and mode `0640` before starting either service.
+set contains `/var/lib/depot/depot.db` (captured with SQLite's backup command),
+the `depot-*` Docker named volumes used by stateful services, and
+`/etc/depot/master.key` in separate protected locations. Restore the key with
+owner `root`, group `depot`, and mode `0640` before starting either service.
+
+Depot creates deterministic project-scoped named volumes for configured data
+paths and for `VOLUME` paths declared by a Dockerfile or built OCI image. These
+volumes survive container replacement and are never deleted with a deployment
+or project. Back them up separately while the application is stopped or while
+its database is in a documented online-backup mode. List them with:
+
+```sh
+docker volume ls --filter name=depot- --format '{{.Name}}'
+```
+
+For example, back up one stopped volume into a protected directory:
+
+```sh
+sudo install -d -m 0700 /var/backups/depot/volumes
+docker run --rm \
+  --volume depot-PROJECT-PATHHASH:/data:ro \
+  --volume /var/backups/depot/volumes:/backup \
+  alpine:3.22 tar -C /data -czf /backup/depot-PROJECT-PATHHASH.tgz .
+```
+
+Applications that do not declare image volumes must have their absolute data
+paths configured under **Project settings → Build and runtime**. The setting
+takes effect on the next deployment; changing a path does not migrate data from
+the previous volume.
+
+If a service previously used a Dockerfile `VOLUME` without Depot persistence,
+its older data may still exist in an anonymous Docker volume because Depot does
+not remove containers with Docker's `--volumes` flag. Before pruning Docker,
+stop redeploying that project and inspect `docker volume ls --filter
+dangling=true`; copy suspected volumes to a backup and verify their contents
+before attaching or deleting anything.
 
 Edit `/etc/depot/config.toml`, then initialize and check storage:
 

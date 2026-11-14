@@ -31,6 +31,7 @@ type ConfigureValues = {
   builder: "auto" | "dockerfile" | "railpack";
   staticOutput: string;
   port: string;
+  volumePaths: string;
   environmentText: string;
   environmentSecrets: boolean;
   deployLatest: boolean;
@@ -45,6 +46,7 @@ const initialValues: ConfigureValues = {
   builder: "auto",
   staticOutput: "dist",
   port: "",
+  volumePaths: "",
   environmentText: "",
   environmentSecrets: true,
   deployLatest: true,
@@ -283,6 +285,14 @@ function ProjectWizard({
       return setMessage("Services need a port between 1 and 65535.");
     if (!validRepositoryPath(values.contextPath))
       return setMessage("Choose a valid repository source directory.");
+    const volumePaths = parseVolumePaths(values.volumePaths);
+    if (
+      volumePaths.length > 16 ||
+      volumePaths.some((path) => !validVolumePath(path))
+    )
+      return setMessage(
+        "Persistent data paths must be unique absolute container paths, one per line.",
+      );
     let environment: ReturnType<typeof parseEnvironmentText>;
     try {
       environment = parseEnvironmentText(
@@ -327,6 +337,7 @@ function ProjectWizard({
         exposed_port:
           values.projectKind === "service" ? Number(values.port) : null,
         healthcheck_path: null,
+        persistent_volumes: volumePaths,
       });
       if (environment.length > 0) {
         setStage("environment");
@@ -638,6 +649,23 @@ function ProjectWizard({
                 />
               </label>
             )}
+            {values.projectKind !== "static" && (
+              <label className="wide environment-textarea">
+                Persistent data paths
+                <textarea
+                  spellCheck={false}
+                  placeholder={"/data\n/var/lib/app"}
+                  value={values.volumePaths}
+                  onChange={(event) =>
+                    setValues({ ...values, volumePaths: event.target.value })
+                  }
+                />
+                <small>
+                  One absolute container path per line. Depot reuses a private
+                  Docker volume for each path on every deployment.
+                </small>
+              </label>
+            )}
             <div className="wizard-section-heading wide">
               <strong>Environment</strong>
               <span>
@@ -764,6 +792,29 @@ function environmentCount(input: string) {
   return input
     .split(/\r?\n/)
     .filter((line) => line.trim() && !line.trim().startsWith("#")).length;
+}
+
+/** Converts newline-separated container paths into a unique ordered list. */
+function parseVolumePaths(value: string) {
+  return [
+    ...new Set(
+      value
+        .split(/\r?\n/)
+        .map((path) => path.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+/** Accepts one safe absolute destination for a project-scoped Docker volume. */
+function validVolumePath(path: string) {
+  return (
+    path.startsWith("/") &&
+    path !== "/" &&
+    path.length <= 255 &&
+    !path.includes(",") &&
+    !path.split("/").some((part) => part === "." || part === "..")
+  );
 }
 
 /** Describes the current durable creation step on the primary action. */

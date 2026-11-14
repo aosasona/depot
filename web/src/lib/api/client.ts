@@ -53,6 +53,7 @@ const serviceConfigSchema = z.object({
   static_output_dir: z.string().nullable(),
   exposed_port: z.number().int().nullable(),
   healthcheck_path: z.string().nullable(),
+  persistent_volumes: z.array(z.string()),
   updated_at: z.number(),
 });
 const inspectionResultSchema = z.object({
@@ -61,7 +62,9 @@ const inspectionResultSchema = z.object({
   reason: z.string(),
   has_mise_config: z.boolean(),
   exposed_ports: z.array(z.number().int()).default([]),
+  volume_paths: z.array(z.string()).default([]),
   inferred_port: z.number().int().optional(),
+  inferred_volumes: z.array(z.string()).optional(),
   initial_deployment_id: z.string().optional(),
 });
 const dockerBuildResultSchema = z.object({

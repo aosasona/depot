@@ -22,6 +22,7 @@ const configFormSchema = z
     static_output_dir: z.string().trim().max(255),
     exposed_port: z.string().trim(),
     healthcheck_path: z.string().trim().max(255),
+    persistent_volumes: z.string(),
   })
   .superRefine((value, context) => {
     if (value.project_kind === "static" && !value.static_output_dir) {
@@ -50,15 +51,26 @@ const configFormSchema = z
         message: "Health-check paths must start with /.",
       });
     }
+    const volumes = parseVolumePaths(value.persistent_volumes);
+    if (volumes.length > 16 || volumes.some((path) => !validVolumePath(path))) {
+      context.addIssue({
+        code: "custom",
+        path: ["persistent_volumes"],
+        message:
+          "Use at most 16 unique absolute container paths, one per line.",
+      });
+    }
   });
 
 /** Loads and reveals the editable service configuration for one project. */
 export function ServiceConfigForm({
   projectId,
   suggestedPorts = [],
+  suggestedVolumes = [],
 }: {
   projectId: string;
   suggestedPorts?: number[];
+  suggestedVolumes?: string[];
 }) {
   const [expanded, setExpanded] = useState(false);
   const config = useQuery({
@@ -93,6 +105,7 @@ export function ServiceConfigForm({
           config={config.data}
           githubSource={githubSource.data ?? null}
           suggestedPorts={suggestedPorts}
+          suggestedVolumes={suggestedVolumes}
         />
       )}
     </div>
@@ -104,10 +117,12 @@ function LoadedConfigForm({
   config,
   githubSource,
   suggestedPorts,
+  suggestedVolumes,
 }: {
   config: ServiceConfig;
   githubSource: ProjectGithubSource | null;
   suggestedPorts: number[];
+  suggestedVolumes: string[];
 }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<string>();
@@ -130,6 +145,10 @@ function LoadedConfigForm({
         config.exposed_port?.toString() ??
         (suggestedPorts.length === 1 ? String(suggestedPorts[0]) : ""),
       healthcheck_path: config.healthcheck_path ?? "",
+      persistent_volumes: (config.persistent_volumes.length > 0
+        ? config.persistent_volumes
+        : suggestedVolumes
+      ).join("\n"),
     },
     onSubmit: async ({ value }) => {
       setError(undefined);
@@ -144,6 +163,7 @@ function LoadedConfigForm({
             ? Number(parsed.data.exposed_port)
             : null,
           healthcheck_path: parsed.data.healthcheck_path || null,
+          persistent_volumes: parseVolumePaths(parsed.data.persistent_volumes),
         });
         queryClient.setQueryData(
           ["projects", config.project_id, "config"],
@@ -391,6 +411,24 @@ function LoadedConfigForm({
           </label>
         )}
       </form.Field>
+      <form.Field name="persistent_volumes">
+        {(field) => (
+          <label className="wide environment-textarea">
+            Persistent data paths
+            <textarea
+              spellCheck={false}
+              placeholder={"/data\n/var/lib/app"}
+              value={field.state.value}
+              onChange={(event) => field.handleChange(event.target.value)}
+            />
+            <small>
+              One absolute path inside the container per line. Data in these
+              paths survives deployments in project-scoped Docker volumes.
+              Removing or changing a path does not delete or migrate its data.
+            </small>
+          </label>
+        )}
+      </form.Field>
       {!githubSource && (
         <p className="config-browser-note">
           Visual repository browsing is available for projects imported through
@@ -416,6 +454,29 @@ function joinRepositoryPath(contextPath: string, outputPath: string) {
     .filter((part) => part && part !== ".")
     .join("/");
   return parts || ".";
+}
+
+/** Converts volume textarea input into a stable unique path list. */
+function parseVolumePaths(value: string) {
+  return [
+    ...new Set(
+      value
+        .split(/\r?\n/)
+        .map((path) => path.trim())
+        .filter(Boolean),
+    ),
+  ];
+}
+
+/** Mirrors backend validation for one safe Docker volume destination. */
+function validVolumePath(path: string) {
+  return (
+    path.startsWith("/") &&
+    path !== "/" &&
+    path.length <= 255 &&
+    !path.includes(",") &&
+    !path.split("/").some((part) => part === "." || part === "..")
+  );
 }
 
 /** Converts a repository-root selection back to a path relative to build context. */

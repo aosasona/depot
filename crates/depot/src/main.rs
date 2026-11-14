@@ -1415,16 +1415,16 @@ async fn execute_inspection(
     let http_credentials = github_token
         .as_deref()
         .map(|token| depot_git::GitHttpCredentials { token });
-    let inspection = depot_git::inspect_repository(
-        &project.repository_url,
-        &project.branch,
-        &config.context_path,
-        &config.dockerfile_path,
-        std::path::Path::new(&worker_config.workspace_root),
-        std::time::Duration::from_secs(worker_config.git_timeout_seconds),
-        git_credentials,
+    let inspection = depot_git::inspect_repository(depot_git::InspectRepositoryRequest {
+        repository_url: &project.repository_url,
+        branch: &project.branch,
+        context_path: &config.context_path,
+        dockerfile_path: &config.dockerfile_path,
+        workspace_root: std::path::Path::new(&worker_config.workspace_root),
+        timeout: std::time::Duration::from_secs(worker_config.git_timeout_seconds),
+        ssh_credentials: git_credentials,
         http_credentials,
-    )
+    })
     .await;
     if let Some((private_key, _)) = &mut ssh {
         private_key.zeroize();
@@ -1435,11 +1435,20 @@ async fn execute_inspection(
     let inspection = inspection.map_err(|error| error.to_string())?;
     let mut result = serde_json::to_value(&inspection)
         .map_err(|_| "Repository inspection result could not be encoded.".to_owned())?;
-    if config.exposed_port.is_none()
+    let inferred_port = (config.exposed_port.is_none()
         && inspection.exposed_ports.len() == 1
-        && config.project_kind != "static"
+        && config.project_kind != "static")
+        .then(|| i64::from(inspection.exposed_ports[0]));
+    let inferred_volumes = (config.persistent_volumes.is_empty()
+        && !inspection.volume_paths.is_empty()
+        && config.project_kind != "static")
+        .then(|| inspection.volume_paths.clone());
+    if (inferred_port.is_some() || inferred_volumes.is_some())
         && let Some(actor) = payload.requested_by_user_id.as_deref()
     {
+        let persistent_volumes = inferred_volumes
+            .as_deref()
+            .unwrap_or(&config.persistent_volumes);
         config = store
             .update_service_config(
                 project_id,
@@ -1449,15 +1458,21 @@ async fn execute_inspection(
                     context_path: &config.context_path,
                     dockerfile_path: &config.dockerfile_path,
                     static_output_dir: config.static_output_dir.as_deref(),
-                    exposed_port: Some(i64::from(inspection.exposed_ports[0])),
+                    exposed_port: inferred_port.or(config.exposed_port),
                     healthcheck_path: config.healthcheck_path.as_deref(),
+                    persistent_volumes,
                     actor_user_id: actor,
                     now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
                 },
             )
             .await
-            .map_err(|_| "Detected service port could not be saved.".to_owned())?;
-        result["inferred_port"] = serde_json::json!(config.exposed_port);
+            .map_err(|_| "Detected service configuration could not be saved.".to_owned())?;
+        if inferred_port.is_some() {
+            result["inferred_port"] = serde_json::json!(config.exposed_port);
+        }
+        if inferred_volumes.is_some() {
+            result["inferred_volumes"] = serde_json::json!(config.persistent_volumes);
+        }
     }
     if payload.deploy_after_inspection {
         let actor = payload
@@ -1511,7 +1526,7 @@ async fn execute_deployment(
         .project_by_id(project_id)
         .await
         .map_err(|_| "Deployment project no longer exists.".to_owned())?;
-    let config = store
+    let mut config = store
         .service_config(project_id)
         .await
         .map_err(|_| "Deployment configuration is unavailable.".to_owned())?;
@@ -1596,6 +1611,41 @@ async fn execute_deployment(
         .exposed_port
         .and_then(|port| u16::try_from(port).ok())
         .ok_or_else(|| "Service deployments require a valid exposed port.".to_owned())?;
+    let image_volume_paths = depot_runtime::image_volume_paths(
+        &worker_config.docker_binary,
+        &build.image_id,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    let mut persistent_paths = config.persistent_volumes.clone();
+    for path in image_volume_paths {
+        if !persistent_paths.contains(&path) {
+            persistent_paths.push(path);
+        }
+    }
+    if persistent_paths != config.persistent_volumes
+        && let Some(actor) = deployment.created_by_user_id.as_deref()
+    {
+        config = store
+            .update_service_config(
+                project_id,
+                depot_store::UpdateServiceConfig {
+                    project_kind: &config.project_kind,
+                    builder: &config.builder,
+                    context_path: &config.context_path,
+                    dockerfile_path: &config.dockerfile_path,
+                    static_output_dir: config.static_output_dir.as_deref(),
+                    exposed_port: config.exposed_port,
+                    healthcheck_path: config.healthcheck_path.as_deref(),
+                    persistent_volumes: &persistent_paths,
+                    actor_user_id: actor,
+                    now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
+                },
+            )
+            .await
+            .map_err(|_| "Image-declared persistent volumes could not be saved.".to_owned())?;
+    }
     let mut environment = Vec::new();
     for variable in store
         .encrypted_project_variables(project_id)
@@ -1608,21 +1658,35 @@ async fn execute_deployment(
             .map_err(|_| "Runtime variables could not be decrypted.".to_owned())?;
         environment.push((variable.name, value));
     }
-    let running = depot_runtime::start_container(depot_runtime::StartContainerRequest {
+    let predecessor = if persistent_paths.is_empty() {
+        None
+    } else {
+        stop_stateful_predecessor(store, worker_config, project_id).await?
+    };
+    let start_result = depot_runtime::start_container(depot_runtime::StartContainerRequest {
         docker_binary: &worker_config.docker_binary,
         deployment_id: &deployment.id,
         image_id: &build.image_id,
         container_port,
         timeout: std::time::Duration::from_secs(30),
         environment: &environment,
+        project_id,
+        persistent_paths: &persistent_paths,
     })
-    .await
-    .map_err(|error| error.to_string())?;
+    .await;
     for (_, value) in &mut environment {
         value.zeroize();
     }
     drop(environment);
     let healthcheck_path = config.healthcheck_path.as_deref().unwrap_or("/");
+    let running = match start_result {
+        Ok(running) => running,
+        Err(error) => {
+            restore_stateful_predecessor(worker_config, predecessor.as_ref(), healthcheck_path)
+                .await;
+            return Err(error.to_string());
+        }
+    };
     if let Err(error) = depot_runtime::wait_for_http_ready(
         running.host_port,
         healthcheck_path,
@@ -1639,6 +1703,7 @@ async fn execute_deployment(
         {
             tracing::warn!(%cleanup_error, container_id = %running.container_id, "could not remove unready candidate container");
         }
+        restore_stateful_predecessor(worker_config, predecessor.as_ref(), healthcheck_path).await;
         return Err(error.to_string());
     }
     if store
@@ -1661,6 +1726,7 @@ async fn execute_deployment(
         {
             tracing::warn!(%cleanup_error, container_id = %running.container_id, "could not remove unpersisted candidate container");
         }
+        restore_stateful_predecessor(worker_config, predecessor.as_ref(), healthcheck_path).await;
         return Err("Verified runtime identity could not be persisted.".to_owned());
     }
     serde_json::to_string(&serde_json::json!({
@@ -1671,6 +1737,77 @@ async fn execute_deployment(
         "logs": build.logs,
     }))
     .map_err(|_| "Deployment result could not be encoded.".to_owned())
+}
+
+/// Stops the active release before a stateful candidate mounts the same writable volumes.
+async fn stop_stateful_predecessor(
+    store: &Store,
+    worker_config: &depot_core::WorkerConfig,
+    project_id: &str,
+) -> Result<Option<depot_store::ActiveServiceRuntime>, String> {
+    let predecessor = store
+        .active_service_runtimes()
+        .await
+        .map_err(|_| "Active runtime state could not be loaded.".to_owned())?
+        .into_iter()
+        .find(|runtime| runtime.project_id == project_id);
+    let Some(runtime) = predecessor else {
+        return Ok(None);
+    };
+    depot_runtime::control_container(
+        &worker_config.docker_binary,
+        depot_runtime::RouteIdentity {
+            deployment_id: &runtime.deployment_id,
+            container_id: &runtime.container_id,
+            host_port: runtime.host_port,
+        },
+        depot_runtime::ContainerAction::Stop,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .map_err(|error| format!("Could not stop the active stateful release safely: {error}"))?;
+    Ok(Some(runtime))
+}
+
+/// Restarts a stopped stateful release when its replacement fails before promotion.
+async fn restore_stateful_predecessor(
+    worker_config: &depot_core::WorkerConfig,
+    predecessor: Option<&depot_store::ActiveServiceRuntime>,
+    healthcheck_path: &str,
+) {
+    let Some(runtime) = predecessor else {
+        return;
+    };
+    let restored = depot_runtime::control_container(
+        &worker_config.docker_binary,
+        depot_runtime::RouteIdentity {
+            deployment_id: &runtime.deployment_id,
+            container_id: &runtime.container_id,
+            host_port: runtime.host_port,
+        },
+        depot_runtime::ContainerAction::Start,
+        std::time::Duration::from_secs(30),
+    )
+    .await
+    .and_then(|state| {
+        state
+            .running
+            .then_some(())
+            .ok_or(depot_runtime::RuntimeError::ControlFailed)
+    });
+    if let Err(error) = restored {
+        tracing::error!(%error, deployment_id = %runtime.deployment_id, "could not restore previous stateful release");
+        return;
+    }
+    if let Err(error) = depot_runtime::wait_for_http_ready(
+        runtime.host_port,
+        healthcheck_path,
+        std::time::Duration::from_secs(60),
+    )
+    .await
+    {
+        tracing::error!(%error, deployment_id = %runtime.deployment_id, "restored stateful release did not become ready");
+    }
 }
 
 /// Decrypts SSH material only for SSH repositories and fails closed when absent.

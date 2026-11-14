@@ -31,6 +31,7 @@ pub struct RepositoryInspection {
     pub reason: String,
     pub has_mise_config: bool,
     pub exposed_ports: Vec<u16>,
+    pub volume_paths: Vec<String>,
 }
 
 /// Decrypted SSH material borrowed only for the duration of one Git operation.
@@ -44,6 +45,18 @@ pub struct GitSshCredentials<'a> {
 #[derive(Clone, Copy)]
 pub struct GitHttpCredentials<'a> {
     pub token: &'a str,
+}
+
+/// Bounded source, checkout, and credential inputs for one repository inspection.
+pub struct InspectRepositoryRequest<'a> {
+    pub repository_url: &'a str,
+    pub branch: &'a str,
+    pub context_path: &'a str,
+    pub dockerfile_path: &'a str,
+    pub workspace_root: &'a Path,
+    pub timeout: Duration,
+    pub ssh_credentials: Option<GitSshCredentials<'a>>,
+    pub http_credentials: Option<GitHttpCredentials<'a>>,
 }
 
 /// A verified immutable checkout whose workspace is removed when dropped.
@@ -86,26 +99,21 @@ pub enum GitError {
 
 /// Clones one branch without a shell, resolves its immutable SHA, and detects a build plan.
 pub async fn inspect_repository(
-    repository_url: &str,
-    branch: &str,
-    context_path: &str,
-    dockerfile_path: &str,
-    workspace_root: &Path,
-    timeout: Duration,
-    ssh_credentials: Option<GitSshCredentials<'_>>,
-    http_credentials: Option<GitHttpCredentials<'_>>,
+    request: InspectRepositoryRequest<'_>,
 ) -> Result<RepositoryInspection, GitError> {
-    validate_repository_url(repository_url)?;
-    require_ssh_credentials(repository_url, ssh_credentials)?;
-    std::fs::create_dir_all(workspace_root).map_err(GitError::Workspace)?;
-    let checkout_path = workspace_root.join(format!("inspect-{}", uuid::Uuid::now_v7()));
+    validate_repository_url(request.repository_url)?;
+    require_ssh_credentials(request.repository_url, request.ssh_credentials)?;
+    std::fs::create_dir_all(request.workspace_root).map_err(GitError::Workspace)?;
+    let checkout_path = request
+        .workspace_root
+        .join(format!("inspect-{}", uuid::Uuid::now_v7()));
     let workspace = WorkspaceGuard::new(checkout_path);
     let mut clone = git_command();
-    let ssh = prepare_ssh_command(workspace_root, ssh_credentials)?;
+    let ssh = prepare_ssh_command(request.workspace_root, request.ssh_credentials)?;
     if let Some(ssh) = &ssh {
         ssh.configure(&mut clone);
     }
-    let http = prepare_http_command(workspace_root, http_credentials)?;
+    let http = prepare_http_command(request.workspace_root, request.http_credentials)?;
     if let Some(http) = &http {
         http.configure(&mut clone);
     }
@@ -116,12 +124,12 @@ pub async fn inspect_repository(
         "--single-branch",
         "--no-tags",
         "--branch",
-        branch,
+        request.branch,
         "--",
-        repository_url,
+        request.repository_url,
     ]);
     clone.arg(workspace.path());
-    run_status(&mut clone, timeout).await?;
+    run_status(&mut clone, request.timeout).await?;
     drop(ssh);
     drop(http);
 
@@ -130,7 +138,7 @@ pub async fn inspect_repository(
         .arg("-C")
         .arg(workspace.path())
         .args(["rev-parse", "HEAD"]);
-    let output = tokio::time::timeout(timeout, revision.output())
+    let output = tokio::time::timeout(request.timeout, revision.output())
         .await
         .map_err(|_| GitError::Timeout)?
         .map_err(GitError::Spawn)?;
@@ -141,10 +149,11 @@ pub async fn inspect_repository(
     if commit_sha.len() != 40 || !commit_sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
         return Err(GitError::InvalidCommit);
     }
-    let context = workspace.path().join(context_path);
-    let dockerfile = workspace.path().join(dockerfile_path);
+    let context = workspace.path().join(request.context_path);
+    let dockerfile = workspace.path().join(request.dockerfile_path);
     let (builder, reason) = detect_builder(&context, &dockerfile);
     let exposed_ports = dockerfile_exposed_ports(&dockerfile);
+    let volume_paths = dockerfile_volume_paths(&dockerfile);
     Ok(RepositoryInspection {
         commit_sha,
         builder,
@@ -152,6 +161,7 @@ pub async fn inspect_repository(
         has_mise_config: context.join("mise.toml").is_file()
             || context.join(".mise.toml").is_file(),
         exposed_ports,
+        volume_paths,
     })
 }
 
@@ -404,6 +414,71 @@ fn dockerfile_exposed_ports(path: &Path) -> Vec<u16> {
     ports
 }
 
+/// Returns absolute paths declared by VOLUME in the Dockerfile's final stage.
+fn dockerfile_volume_paths(path: &Path) -> Vec<String> {
+    let Ok(contents) = std::fs::read_to_string(path) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    for line in dockerfile_logical_lines(&contents) {
+        let Some((instruction, arguments)) = line.split_once(char::is_whitespace) else {
+            continue;
+        };
+        if instruction.eq_ignore_ascii_case("FROM") {
+            paths.clear();
+            continue;
+        }
+        if !instruction.eq_ignore_ascii_case("VOLUME") {
+            continue;
+        }
+        let candidates = if arguments.trim_start().starts_with('[') {
+            serde_json::from_str::<Vec<String>>(arguments).unwrap_or_default()
+        } else {
+            arguments
+                .split_ascii_whitespace()
+                .map(|value| value.trim_matches(['\'', '"']).to_owned())
+                .collect()
+        };
+        for candidate in candidates {
+            if candidate.starts_with('/')
+                && candidate != "/"
+                && !candidate.contains(['$', ',', '\0'])
+                && !candidate.split('/').any(|part| matches!(part, "." | ".."))
+                && !paths.contains(&candidate)
+            {
+                paths.push(candidate);
+            }
+        }
+    }
+    paths.sort();
+    paths
+}
+
+/// Joins Dockerfile continuation lines without interpreting build arguments.
+fn dockerfile_logical_lines(contents: &str) -> Vec<String> {
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for raw in contents.lines() {
+        let line = raw.trim();
+        if line.is_empty() || (current.is_empty() && line.starts_with('#')) {
+            continue;
+        }
+        let continued = line.ends_with('\\');
+        let fragment = line.strip_suffix('\\').unwrap_or(line).trim();
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(fragment);
+        if !continued {
+            lines.push(std::mem::take(&mut current));
+        }
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    lines
+}
+
 /// Removes the isolated checkout on every success and error path.
 struct WorkspaceGuard {
     path: PathBuf,
@@ -501,7 +576,7 @@ mod tests {
 
     use super::{
         DetectedBuilder, GitError, GitSshCredentials, detect_builder, dockerfile_exposed_ports,
-        prepare_ssh_command, require_ssh_credentials,
+        dockerfile_volume_paths, prepare_ssh_command, require_ssh_credentials,
     };
 
     /// Creates an isolated test directory without adding a runtime temp dependency.
@@ -547,6 +622,23 @@ mod tests {
         )
         .expect("Dockerfile writes");
         assert_eq!(dockerfile_exposed_ports(&dockerfile), vec![3000, 8080]);
+        fs::remove_dir_all(path).expect("test directory is removed");
+    }
+
+    /// Reads shell and JSON VOLUME declarations only from the final build stage.
+    #[test]
+    fn dockerfile_volumes_are_deduplicated_and_stage_aware() {
+        let path = test_directory();
+        let dockerfile = path.join("Dockerfile");
+        fs::write(
+            &dockerfile,
+            "FROM node AS build\nVOLUME /discarded\nFROM alpine\nVOLUME [\"/data\", \"/var/lib/app\"]\nVOLUME /data $DYNAMIC relative\n",
+        )
+        .expect("Dockerfile writes");
+        assert_eq!(
+            dockerfile_volume_paths(&dockerfile),
+            vec!["/data", "/var/lib/app"]
+        );
         fs::remove_dir_all(path).expect("test directory is removed");
     }
 
@@ -599,16 +691,16 @@ mod tests {
         let repository_url = std::env::var("DEPOT_LIVE_GIT_URL")
             .expect("DEPOT_LIVE_GIT_URL must name a public repository");
         let workspace = test_directory();
-        let result = super::inspect_repository(
-            &repository_url,
-            "main",
-            ".",
-            "Dockerfile",
-            &workspace,
-            std::time::Duration::from_secs(120),
-            None,
-            None,
-        )
+        let result = super::inspect_repository(super::InspectRepositoryRequest {
+            repository_url: &repository_url,
+            branch: "main",
+            context_path: ".",
+            dockerfile_path: "Dockerfile",
+            workspace_root: &workspace,
+            timeout: std::time::Duration::from_secs(120),
+            ssh_credentials: None,
+            http_credentials: None,
+        })
         .await
         .expect("public repository inspection succeeds");
         assert_eq!(result.commit_sha.len(), 40);

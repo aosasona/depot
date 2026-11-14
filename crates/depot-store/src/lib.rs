@@ -141,6 +141,7 @@ pub struct ServiceConfig {
     pub static_output_dir: Option<String>,
     pub exposed_port: Option<i64>,
     pub healthcheck_path: Option<String>,
+    pub persistent_volumes: Vec<String>,
     pub updated_at: i64,
 }
 
@@ -154,6 +155,7 @@ pub struct UpdateServiceConfig<'a> {
     pub static_output_dir: Option<&'a str>,
     pub exposed_port: Option<i64>,
     pub healthcheck_path: Option<&'a str>,
+    pub persistent_volumes: &'a [String],
     pub actor_user_id: &'a str,
     pub now_unix: i64,
 }
@@ -212,6 +214,7 @@ pub struct Deployment {
     pub job_id: String,
     pub commit_sha: String,
     pub trigger_kind: String,
+    pub created_by_user_id: Option<String>,
     pub status: String,
     pub failure_reason: Option<String>,
     pub image_id: Option<String>,
@@ -449,6 +452,8 @@ pub enum StoreError {
     Database(#[from] sqlx::Error),
     #[error("database migration failed: {0}")]
     Migration(#[from] sqlx::migrate::MigrateError),
+    #[error("stored application data is invalid: {0}")]
+    InvalidData(#[source] serde_json::Error),
     #[error("the instance already has an administrator")]
     AlreadyInitialized,
     #[error("the bootstrap token is invalid or expired")]
@@ -1868,7 +1873,8 @@ impl Store {
     pub async fn service_config(&self, project_id: &str) -> Result<ServiceConfig, StoreError> {
         let row = sqlx::query(
             "SELECT project_id, project_kind, builder, context_path, dockerfile_path,
-                    static_output_dir, exposed_port, healthcheck_path, updated_at
+                    static_output_dir, exposed_port, healthcheck_path, persistent_volumes_json,
+                    updated_at
              FROM service_configs WHERE project_id = ?",
         )
         .bind(project_id)
@@ -1888,7 +1894,8 @@ impl Store {
         let result = sqlx::query(
             "UPDATE service_configs
              SET project_kind = ?, builder = ?, context_path = ?, dockerfile_path = ?,
-                 static_output_dir = ?, exposed_port = ?, healthcheck_path = ?, updated_at = ?
+                 static_output_dir = ?, exposed_port = ?, healthcheck_path = ?,
+                 persistent_volumes_json = ?, updated_at = ?
              WHERE project_id = ?",
         )
         .bind(input.project_kind)
@@ -1898,6 +1905,7 @@ impl Store {
         .bind(input.static_output_dir)
         .bind(input.exposed_port)
         .bind(input.healthcheck_path)
+        .bind(serde_json::to_string(input.persistent_volumes).expect("string lists serialize"))
         .bind(input.now_unix)
         .bind(project_id)
         .execute(&mut *transaction)
@@ -2407,7 +2415,7 @@ impl Store {
         now_unix: i64,
     ) -> Result<Deployment, StoreError> {
         let existing = sqlx::query(
-            "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
+            "SELECT id, project_id, job_id, commit_sha, trigger_kind, created_by_user_id, status,
                     failure_reason, image_id, container_id, host_port,
                     runtime_route_status, runtime_route_error, runtime_route_checked_at,
                     runtime_desired_state,
@@ -2437,7 +2445,7 @@ impl Store {
     pub async fn list_deployments(&self, project_id: &str) -> Result<Vec<Deployment>, StoreError> {
         self.project_by_id(project_id).await?;
         let rows = sqlx::query(
-            "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
+            "SELECT id, project_id, job_id, commit_sha, trigger_kind, created_by_user_id, status,
                     failure_reason, image_id, container_id, host_port,
                     runtime_route_status, runtime_route_error, runtime_route_checked_at,
                     runtime_desired_state,
@@ -2454,7 +2462,7 @@ impl Store {
     /// Loads one deployment attempt by its opaque identifier.
     pub async fn deployment_by_id(&self, deployment_id: &str) -> Result<Deployment, StoreError> {
         let row = sqlx::query(
-            "SELECT id, project_id, job_id, commit_sha, trigger_kind, status,
+            "SELECT id, project_id, job_id, commit_sha, trigger_kind, created_by_user_id, status,
                     failure_reason, image_id, container_id, host_port,
                     runtime_route_status, runtime_route_error, runtime_route_checked_at,
                     runtime_desired_state,
@@ -3063,6 +3071,10 @@ fn service_config_from_row(row: SqliteRow) -> Result<ServiceConfig, StoreError> 
         static_output_dir: row.try_get("static_output_dir")?,
         exposed_port: row.try_get("exposed_port")?,
         healthcheck_path: row.try_get("healthcheck_path")?,
+        persistent_volumes: serde_json::from_str(
+            &row.try_get::<String, _>("persistent_volumes_json")?,
+        )
+        .map_err(StoreError::InvalidData)?,
         updated_at: row.try_get("updated_at")?,
     })
 }
@@ -3100,6 +3112,7 @@ fn deployment_from_row(row: SqliteRow) -> Result<Deployment, StoreError> {
         job_id: row.try_get("job_id")?,
         commit_sha: row.try_get("commit_sha")?,
         trigger_kind: row.try_get("trigger_kind")?,
+        created_by_user_id: row.try_get("created_by_user_id")?,
         status: row.try_get("status")?,
         failure_reason: row.try_get("failure_reason")?,
         image_id: row.try_get("image_id")?,
@@ -3426,6 +3439,7 @@ mod tests {
                     static_output_dir: None,
                     exposed_port: Some(8080),
                     healthcheck_path: Some("/health"),
+                    persistent_volumes: &["/data".to_owned()],
                     actor_user_id: &admin_id,
                     now_unix: 210,
                 },
@@ -3434,6 +3448,7 @@ mod tests {
             .expect("configuration updates");
         assert_eq!(updated.exposed_port, Some(8080));
         assert_eq!(updated.healthcheck_path.as_deref(), Some("/health"));
+        assert_eq!(updated.persistent_volumes, vec!["/data"]);
         assert_eq!(updated.updated_at, 210);
     }
 

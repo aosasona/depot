@@ -255,6 +255,7 @@ struct ServiceConfigResponse {
     static_output_dir: Option<String>,
     exposed_port: Option<i64>,
     healthcheck_path: Option<String>,
+    persistent_volumes: Vec<String>,
     updated_at: i64,
 }
 
@@ -268,6 +269,8 @@ struct UpdateServiceConfigRequest {
     static_output_dir: Option<String>,
     exposed_port: Option<i64>,
     healthcheck_path: Option<String>,
+    #[serde(default)]
+    persistent_volumes: Vec<String>,
 }
 
 /// Accepted inspection job identifier returned after durable enqueueing.
@@ -2363,6 +2366,7 @@ async fn update_service_config(
                 static_output_dir: trimmed_optional(request.static_output_dir.as_deref()),
                 exposed_port: request.exposed_port,
                 healthcheck_path: trimmed_optional(request.healthcheck_path.as_deref()),
+                persistent_volumes: &request.persistent_volumes,
                 actor_user_id: &actor.id,
                 now_unix: time::OffsetDateTime::now_utc().unix_timestamp(),
             },
@@ -2870,7 +2874,32 @@ fn validate_service_config(request: &UpdateServiceConfigRequest) -> Result<(), A
             "Health-check path is invalid.",
         ));
     }
+    if request.persistent_volumes.len() > 16 {
+        return Err(ApiError::InvalidProjectField(
+            "At most 16 persistent volume paths are allowed.",
+        ));
+    }
+    let mut volume_paths = std::collections::HashSet::new();
+    for path in &request.persistent_volumes {
+        if !is_safe_container_path(path) || !volume_paths.insert(path) {
+            return Err(ApiError::InvalidProjectField(
+                "Persistent volume paths must be unique absolute container paths.",
+            ));
+        }
+    }
     Ok(())
+}
+
+/// Accepts an absolute normalized container path safe for Docker mount arguments.
+fn is_safe_container_path(value: &str) -> bool {
+    !matches!(value, "" | "/")
+        && value.len() <= 255
+        && value.starts_with('/')
+        && !value.contains([',', '\0'])
+        && !value.chars().any(char::is_control)
+        && !value
+            .split('/')
+            .any(|segment| matches!(segment, "." | ".."))
 }
 
 /// Accepts bounded repository-relative paths without traversal or absolute roots.
@@ -2915,6 +2944,7 @@ fn service_config_response(config: ServiceConfig) -> ServiceConfigResponse {
         static_output_dir: config.static_output_dir,
         exposed_port: config.exposed_port,
         healthcheck_path: config.healthcheck_path,
+        persistent_volumes: config.persistent_volumes,
         updated_at: config.updated_at,
     }
 }
@@ -3667,6 +3697,7 @@ mod tests {
             static_output_dir: None,
             exposed_port: Some(8080),
             healthcheck_path: Some("/health".to_owned()),
+            persistent_volumes: vec!["/data".to_owned()],
         };
         assert!(validate_service_config(&traversal).is_err());
 
@@ -3678,8 +3709,21 @@ mod tests {
             static_output_dir: Some("  ".to_owned()),
             exposed_port: None,
             healthcheck_path: None,
+            persistent_volumes: Vec::new(),
         };
         assert!(validate_service_config(&incomplete_static).is_err());
+
+        let unsafe_volume = UpdateServiceConfigRequest {
+            project_kind: "service".to_owned(),
+            builder: "dockerfile".to_owned(),
+            context_path: ".".to_owned(),
+            dockerfile_path: "Dockerfile".to_owned(),
+            static_output_dir: None,
+            exposed_port: Some(8080),
+            healthcheck_path: Some("/health".to_owned()),
+            persistent_volumes: vec!["/data/../secrets".to_owned()],
+        };
+        assert!(validate_service_config(&unsafe_volume).is_err());
     }
 
     /// Proves environment syntax rejects shell-like names and multiline values.

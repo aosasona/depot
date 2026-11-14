@@ -3,6 +3,7 @@
 use std::{process::Stdio, time::Duration};
 
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use thiserror::Error;
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -19,6 +20,8 @@ pub struct StartContainerRequest<'a> {
     pub container_port: u16,
     pub timeout: Duration,
     pub environment: &'a [(String, String)],
+    pub project_id: &'a str,
+    pub persistent_paths: &'a [String],
 }
 
 /// Runtime identity needed for persistence, readiness, routing, and later cleanup.
@@ -75,6 +78,10 @@ pub enum RuntimeError {
     NotReady,
     #[error("runtime environment contains an invalid name or value")]
     InvalidEnvironment,
+    #[error("persistent volume configuration contains an unsafe container path")]
+    InvalidVolume,
+    #[error("Docker could not inspect image volume metadata")]
+    ImageInspectFailed,
     #[error("Docker could not read release container logs")]
     LogsFailed,
     #[error("active runtime identity does not match the requested route")]
@@ -202,6 +209,16 @@ pub async fn start_container(
     if !request.environment.is_empty() {
         run.args(["--env-file", "/dev/stdin"]);
     }
+    for path in request.persistent_paths {
+        if !valid_container_path(path) {
+            return Err(RuntimeError::InvalidVolume);
+        }
+        let mount = format!(
+            "type=volume,src={},dst={path}",
+            persistent_volume_name(request.project_id, path)
+        );
+        run.args(["--mount", &mount]);
+    }
     run.arg(request.image_id)
         .stdin(if request.environment.is_empty() {
             Stdio::null()
@@ -245,6 +262,59 @@ pub async fn start_container(
         container_id,
         host_port: host_port.expect("validated host port is present"),
     })
+}
+
+/// Reads absolute volume targets declared by the built OCI image.
+pub async fn image_volume_paths(
+    docker_binary: &str,
+    image_id: &str,
+    timeout: Duration,
+) -> Result<Vec<String>, RuntimeError> {
+    let mut inspect = Command::new(docker_binary);
+    inspect
+        .args([
+            "image",
+            "inspect",
+            "--format",
+            "{{json .Config.Volumes}}",
+            image_id,
+        ])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = command_output(&mut inspect, timeout).await?;
+    if !output.status.success() {
+        return Err(RuntimeError::ImageInspectFailed);
+    }
+    let value = String::from_utf8(output.stdout).map_err(|_| RuntimeError::ImageInspectFailed)?;
+    if value.trim() == "null" || value.trim().is_empty() {
+        return Ok(Vec::new());
+    }
+    let declared: std::collections::BTreeMap<String, serde_json::Value> =
+        serde_json::from_str(value.trim()).map_err(|_| RuntimeError::ImageInspectFailed)?;
+    Ok(declared
+        .into_keys()
+        .filter(|path| valid_container_path(path))
+        .collect())
+}
+
+/// Derives a stable project-scoped Docker volume name without exposing the path.
+fn persistent_volume_name(project_id: &str, path: &str) -> String {
+    let digest = Sha256::digest(path.as_bytes());
+    let suffix = digest[..6]
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect::<String>();
+    format!("depot-{project_id}-{suffix}")
+}
+
+/// Defensively validates a Docker volume destination received from persisted config or image data.
+fn valid_container_path(value: &str) -> bool {
+    !matches!(value, "" | "/")
+        && value.len() <= 255
+        && value.starts_with('/')
+        && !value.contains([',', '\0'])
+        && !value.chars().any(char::is_control)
+        && !value.split('/').any(|part| matches!(part, "." | ".."))
 }
 
 /// Encodes already-validated names and newline-free values for Docker env-file stdin.
@@ -423,8 +493,8 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
     use super::{
-        RouteIdentity, StartContainerRequest, container_logs, healthy_http_response, inspect_route,
-        start_container, verify_route,
+        RouteIdentity, StartContainerRequest, container_logs, healthy_http_response,
+        image_volume_paths, inspect_route, start_container, verify_route,
     };
 
     /// Proves runtime identity and ephemeral port mappings are strictly parsed.
@@ -447,10 +517,76 @@ mod tests {
             container_port: 3000,
             timeout: Duration::from_secs(5),
             environment: &[],
+            project_id: "project",
+            persistent_paths: &[],
         })
         .await
         .expect("container starts");
         assert_eq!(running.host_port, 43123);
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Mounts configured paths with a deterministic project-scoped named volume.
+    #[tokio::test]
+    async fn docker_runtime_mounts_persistent_project_volume() {
+        let root = std::env::temp_dir().join(format!(
+            "depot-runtime-volume-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        let captured = root.join("arguments");
+        fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nif [ \"$1\" = \"run\" ]; then printf '%s\\n' \"$@\" > '{}'; printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; else printf '43123'; fi\n",
+                captured.display()
+            ),
+        )
+        .expect("fake Docker writes");
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        start_container(StartContainerRequest {
+            docker_binary: fake.to_str().expect("path is UTF-8"),
+            deployment_id: "deployment",
+            image_id: "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            container_port: 3000,
+            timeout: Duration::from_secs(5),
+            environment: &[],
+            project_id: "project",
+            persistent_paths: &["/data".to_owned()],
+        })
+        .await
+        .expect("container starts");
+        let arguments = fs::read_to_string(captured).expect("arguments read");
+        assert!(arguments.contains("--mount\n"));
+        assert!(arguments.contains("type=volume,src=depot-project-"));
+        assert!(arguments.contains(",dst=/data"));
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Reads valid persistent targets emitted in OCI image configuration.
+    #[tokio::test]
+    async fn image_volume_metadata_is_detected() {
+        let root = std::env::temp_dir().join(format!(
+            "depot-runtime-image-volume-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s' '{\"/data\":{},\"/var/lib/app\":{},\"relative\":{}}'\n",
+        )
+        .expect("fake Docker writes");
+        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        let paths = image_volume_paths(
+            fake.to_str().expect("path is UTF-8"),
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("image metadata reads");
+        assert_eq!(paths, vec!["/data", "/var/lib/app"]);
         fs::remove_dir_all(root).expect("test root is removed");
     }
 
@@ -566,6 +702,8 @@ mod tests {
             container_port: 3000,
             timeout: Duration::from_secs(5),
             environment: &environment,
+            project_id: "project",
+            persistent_paths: &[],
         })
         .await
         .expect("container starts");

@@ -242,12 +242,22 @@ function ProjectWorkspace({
                   )}
                   {inspectionResult.exposed_ports.length > 0 && (
                     <span>
-                      Dockerfile ports: {inspectionResult.exposed_ports.join(", ")}
+                      Dockerfile ports:{" "}
+                      {inspectionResult.exposed_ports.join(", ")}
                       {inspectionResult.inferred_port
                         ? ` — ${inspectionResult.inferred_port} selected automatically.`
                         : inspectionResult.exposed_ports.length > 1
                           ? " — choose the service port in Settings before deploying."
                           : ""}
+                    </span>
+                  )}
+                  {inspectionResult.volume_paths.length > 0 && (
+                    <span>
+                      Persistent paths:{" "}
+                      {inspectionResult.volume_paths.join(", ")}
+                      {inspectionResult.inferred_volumes
+                        ? " — configured automatically."
+                        : ""}
                     </span>
                   )}
                 </div>
@@ -319,12 +329,13 @@ function ProjectWorkspace({
               <div className="surface-heading">
                 <div>
                   <strong>Build and runtime</strong>
-                  <span>Builder, paths, port, and health checks.</span>
+                  <span>Builder, paths, port, storage, and health checks.</span>
                 </div>
               </div>
               <ServiceConfigForm
                 projectId={project.id}
                 suggestedPorts={inspectionResult?.exposed_ports ?? []}
+                suggestedVolumes={inspectionResult?.volume_paths ?? []}
               />
             </section>
             {project.repository_url.startsWith("ssh://") && (

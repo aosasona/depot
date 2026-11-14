@@ -180,6 +180,7 @@ export function ProjectCanvas({ project }: { project: Project }) {
         static_output_dir: config.static_output_dir,
         exposed_port: config.exposed_port,
         healthcheck_path: config.healthcheck_path,
+        persistent_volumes: config.persistent_volumes,
       });
       await client.invalidateQueries({ queryKey: ["projects"] });
       setMessage(
