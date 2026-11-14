@@ -3295,8 +3295,10 @@ td {
 }
 .wizard-repositories {
   display: grid;
-  min-height: 8rem;
-  max-height: 23rem;
+  flex: 1 1 20rem;
+  min-height: 12rem;
+  grid-auto-rows: minmax(52px, auto);
+  align-content: start;
   overflow: auto;
   border: 1px solid var(--border);
 }
