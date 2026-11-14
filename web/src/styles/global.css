@@ -765,6 +765,9 @@ h1 {
   background: var(--surface);
   color: var(--text);
 }
+.environment-key-input {
+  text-transform: uppercase;
+}
 .environment-value-input {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -772,6 +775,7 @@ h1 {
 }
 .environment-value-input input:not([type="checkbox"]) {
   border-right: 0;
+  text-transform: none;
 }
 .environment-value-input button {
   min-width: 3.6rem;

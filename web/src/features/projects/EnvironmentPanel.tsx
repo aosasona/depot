@@ -180,6 +180,8 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
           <label>
             Project environment
             <textarea
+              autoCapitalize="none"
+              autoCorrect="off"
               spellCheck={false}
               placeholder={"DATABASE_URL=postgres://…\nREDIS_URL=redis://…"}
               value={bulkText}
@@ -221,6 +223,7 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
             {(field) => (
               <input
                 aria-label="Environment variable name"
+                className="environment-key-input"
                 placeholder="DATABASE_URL"
                 autoCapitalize="characters"
                 value={field.state.value}
@@ -238,6 +241,9 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
                   placeholder="Write-only value"
                   type={showEntryValue ? "text" : "password"}
                   autoComplete="new-password"
+                  autoCapitalize="none"
+                  autoCorrect="off"
+                  spellCheck={false}
                   value={field.state.value}
                   onChange={(event) => field.handleChange(event.target.value)}
                 />

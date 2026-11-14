@@ -677,6 +677,8 @@ function ProjectWizard({
             <label className="wide environment-textarea">
               Environment values
               <textarea
+                autoCapitalize="none"
+                autoCorrect="off"
                 spellCheck={false}
                 placeholder={
                   "DATABASE_URL=postgres://…\nREDIS_URL=redis://…\n# Blank lines and comments are ignored"

@@ -18,7 +18,7 @@ export function parseEnvironmentText(
     const separator = line.indexOf("=");
     if (separator <= 0)
       throw new Error(`Line ${index + 1} must use KEY=value.`);
-    const name = line.slice(0, separator).trim();
+    const name = line.slice(0, separator).trim().toUpperCase();
     if (!/^[A-Z_][A-Z0-9_]{0,127}$/.test(name))
       throw new Error(
         `Line ${index + 1} has an invalid key. Use uppercase letters, numbers, and underscores.`,

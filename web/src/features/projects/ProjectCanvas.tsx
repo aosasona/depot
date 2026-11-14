@@ -698,6 +698,7 @@ function ConnectionDialog({
         <label>
           Environment key
           <input
+            autoCapitalize="characters"
             value={name}
             onChange={(event) => setName(event.target.value.toUpperCase())}
           />
@@ -706,6 +707,9 @@ function ConnectionDialog({
           Connection URL / secret
           <input
             type="password"
+            autoCapitalize="none"
+            autoCorrect="off"
+            spellCheck={false}
             placeholder={connectionPlaceholder(name)}
             value={value}
             onChange={(event) => setValue(event.target.value)}
