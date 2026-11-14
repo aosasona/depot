@@ -16,6 +16,7 @@ const validProjectTabs = new Set<ProjectTab>([
   "canvas",
   "deployments",
   "logs",
+  "build",
   "environment",
   "volumes",
   "domains",

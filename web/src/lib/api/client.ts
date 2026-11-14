@@ -60,6 +60,8 @@ const projectSchema = z.object({
   created_at: z.number(),
   updated_at: z.number(),
   latest_inspection_job_id: z.string().nullable(),
+  source_provider: z.enum(["github_app", "git"]),
+  github_repository: z.string().nullable(),
 });
 const serviceConfigSchema = z.object({
   project_id: z.string(),

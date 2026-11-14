@@ -117,6 +117,7 @@ pub struct ProjectSummary {
     pub created_at: i64,
     pub updated_at: i64,
     pub latest_inspection_job_id: Option<String>,
+    pub github_repository_full_name: Option<String>,
 }
 
 /// Validated data required to create a project.
@@ -703,6 +704,7 @@ impl Store {
             created_at: input.now_unix,
             updated_at: input.now_unix,
             latest_inspection_job_id: None,
+            github_repository_full_name: Some(repository.repository_full_name.clone()),
         })
     }
 
@@ -1724,10 +1726,15 @@ impl Store {
         let rows = sqlx::query(
             "SELECT projects.id, slug, name, owner_user_id, repository_url, branch,
                     projects.created_at, projects.updated_at,
+                    github_project_repositories.repository_full_name
+                        AS github_repository_full_name,
                     (SELECT jobs.id FROM jobs WHERE jobs.project_id = projects.id
                      AND jobs.kind = 'inspect_repository'
                      ORDER BY jobs.created_at DESC LIMIT 1) AS latest_inspection_job_id
-             FROM projects ORDER BY projects.created_at DESC, name",
+             FROM projects
+             LEFT JOIN github_project_repositories
+                ON github_project_repositories.project_id = projects.id
+             ORDER BY projects.created_at DESC, name",
         )
         .fetch_all(&self.pool)
         .await?;
@@ -1739,10 +1746,15 @@ impl Store {
         let row = sqlx::query(
             "SELECT projects.id, slug, name, owner_user_id, repository_url, branch,
                     projects.created_at, projects.updated_at,
+                    github_project_repositories.repository_full_name
+                        AS github_repository_full_name,
                     (SELECT jobs.id FROM jobs WHERE jobs.project_id = projects.id
                      AND jobs.kind = 'inspect_repository'
                      ORDER BY jobs.created_at DESC LIMIT 1) AS latest_inspection_job_id
-             FROM projects WHERE projects.id = ?",
+             FROM projects
+             LEFT JOIN github_project_repositories
+                ON github_project_repositories.project_id = projects.id
+             WHERE projects.id = ?",
         )
         .bind(project_id)
         .fetch_optional(&self.pool)
@@ -1827,6 +1839,7 @@ impl Store {
             created_at: input.now_unix,
             updated_at: input.now_unix,
             latest_inspection_job_id: None,
+            github_repository_full_name: None,
         })
     }
 
@@ -3104,6 +3117,7 @@ fn project_from_row(row: SqliteRow) -> Result<ProjectSummary, StoreError> {
         created_at: row.try_get("created_at")?,
         updated_at: row.try_get("updated_at")?,
         latest_inspection_job_id: row.try_get("latest_inspection_job_id")?,
+        github_repository_full_name: row.try_get("github_repository_full_name")?,
     })
 }
 

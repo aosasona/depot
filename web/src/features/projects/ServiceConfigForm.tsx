@@ -55,46 +55,111 @@ const configFormSchema = z
 /** Loads and reveals the editable service configuration for one project. */
 export function ServiceConfigForm({
   projectId,
-  suggestedPorts = [],
+  detection,
 }: {
   projectId: string;
-  suggestedPorts?: number[];
+  detection?: {
+    builder: "dockerfile" | "railpack" | "static" | "unknown";
+    reason: string;
+    ports: number[];
+    selectedPort?: number;
+    volumes: string[];
+  };
 }) {
-  const [expanded, setExpanded] = useState(false);
   const config = useQuery({
     queryKey: ["projects", projectId, "config"],
     queryFn: () => getServiceConfig(projectId),
-    enabled: expanded,
   });
   const githubSource = useQuery({
     queryKey: ["projects", projectId, "github-source"],
     queryFn: () => getProjectGithubSource(projectId),
-    enabled: expanded,
   });
   return (
     <div className="service-config">
-      <button
-        className="table-action config-toggle"
-        type="button"
-        aria-expanded={expanded}
-        onClick={() => setExpanded((value) => !value)}
-      >
-        {expanded ? "Close configuration" : "Configure build"}
-      </button>
-      {expanded && (config.isPending || githubSource.isPending) && (
+      {(config.isPending || githubSource.isPending) && (
         <p className="config-message">Loading configuration…</p>
       )}
-      {expanded && config.isError && (
+      {config.isError && (
         <p className="inspection-error">Configuration is unavailable.</p>
       )}
-      {expanded && config.data && !githubSource.isPending && (
-        <LoadedConfigForm
-          key={config.data.updated_at}
-          config={config.data}
-          githubSource={githubSource.data ?? null}
-          suggestedPorts={suggestedPorts}
-        />
+      {config.data && !githubSource.isPending && (
+        <>
+          <BuildDetectionSummary config={config.data} detection={detection} />
+          <LoadedConfigForm
+            key={config.data.updated_at}
+            config={config.data}
+            githubSource={githubSource.data ?? null}
+            detection={detection}
+          />
+        </>
       )}
+    </div>
+  );
+}
+
+/** Separates source inspection facts from deliberate saved overrides. */
+function BuildDetectionSummary({
+  config,
+  detection,
+}: {
+  config: ServiceConfig;
+  detection?: {
+    builder: "dockerfile" | "railpack" | "static" | "unknown";
+    reason: string;
+    ports: number[];
+    selectedPort?: number;
+    volumes: string[];
+  };
+}) {
+  const detectedKind =
+    detection?.builder === "static"
+      ? "Static site"
+      : detection
+        ? "Web service"
+        : "Not inspected";
+  return (
+    <div className="build-detection">
+      <div className="build-detection-heading">
+        <div>
+          <strong>Detected from source</strong>
+          <span>
+            {detection?.reason ??
+              "Inspect the current source to refresh Depot’s recommendations."}
+          </span>
+        </div>
+        <span className={detection ? "detected" : undefined}>
+          {detection ? "Inspection loaded" : "No inspection"}
+        </span>
+      </div>
+      <dl>
+        <div>
+          <dt>Project type</dt>
+          <dd>{detectedKind}</dd>
+          <small>
+            {config.project_kind === "auto" ? "Using auto" : "Overridden"}
+          </small>
+        </div>
+        <div>
+          <dt>Builder</dt>
+          <dd>{displayBuilder(detection?.builder)}</dd>
+          <small>
+            {config.builder === "auto" ? "Using auto" : "Overridden"}
+          </small>
+        </div>
+        <div>
+          <dt>Container port</dt>
+          <dd>
+            {detection?.selectedPort ??
+              (detection?.ports.length === 1 ? detection.ports[0] : "—")}
+          </dd>
+          <small>{config.exposed_port ? "Overridden" : "Using auto"}</small>
+        </div>
+        <div>
+          <dt>Data paths</dt>
+          <dd>{detection?.volumes.length ?? 0}</dd>
+          <small>Manage in Volumes</small>
+        </div>
+      </dl>
     </div>
   );
 }
@@ -103,11 +168,17 @@ export function ServiceConfigForm({
 function LoadedConfigForm({
   config,
   githubSource,
-  suggestedPorts,
+  detection,
 }: {
   config: ServiceConfig;
   githubSource: ProjectGithubSource | null;
-  suggestedPorts: number[];
+  detection?: {
+    builder: "dockerfile" | "railpack" | "static" | "unknown";
+    reason: string;
+    ports: number[];
+    selectedPort?: number;
+    volumes: string[];
+  };
 }) {
   const queryClient = useQueryClient();
   const [message, setMessage] = useState<string>();
@@ -126,9 +197,7 @@ function LoadedConfigForm({
       context_path: config.context_path,
       dockerfile_path: config.dockerfile_path,
       static_output_dir: config.static_output_dir ?? "",
-      exposed_port:
-        config.exposed_port?.toString() ??
-        (suggestedPorts.length === 1 ? String(suggestedPorts[0]) : ""),
+      exposed_port: config.exposed_port?.toString() ?? "",
       healthcheck_path: config.healthcheck_path ?? "",
     },
     onSubmit: async ({ value }) => {
@@ -180,7 +249,12 @@ function LoadedConfigForm({
                 )
               }
             >
-              <option value="auto">Auto-detect</option>
+              <option value="auto">
+                Auto-detect
+                {detection
+                  ? ` — ${detection.builder === "static" ? "static site" : "web service"}`
+                  : ""}
+              </option>
               <option value="service">Service</option>
               <option value="static">Static site</option>
             </select>
@@ -199,7 +273,10 @@ function LoadedConfigForm({
                 )
               }
             >
-              <option value="auto">Auto-detect</option>
+              <option value="auto">
+                Auto-detect
+                {detection ? ` — ${displayBuilder(detection.builder)}` : ""}
+              </option>
               <option value="dockerfile">Dockerfile</option>
               <option value="railpack">Railpack</option>
             </select>
@@ -354,18 +431,26 @@ function LoadedConfigForm({
               type="number"
               min="1"
               max="65535"
-              placeholder="3000"
+              placeholder={
+                detection?.selectedPort?.toString() ??
+                (detection?.ports.length === 1
+                  ? detection.ports[0]?.toString()
+                  : "3000")
+              }
               value={field.state.value}
               onChange={(event) => field.handleChange(event.target.value)}
             />
             <small>
-              The port the application listens on inside its container, not a
-              public host port.
+              {config.exposed_port
+                ? "Saved override. Clear it to use Depot’s detected port."
+                : detection?.selectedPort || detection?.ports.length === 1
+                  ? "Currently using the detected port shown as the placeholder."
+                  : "The internal application port. Leave blank when Depot can detect it."}
             </small>
-            {suggestedPorts.length > 1 && (
+            {Boolean(detection?.ports.length) && (
               <span className="config-port-options">
-                Detected in Dockerfile:{" "}
-                {suggestedPorts.map((port) => (
+                Detected:{" "}
+                {detection?.ports.map((port) => (
                   <button
                     className="table-action"
                     type="button"
@@ -409,6 +494,15 @@ function LoadedConfigForm({
       {message && <p className="notice success">{message}</p>}
     </form>
   );
+}
+
+function displayBuilder(
+  builder?: "dockerfile" | "railpack" | "static" | "unknown",
+) {
+  if (!builder || builder === "unknown") return "Not detected";
+  if (builder === "dockerfile") return "Dockerfile";
+  if (builder === "railpack") return "Railpack";
+  return "Static pipeline";
 }
 
 /** Joins a build context and relative output path for repository-root browsing. */

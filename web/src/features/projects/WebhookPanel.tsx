@@ -12,7 +12,13 @@ const repositorySchema = z
   );
 
 /** Creates a signed GitHub push endpoint and displays its credentials once. */
-export function WebhookPanel({ projectId }: { projectId: string }) {
+export function WebhookPanel({
+  projectId,
+  managedRepository,
+}: {
+  projectId: string;
+  managedRepository?: string | null;
+}) {
   const [repository, setRepository] = useState("");
   const [error, setError] = useState<string>();
   const webhook = useMutation({
@@ -30,12 +36,27 @@ export function WebhookPanel({ projectId }: { projectId: string }) {
   const endpoint = webhook.data
     ? `${window.location.origin}${webhook.data.endpoint_path}`
     : undefined;
+  if (managedRepository) {
+    return (
+      <div className="github-delivery-status">
+        <span className="project-source-badge">GitHub App</span>
+        <div>
+          <strong>Push deployments are connected</strong>
+          <p>
+            Depot receives verified push events for{" "}
+            <code>{managedRepository}</code> through the installed GitHub App.
+            You do not need to create or maintain a repository webhook.
+          </p>
+        </div>
+      </div>
+    );
+  }
   return (
     <div className="domain-panel">
-      <strong>GitHub push webhook</strong>
+      <strong>Manual GitHub webhook</strong>
       <p className="config-message">
-        Signed pushes to this project branch can enqueue exact-commit
-        deployments.
+        Only use this for a GitHub repository added through a Git URL. GitHub
+        App projects receive push events automatically.
       </p>
       <form
         className="domain-form"

@@ -268,6 +268,8 @@ struct ProjectResponse {
     created_at: i64,
     updated_at: i64,
     latest_inspection_job_id: Option<String>,
+    source_provider: &'static str,
+    github_repository: Option<String>,
 }
 
 /// Authenticated request to create a project from a Git source.
@@ -2534,6 +2536,14 @@ async fn update_project(
         &request.repository_url,
         &request.branch,
     )?;
+    let current = state.store.project_by_id(&project_id).await?;
+    if current.github_repository_full_name.is_some()
+        && current.repository_url != request.repository_url
+    {
+        return Err(ApiError::InvalidProjectField(
+            "GitHub App project repositories cannot be replaced.",
+        ));
+    }
     let project = state
         .store
         .update_project(
@@ -3238,6 +3248,11 @@ fn trimmed_optional(value: Option<&str>) -> Option<&str> {
 
 /// Maps a stored project into the stable API contract.
 fn project_response(project: ProjectSummary) -> ProjectResponse {
+    let source_provider = if project.github_repository_full_name.is_some() {
+        "github_app"
+    } else {
+        "git"
+    };
     ProjectResponse {
         id: project.id,
         slug: project.slug,
@@ -3248,6 +3263,8 @@ fn project_response(project: ProjectSummary) -> ProjectResponse {
         created_at: project.created_at,
         updated_at: project.updated_at,
         latest_inspection_job_id: project.latest_inspection_job_id,
+        source_provider,
+        github_repository: project.github_repository_full_name,
     }
 }
 

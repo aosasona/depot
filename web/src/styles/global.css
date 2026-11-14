@@ -2572,11 +2572,23 @@ td {
   font-weight: 650;
 }
 .project-list-identity small {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
   overflow: hidden;
   color: var(--muted);
   font-size: 0.68rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.project-source-badge {
+  flex: 0 0 auto;
+  padding: 0.2rem 0.4rem;
+  border: 1px solid #3f7652;
+  color: #8edb91;
+  font: normal 0.56rem var(--mono-font);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 .project-branch {
   padding: 0.3rem 0.5rem;
@@ -2652,6 +2664,11 @@ td {
   font-size: 0.7rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.project-heading-meta {
+  display: flex;
+  gap: 0.5rem;
+  align-items: center;
 }
 .project-tabs {
   display: flex;
@@ -2810,6 +2827,127 @@ td {
 .project-surface .deployment-heading > strong {
   font-size: 0.82rem;
 }
+.build-settings-surface .service-config {
+  gap: 1rem;
+}
+.build-detection {
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+}
+.build-detection-heading {
+  display: flex;
+  gap: 1rem;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0.9rem 1rem;
+  border-bottom: 1px solid var(--border);
+}
+.build-detection-heading > div {
+  display: grid;
+  gap: 0.25rem;
+}
+.build-detection-heading strong {
+  font-size: 0.8rem;
+}
+.build-detection-heading > div > span {
+  color: var(--muted);
+  font-size: 0.72rem;
+  line-height: 1.45;
+}
+.build-detection-heading > span {
+  flex: 0 0 auto;
+  padding: 0.25rem 0.45rem;
+  border: 1px solid var(--border);
+  color: var(--muted);
+  font: 0.58rem var(--mono-font);
+  text-transform: uppercase;
+}
+.build-detection-heading > span.detected {
+  border-color: #3f7652;
+  color: #8edb91;
+}
+.build-detection dl {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  margin: 0;
+}
+.build-detection dl > div {
+  display: grid;
+  gap: 0.3rem;
+  min-width: 0;
+  padding: 0.85rem 1rem;
+  border-right: 1px solid var(--border);
+}
+.build-detection dl > div:last-child {
+  border-right: 0;
+}
+.build-detection dt,
+.build-detection small {
+  color: var(--muted);
+  font-size: 0.64rem;
+}
+.build-detection dt {
+  text-transform: uppercase;
+}
+.build-detection dd {
+  overflow: hidden;
+  margin: 0;
+  font-size: 0.82rem;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.build-settings-surface .config-form {
+  margin-top: 0;
+  gap: 1rem;
+  background: var(--surface-raised);
+}
+.build-settings-surface .config-form label,
+.build-settings-surface .config-path-control label {
+  color: var(--text);
+  font-family: var(--ui-font);
+  font-size: 0.74rem;
+  font-weight: 600;
+  letter-spacing: normal;
+  text-transform: none;
+}
+.build-settings-surface .config-form .primary-action {
+  width: auto;
+  min-height: 42px;
+  padding: 0 1rem;
+  justify-self: start;
+}
+.identity-settings input[readonly] {
+  cursor: default;
+  color: var(--muted);
+  background: var(--surface);
+}
+.github-delivery-status {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  gap: 0.85rem;
+  align-items: start;
+  padding: 1rem;
+  border: 1px solid #3f7652;
+  background: rgb(142 219 145 / 4%);
+}
+.github-delivery-status > div {
+  display: grid;
+  gap: 0.35rem;
+}
+.github-delivery-status strong {
+  font-size: 0.82rem;
+}
+.github-delivery-status p {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.74rem;
+  line-height: 1.5;
+}
+.github-delivery-status code {
+  color: var(--text);
+}
 .deployment-logs {
   min-width: 0;
 }
@@ -2898,6 +3036,19 @@ td {
   .surface-heading {
     align-items: flex-start;
     flex-direction: column;
+  }
+  .project-heading-meta {
+    align-items: flex-end;
+    flex-direction: column;
+  }
+  .build-detection dl {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .build-detection dl > div:nth-child(2) {
+    border-right: 0;
+  }
+  .build-detection dl > div:nth-child(-n + 2) {
+    border-bottom: 1px solid var(--border);
   }
   .log-line {
     grid-template-columns: 8.5rem minmax(0, 1fr);

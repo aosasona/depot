@@ -111,7 +111,12 @@ function ProjectListCard({
       </span>
       <span className="project-list-identity">
         <strong>{project.name}</strong>
-        <small>{project.repository_url}</small>
+        <small>
+          {project.source_provider === "github_app" && (
+            <i className="project-source-badge">GitHub App</i>
+          )}
+          {project.github_repository ?? project.repository_url}
+        </small>
       </span>
       <span className="project-branch">{project.branch}</span>
       <span
@@ -132,6 +137,7 @@ export type ProjectTab =
   | "canvas"
   | "deployments"
   | "logs"
+  | "build"
   | "environment"
   | "volumes"
   | "domains"
@@ -142,6 +148,7 @@ const projectTabs: Array<{ id: ProjectTab; label: string }> = [
   { id: "canvas", label: "Canvas" },
   { id: "deployments", label: "Deployments" },
   { id: "logs", label: "Logs" },
+  { id: "build", label: "Build" },
   { id: "environment", label: "Environment" },
   { id: "volumes", label: "Volumes" },
   { id: "domains", label: "Domains" },
@@ -189,12 +196,20 @@ function ProjectWorkspace({
         </div>
         <div>
           <span className="project-heading-kicker">
-            PROJECT / {project.slug}
+            {project.source_provider === "github_app"
+              ? "GITHUB APP PROJECT"
+              : "GIT PROJECT"}{" "}
+            / {project.slug}
           </span>
           <h2 id="project-title">{project.name}</h2>
           <p>{project.repository_url}</p>
         </div>
-        <span className="project-branch">{project.branch}</span>
+        <span className="project-heading-meta">
+          {project.source_provider === "github_app" && (
+            <span className="project-source-badge">Connected</span>
+          )}
+          <span className="project-branch">{project.branch}</span>
+        </span>
       </div>
       <nav className="project-tabs" aria-label={`${project.name} sections`}>
         {projectTabs.map((item) => (
@@ -307,6 +322,35 @@ function ProjectWorkspace({
             <DeploymentLogsPanel projectId={project.id} />
           </section>
         )}
+        {tab === "build" && (
+          <section className="project-surface build-settings-surface">
+            <div className="surface-heading">
+              <div>
+                <strong>Build and runtime</strong>
+                <span>
+                  Review detected values and override only what this project
+                  needs.
+                </span>
+              </div>
+            </div>
+            <ServiceConfigForm
+              projectId={project.id}
+              detection={
+                inspectionResult
+                  ? {
+                      builder: inspectionResult.builder,
+                      reason: inspectionResult.reason,
+                      ports: inspectionResult.exposed_ports,
+                      selectedPort: inspectionResult.inferred_port,
+                      volumes:
+                        inspectionResult.inferred_volumes ??
+                        inspectionResult.volume_paths,
+                    }
+                  : undefined
+              }
+            />
+          </section>
+        )}
         {tab === "environment" && (
           <section className="project-surface">
             <EnvironmentPanel projectId={project.id} />
@@ -333,26 +377,20 @@ function ProjectWorkspace({
               </div>
               <ProjectIdentityForm project={project} />
             </section>
-            <section className="project-surface">
-              <div className="surface-heading">
-                <div>
-                  <strong>Build and runtime</strong>
-                  <span>Builder, source paths, port, and health checks.</span>
-                </div>
-              </div>
-              <ServiceConfigForm
-                projectId={project.id}
-                suggestedPorts={inspectionResult?.exposed_ports ?? []}
-              />
-            </section>
             {project.repository_url.startsWith("ssh://") && (
               <section className="project-surface">
                 <SshCredentialPanel projectId={project.id} />
               </section>
             )}
-            <section className="project-surface">
-              <WebhookPanel projectId={project.id} />
-            </section>
+            {(project.github_repository ||
+              isGithubRepository(project.repository_url)) && (
+              <section className="project-surface">
+                <WebhookPanel
+                  projectId={project.id}
+                  managedRepository={project.github_repository}
+                />
+              </section>
+            )}
           </div>
         )}
       </div>
@@ -365,4 +403,12 @@ function errorMessage(reason: unknown) {
   return reason instanceof ApiError
     ? reason.message
     : "Depot could not create this project.";
+}
+
+function isGithubRepository(repositoryUrl: string) {
+  try {
+    return new URL(repositoryUrl).hostname.toLowerCase() === "github.com";
+  } catch {
+    return false;
+  }
 }

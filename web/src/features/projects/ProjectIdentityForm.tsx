@@ -91,9 +91,21 @@ export function ProjectIdentityForm({ project }: { project: Project }) {
               Repository URL
               <input
                 type="url"
+                readOnly={project.source_provider === "github_app"}
+                aria-describedby={
+                  project.source_provider === "github_app"
+                    ? "github-repository-note"
+                    : undefined
+                }
                 value={field.state.value}
                 onChange={(event) => field.handleChange(event.target.value)}
               />
+              {project.source_provider === "github_app" && (
+                <small id="github-repository-note">
+                  Managed by the connected GitHub App. Create another project to
+                  use a different repository.
+                </small>
+              )}
             </label>
           )}
         </form.Field>
