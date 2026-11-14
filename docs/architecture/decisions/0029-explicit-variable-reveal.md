@@ -20,6 +20,10 @@ The web client retains a revealed value only in mounted component memory. Hiding
 value from UI state, and leaving the project destroys the remaining state. Reveal responses are not
 placed in the query cache or browser storage.
 
+Selecting the Raw text editor is an explicit request to reveal the complete environment. The client
+still requests and audits each value individually, then holds the resulting dotenv document only in
+component memory. Saving that document reconciles the stored set; omitted keys are deleted.
+
 ## Consequences
 
 - Operators can inspect both secret and non-secret runtime values deliberately.

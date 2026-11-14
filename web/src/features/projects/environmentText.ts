@@ -25,12 +25,21 @@ export function parseEnvironmentText(
       );
     if (names.has(name)) throw new Error(`${name} is defined more than once.`);
     let value = line.slice(separator + 1).trim();
-    if (
+    if (value.length >= 2 && value.startsWith('"') && value.endsWith('"')) {
+      try {
+        const decoded: unknown = JSON.parse(value);
+        if (typeof decoded !== "string") throw new Error("not a string");
+        value = decoded;
+      } catch {
+        throw new Error(`Line ${index + 1} has an invalid quoted value.`);
+      }
+    } else if (
       value.length >= 2 &&
-      ((value.startsWith('"') && value.endsWith('"')) ||
-        (value.startsWith("'") && value.endsWith("'")))
-    )
+      value.startsWith("'") &&
+      value.endsWith("'")
+    ) {
       value = value.slice(1, -1);
+    }
     if (value.length > 32_768)
       throw new Error(`${name} exceeds the 32 KiB value limit.`);
     names.add(name);
@@ -39,4 +48,13 @@ export function parseEnvironmentText(
   if (entries.length > 128)
     throw new Error("A project can contain at most 128 environment values.");
   return entries;
+}
+
+/** Serializes stored values into a lossless dotenv-compatible editor document. */
+export function serializeEnvironmentText(
+  entries: Array<{ name: string; value: string }>,
+) {
+  return entries
+    .map((entry) => `${entry.name}=${JSON.stringify(entry.value)}`)
+    .join("\n");
 }

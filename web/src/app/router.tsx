@@ -17,6 +17,7 @@ const validProjectTabs = new Set<ProjectTab>([
   "deployments",
   "logs",
   "environment",
+  "volumes",
   "domains",
   "settings",
 ]);

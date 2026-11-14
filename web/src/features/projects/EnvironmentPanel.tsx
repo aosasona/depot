@@ -9,7 +9,10 @@ import {
   revealVariable,
   upsertVariable,
 } from "../../lib/api/client";
-import { parseEnvironmentText } from "./environmentText";
+import {
+  parseEnvironmentText,
+  serializeEnvironmentText,
+} from "./environmentText";
 
 const variableSchema = z.object({
   name: z
@@ -27,6 +30,7 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
   const [bulkText, setBulkText] = useState("");
   const [bulkSecrets, setBulkSecrets] = useState(true);
   const [bulkSaving, setBulkSaving] = useState(false);
+  const [bulkLoading, setBulkLoading] = useState(false);
   const [showEntryValue, setShowEntryValue] = useState(false);
   const [revealedValues, setRevealedValues] = useState<Record<string, string>>(
     {},
@@ -67,16 +71,48 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
     },
   });
 
-  /** Validates and encrypts a pasted dotenv block one write-only value at a time. */
+  /** Loads the complete saved environment into the explicitly selected raw editor. */
+  async function openRawEditor() {
+    setError(undefined);
+    setEntryMode("bulk");
+    setBulkLoading(true);
+    try {
+      const current = variables.data ?? (await variables.refetch()).data ?? [];
+      const values = await Promise.all(
+        current.map(async (variable) => ({
+          name: variable.name,
+          value: (await revealVariable(projectId, variable.id)).value,
+        })),
+      );
+      setBulkText(serializeEnvironmentText(values));
+    } catch (reason) {
+      setError(variableError(reason));
+      setEntryMode("single");
+    } finally {
+      setBulkLoading(false);
+    }
+  }
+
+  /** Reconciles the raw editor with encrypted storage one bounded value at a time. */
   async function saveEnvironmentBlock() {
     setError(undefined);
     try {
       const entries = parseEnvironmentText(bulkText, bulkSecrets);
-      if (entries.length === 0)
-        return setError("Paste at least one KEY=value entry.");
       setBulkSaving(true);
-      for (const entry of entries) await upsertVariable(projectId, entry);
-      setBulkText("");
+      const existing = variables.data ?? [];
+      for (const entry of entries) {
+        const current = existing.find(
+          (variable) => variable.name === entry.name,
+        );
+        await upsertVariable(projectId, {
+          ...entry,
+          is_secret: current?.is_secret ?? bulkSecrets,
+        });
+      }
+      const retained = new Set(entries.map((entry) => entry.name));
+      for (const variable of existing)
+        if (!retained.has(variable.name))
+          await deleteVariable(projectId, variable.id);
       await queryClient.invalidateQueries({
         queryKey: ["projects", projectId, "variables"],
       });
@@ -113,8 +149,8 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
     <div className="domain-panel environment-panel">
       <strong>Environment</strong>
       <p className="config-message">
-        Values are encrypted and cannot be viewed again. Saving an existing name
-        replaces it.
+        Values are encrypted at rest. Revealing saved values is explicit and
+        audited. Saving an existing name replaces it.
       </p>
       <fieldset
         className="environment-entry-switch"
@@ -123,22 +159,26 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
         <button
           type="button"
           aria-pressed={entryMode === "single"}
-          onClick={() => setEntryMode("single")}
+          onClick={() => {
+            setBulkText("");
+            setEntryMode("single");
+          }}
         >
           Key-value pair
         </button>
         <button
           type="button"
           aria-pressed={entryMode === "bulk"}
-          onClick={() => setEntryMode("bulk")}
+          disabled={bulkLoading}
+          onClick={() => void openRawEditor()}
         >
-          Raw text
+          {bulkLoading ? "Loading…" : "Raw text"}
         </button>
       </fieldset>
       {entryMode === "bulk" ? (
         <div className="environment-bulk">
           <label>
-            Paste environment block
+            Project environment
             <textarea
               spellCheck={false}
               placeholder={"DATABASE_URL=postgres://…\nREDIS_URL=redis://…"}
@@ -146,6 +186,10 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
               onChange={(event) => setBulkText(event.target.value)}
             />
           </label>
+          <p className="environment-raw-note">
+            This document is the complete project environment. Removing a line
+            removes that saved variable when you save.
+          </p>
           <div>
             <label className="environment-secret">
               <input
@@ -153,7 +197,7 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
                 checked={bulkSecrets}
                 onChange={(event) => setBulkSecrets(event.target.checked)}
               />
-              Mark pasted values as secrets
+              Mark new values as secrets
             </label>
             <button
               className="table-action"
@@ -161,7 +205,7 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
               disabled={bulkSaving}
               onClick={() => void saveEnvironmentBlock()}
             >
-              {bulkSaving ? "Encrypting…" : "Save all values"}
+              {bulkSaving ? "Saving…" : "Save environment"}
             </button>
           </div>
         </div>
@@ -232,41 +276,42 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
       {remove.error && (
         <p className="inspection-error">{variableError(remove.error)}</p>
       )}
-      {variables.data?.map((variable) => (
-        <div className="domain-row" key={variable.id}>
-          <code>{variable.name}</code>
-          <span className="deployment-status active">
-            {variable.is_secret ? "secret" : "variable"}
-          </span>
-          <span className="environment-stored-value">
-            <span title="Stored encrypted value">
-              {revealedValues[variable.id] ?? "••••••••"}
+      {entryMode === "single" &&
+        variables.data?.map((variable) => (
+          <div className="domain-row" key={variable.id}>
+            <code>{variable.name}</code>
+            <span className="deployment-status active">
+              {variable.is_secret ? "secret" : "variable"}
+            </span>
+            <span className="environment-stored-value">
+              <span title="Stored encrypted value">
+                {revealedValues[variable.id] ?? "••••••••"}
+              </span>
+              <button
+                className="text-action"
+                type="button"
+                aria-pressed={revealedValues[variable.id] !== undefined}
+                disabled={reveal.isPending && reveal.variables === variable.id}
+                onClick={() => void toggleRevealedValue(variable.id)}
+              >
+                {reveal.isPending && reveal.variables === variable.id
+                  ? "Loading…"
+                  : revealedValues[variable.id] !== undefined
+                    ? "Hide"
+                    : "Show"}
+              </button>
             </span>
             <button
               className="text-action"
               type="button"
-              aria-pressed={revealedValues[variable.id] !== undefined}
-              disabled={reveal.isPending && reveal.variables === variable.id}
-              onClick={() => void toggleRevealedValue(variable.id)}
+              disabled={remove.isPending}
+              onClick={() => remove.mutate(variable.id)}
             >
-              {reveal.isPending && reveal.variables === variable.id
-                ? "Loading…"
-                : revealedValues[variable.id] !== undefined
-                  ? "Hide"
-                  : "Show"}
+              Remove
             </button>
-          </span>
-          <button
-            className="text-action"
-            type="button"
-            disabled={remove.isPending}
-            onClick={() => remove.mutate(variable.id)}
-          >
-            Remove
-          </button>
-        </div>
-      ))}
-      {variables.data?.length === 0 && (
+          </div>
+        ))}
+      {entryMode === "single" && variables.data?.length === 0 && (
         <p className="config-message">No runtime values configured.</p>
       )}
     </div>

@@ -18,6 +18,7 @@ import { ProjectIdentityForm } from "./ProjectIdentityForm";
 import { ProjectOverview } from "./ProjectOverview";
 import { ServiceConfigForm } from "./ServiceConfigForm";
 import { SshCredentialPanel } from "./SshCredentialPanel";
+import { VolumesPanel } from "./VolumesPanel";
 import { WebhookPanel } from "./WebhookPanel";
 
 /** Renders project creation, live project state, and intentional empty feedback. */
@@ -132,6 +133,7 @@ export type ProjectTab =
   | "deployments"
   | "logs"
   | "environment"
+  | "volumes"
   | "domains"
   | "settings";
 
@@ -141,6 +143,7 @@ const projectTabs: Array<{ id: ProjectTab; label: string }> = [
   { id: "deployments", label: "Deployments" },
   { id: "logs", label: "Logs" },
   { id: "environment", label: "Environment" },
+  { id: "volumes", label: "Volumes" },
   { id: "domains", label: "Domains" },
   { id: "settings", label: "Settings" },
 ];
@@ -309,6 +312,11 @@ function ProjectWorkspace({
             <EnvironmentPanel projectId={project.id} />
           </section>
         )}
+        {tab === "volumes" && (
+          <section className="project-surface">
+            <VolumesPanel projectId={project.id} />
+          </section>
+        )}
         {tab === "domains" && (
           <section className="project-surface">
             <DomainPanel projectId={project.id} />
@@ -329,13 +337,12 @@ function ProjectWorkspace({
               <div className="surface-heading">
                 <div>
                   <strong>Build and runtime</strong>
-                  <span>Builder, paths, port, storage, and health checks.</span>
+                  <span>Builder, source paths, port, and health checks.</span>
                 </div>
               </div>
               <ServiceConfigForm
                 projectId={project.id}
                 suggestedPorts={inspectionResult?.exposed_ports ?? []}
-                suggestedVolumes={inspectionResult?.volume_paths ?? []}
               />
             </section>
             {project.repository_url.startsWith("ssh://") && (

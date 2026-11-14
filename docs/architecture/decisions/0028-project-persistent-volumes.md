@@ -30,6 +30,10 @@ container file browser or enter paths in service settings. On the first stateful
 stops the predecessor and seeds each new managed volume with that directory's existing contents
 before starting the replacement. Static projects do not receive runtime volumes.
 
+Persistent paths are managed from a dedicated project Volumes view. The view supports structured
+add and detach actions and can open the active container file browser for directory selection;
+general build settings no longer expose the paths as an opaque multiline field.
+
 Depot never accepts a host source path from project configuration. Volume removal is not coupled
 to project or release deletion; destructive cleanup must be an explicit future operation.
 

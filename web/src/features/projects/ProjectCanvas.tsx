@@ -748,7 +748,7 @@ function ShellDialog({
   const [historyIndex, setHistoryIndex] = useState<number>();
   const history = useRef<string[]>([]);
   const socket = useRef<WebSocket | undefined>(undefined);
-  const terminal = useRef<HTMLPreElement>(null);
+  const terminal = useRef<HTMLDivElement>(null);
   const commandInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (!available) {
@@ -841,9 +841,8 @@ function ShellDialog({
               15 minutes or when this dialog disconnects. Full-screen TTY
               programs are not supported yet.
             </p>
-            <div className="browser-terminal">
+            <div ref={terminal} className="browser-terminal">
               <pre
-                ref={terminal}
                 className="browser-shell-output"
                 role="log"
                 aria-live="polite"
