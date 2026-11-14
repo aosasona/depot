@@ -145,7 +145,13 @@ pub async fn inspect_route(
     if lines.next().is_some() {
         return Err(RuntimeError::RouteMismatch);
     }
-    if container_id != identity.container_id || deployment_id != identity.deployment_id {
+    // Containers created before deployment labels were introduced still have an exact,
+    // immutable Docker ID and loopback port recorded by Depot. Accept only a missing
+    // legacy label; a present label must continue to match the requested deployment.
+    let deployment_matches = deployment_id == identity.deployment_id
+        || deployment_id.is_empty()
+        || deployment_id == "<no value>";
+    if container_id != identity.container_id || !deployment_matches {
         return Err(RuntimeError::RouteMismatch);
     }
     let selected_ports = if running == "true" {
@@ -860,6 +866,35 @@ mod tests {
         )
         .await
         .expect("identity matches");
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Keeps routes for pre-label containers working after a Depot upgrade.
+    #[tokio::test]
+    async fn route_verification_accepts_unlabeled_legacy_container() {
+        let root = std::env::temp_dir().join(format!(
+            "depot-runtime-route-legacy-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'true' '<no value>' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}'\n",
+        )
+        .expect("fake Docker writes");
+        make_executable(&fake);
+        verify_route(
+            fake.to_str().expect("path is UTF-8"),
+            RouteIdentity {
+                deployment_id: "deployment",
+                container_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                host_port: 43123,
+            },
+            Duration::from_secs(5),
+        )
+        .await
+        .expect("legacy identity matches without a deployment label");
         fs::remove_dir_all(root).expect("test root is removed");
     }
 
