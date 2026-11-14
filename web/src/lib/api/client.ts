@@ -11,6 +11,8 @@ const readinessSchema = z.object({
 });
 const systemUpdateSchema = z.object({
   version: z.string(),
+  latest_version: z.string().nullable(),
+  update_available: z.boolean().nullable(),
   available: z.boolean(),
   state: z.enum([
     "unavailable",

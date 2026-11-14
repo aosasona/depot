@@ -59,6 +59,14 @@ struct ApiState {
     public_origin: Option<std::sync::Arc<str>>,
     default_domain_suffix: Option<std::sync::Arc<str>>,
     shell: Option<ShellBroker>,
+    release_client: reqwest::Client,
+    release_cache: std::sync::Arc<tokio::sync::Mutex<Option<CachedRelease>>>,
+}
+
+#[derive(Clone, Debug)]
+struct CachedRelease {
+    checked_at: i64,
+    latest_version: Option<String>,
 }
 
 /// Redacted local shell-broker configuration shared by authenticated handlers.
@@ -120,6 +128,8 @@ struct ReadinessResponse {
 #[derive(Debug, Deserialize, Serialize)]
 struct SystemUpdateResponse {
     version: &'static str,
+    latest_version: Option<String>,
+    update_available: Option<bool>,
     available: bool,
     state: String,
     message: String,
@@ -131,6 +141,17 @@ struct PersistedSystemUpdateStatus {
     state: String,
     message: String,
     updated_at: i64,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubReleaseResponse {
+    tag_name: String,
+    assets: Vec<GithubReleaseAsset>,
+}
+
+#[derive(Debug, Deserialize)]
+struct GithubReleaseAsset {
+    name: String,
 }
 
 /// Minimal identity returned after successful first-admin creation.
@@ -364,6 +385,8 @@ enum ApiError {
     InvalidContainerPath,
     FileBroker,
     SystemUpdateUnavailable,
+    SystemUpdateCheckUnavailable,
+    SystemAlreadyCurrent,
     SystemUpdateInProgress,
     SystemUpdateState,
 }
@@ -806,6 +829,8 @@ pub fn router_with_shell_and_domains(
             public_origin,
             default_domain_suffix: default_domain_suffix.map(std::sync::Arc::from),
             shell,
+            release_client: reqwest::Client::new(),
+            release_cache: std::sync::Arc::new(tokio::sync::Mutex::new(None)),
         })
 }
 
@@ -2560,9 +2585,9 @@ async fn system_update_status(
     jar: CookieJar,
 ) -> Result<Json<SystemUpdateResponse>, ApiError> {
     require_admin(&state.store, &jar).await?;
-    Ok(Json(read_system_update_status(Path::new(
-        SYSTEM_UPDATE_DIR,
-    ))?))
+    let mut response = read_system_update_status(Path::new(SYSTEM_UPDATE_DIR))?;
+    attach_latest_release(&state, &mut response).await;
+    Ok(Json(response))
 }
 
 /// Atomically requests the one fixed official-release update workflow.
@@ -2580,6 +2605,12 @@ async fn request_system_update(
     if matches!(current.state.as_str(), "queued" | "running") {
         return Err(ApiError::SystemUpdateInProgress);
     }
+    let latest = latest_official_release(&state)
+        .await
+        .ok_or(ApiError::SystemUpdateCheckUnavailable)?;
+    if !is_newer_release(env!("CARGO_PKG_VERSION"), &latest) {
+        return Err(ApiError::SystemAlreadyCurrent);
+    }
     state
         .store
         .record_system_audit(
@@ -2594,6 +2625,8 @@ async fn request_system_update(
         StatusCode::ACCEPTED,
         Json(SystemUpdateResponse {
             version: env!("CARGO_PKG_VERSION"),
+            latest_version: Some(latest),
+            update_available: Some(true),
             available: true,
             state: "queued".into(),
             message: "The official release update is queued.".into(),
@@ -2606,11 +2639,96 @@ fn system_update_available(state_dir: &Path) -> bool {
     state_dir.is_dir() && Path::new(SYSTEM_UPDATE_HELPER).is_file()
 }
 
+async fn attach_latest_release(state: &ApiState, response: &mut SystemUpdateResponse) {
+    let Some(latest) = latest_official_release(state).await else {
+        response.latest_version = None;
+        response.update_available = None;
+        if response.state == "idle" {
+            response.message = "The latest official release could not be checked right now.".into();
+        }
+        return;
+    };
+    let update_available = is_newer_release(response.version, &latest);
+    response.latest_version = Some(latest.clone());
+    response.update_available = Some(update_available);
+    if response.state == "idle" {
+        response.message = if update_available {
+            format!("Depot v{latest} is available.")
+        } else {
+            "You are running the latest official Depot release.".into()
+        };
+    }
+}
+
+async fn latest_official_release(state: &ApiState) -> Option<String> {
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let mut cache = state.release_cache.lock().await;
+    if let Some(cached) = cache.as_ref() {
+        let lifetime = if cached.latest_version.is_some() {
+            300
+        } else {
+            30
+        };
+        if now.saturating_sub(cached.checked_at) < lifetime {
+            return cached.latest_version.clone();
+        }
+    }
+    let latest_version = fetch_latest_official_release(&state.release_client).await;
+    *cache = Some(CachedRelease {
+        checked_at: now,
+        latest_version: latest_version.clone(),
+    });
+    latest_version
+}
+
+async fn fetch_latest_official_release(client: &reqwest::Client) -> Option<String> {
+    let release = client
+        .get("https://api.github.com/repos/aosasona/depot/releases/latest")
+        .header(reqwest::header::USER_AGENT, "depot-self-hosted")
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await
+        .ok()?
+        .error_for_status()
+        .ok()?
+        .json::<GithubReleaseResponse>()
+        .await
+        .ok()?;
+    let required_assets = ["depot-linux-x86_64.tar.gz", "depot-setup.sh", "SHA256SUMS"];
+    if !required_assets
+        .iter()
+        .all(|required| release.assets.iter().any(|asset| asset.name == *required))
+    {
+        return None;
+    }
+    let version = release.tag_name.strip_prefix('v')?;
+    parse_release_version(version)?;
+    Some(version.to_owned())
+}
+
+fn is_newer_release(installed: &str, latest: &str) -> bool {
+    parse_release_version(latest)
+        .zip(parse_release_version(installed))
+        .is_some_and(|(latest, installed)| latest > installed)
+}
+
+fn parse_release_version(version: &str) -> Option<(u64, u64, u64)> {
+    let mut parts = version.split('.');
+    let parsed = (
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+        parts.next()?.parse().ok()?,
+    );
+    parts.next().is_none().then_some(parsed)
+}
+
 fn read_system_update_status(state_dir: &Path) -> Result<SystemUpdateResponse, ApiError> {
     let available = system_update_available(state_dir);
     if !available {
         return Ok(SystemUpdateResponse {
             version: env!("CARGO_PKG_VERSION"),
+            latest_version: None,
+            update_available: None,
             available: false,
             state: "unavailable".into(),
             message: "Run one CLI update to install the dashboard updater.".into(),
@@ -2620,6 +2738,8 @@ fn read_system_update_status(state_dir: &Path) -> Result<SystemUpdateResponse, A
     if Path::new(SYSTEM_UPDATE_INBOX).join("requested").exists() {
         return Ok(SystemUpdateResponse {
             version: env!("CARGO_PKG_VERSION"),
+            latest_version: None,
+            update_available: None,
             available: true,
             state: "queued".into(),
             message: "The official release update is queued.".into(),
@@ -2633,6 +2753,8 @@ fn read_system_update_status(state_dir: &Path) -> Result<SystemUpdateResponse, A
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Ok(SystemUpdateResponse {
                 version: env!("CARGO_PKG_VERSION"),
+                latest_version: None,
+                update_available: None,
                 available: true,
                 state: "idle".into(),
                 message: "Depot is ready to install the latest official release.".into(),
@@ -2646,6 +2768,8 @@ fn read_system_update_status(state_dir: &Path) -> Result<SystemUpdateResponse, A
     }
     Ok(SystemUpdateResponse {
         version: env!("CARGO_PKG_VERSION"),
+        latest_version: None,
+        update_available: None,
         available: true,
         state: status.state,
         message: status.message,
@@ -3597,6 +3721,16 @@ impl IntoResponse for ApiError {
                 "system_update_unavailable",
                 "Run one CLI update to install the dashboard updater, then try again.",
             ),
+            Self::SystemUpdateCheckUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "system_update_check_unavailable",
+                "The latest complete official release could not be checked right now.",
+            ),
+            Self::SystemAlreadyCurrent => (
+                StatusCode::CONFLICT,
+                "system_already_current",
+                "This Depot instance is already running the latest official release.",
+            ),
             Self::SystemUpdateInProgress => (
                 StatusCode::CONFLICT,
                 "system_update_in_progress",
@@ -3664,10 +3798,10 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        ApiError, UpdateServiceConfigRequest, create_system_update_request, router,
-        router_with_secrets, validate_known_hosts, validate_private_key,
-        validate_repository_full_name, validate_service_config, validate_variable_name,
-        validate_variable_value, verify_github_signature,
+        ApiError, UpdateServiceConfigRequest, create_system_update_request, is_newer_release,
+        parse_release_version, router, router_with_secrets, validate_known_hosts,
+        validate_private_key, validate_repository_full_name, validate_service_config,
+        validate_variable_name, validate_variable_value, verify_github_signature,
     };
 
     /// Parses a JSON response body for focused API assertions.
@@ -3718,6 +3852,17 @@ mod tests {
             Err(ApiError::SystemUpdateInProgress)
         ));
         fs::remove_dir_all(inbox).expect("temporary inbox is removed");
+    }
+
+    /// Proves release comparison accepts only complete numeric versions and never downgrades.
+    #[test]
+    fn system_update_compares_official_versions() {
+        assert_eq!(parse_release_version("0.6.13"), Some((0, 6, 13)));
+        assert_eq!(parse_release_version("0.6.13-rc.1"), None);
+        assert!(is_newer_release("0.6.13", "0.6.14"));
+        assert!(is_newer_release("0.6.13", "0.7.0"));
+        assert!(!is_newer_release("0.6.13", "0.6.13"));
+        assert!(!is_newer_release("0.6.13", "0.6.12"));
     }
 
     /// Proves TOTP blocks session issuance and recovery codes are single-use.

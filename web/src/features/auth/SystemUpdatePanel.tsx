@@ -53,6 +53,12 @@ export function SystemUpdatePanel() {
         <span>Installed version</span>
         <strong>{status ? `v${status.version}` : "Checking…"}</strong>
       </div>
+      {status?.latest_version && (
+        <div className="system-update-version">
+          <span>Latest release</span>
+          <strong>{`v${status.latest_version}`}</strong>
+        </div>
+      )}
       {status && (
         <div className={`system-update-state ${status.state}`} role="status">
           <strong>{status.state.replace("_", " ")}</strong>
@@ -102,11 +108,11 @@ export function SystemUpdatePanel() {
           {error}
         </p>
       )}
-      {!confirming && (
+      {!confirming && status?.update_available === true && (
         <button
           className="primary-action"
           type="button"
-          disabled={!status?.available || busy || update.isPending}
+          disabled={!status.available || busy || update.isPending}
           onClick={() => setConfirming(true)}
         >
           {busy ? "Update in progress…" : "Update Depot"}
