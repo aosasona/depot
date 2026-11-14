@@ -2045,6 +2045,16 @@ td {
   padding-top: 0.5rem;
   border-top: 1px solid var(--border);
 }
+.connection-dialog footer .table-action,
+.connection-dialog footer .primary-action {
+  width: auto;
+  min-height: 40px;
+  margin: 0;
+  padding: 0 1rem;
+}
+.connection-dialog footer .table-action {
+  background: var(--surface-raised);
+}
 .shell-dialog pre {
   overflow: auto;
   margin: 0;

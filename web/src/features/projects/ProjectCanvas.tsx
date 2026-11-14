@@ -665,7 +665,10 @@ function ConnectionDialog({
   }
   return (
     <div className="canvas-dialog-backdrop">
-      <form className="canvas-dialog" onSubmit={(event) => void submit(event)}>
+      <form
+        className="canvas-dialog connection-dialog"
+        onSubmit={(event) => void submit(event)}
+      >
         <header>
           <div>
             <span className="eyebrow">EXTERNAL RESOURCE</span>
