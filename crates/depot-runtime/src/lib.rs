@@ -1,6 +1,6 @@
 //! Docker container lifecycle and localhost readiness boundaries for service releases.
 
-use std::{process::Stdio, time::Duration};
+use std::{path::Path, process::Stdio, time::Duration};
 
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -22,6 +22,18 @@ pub struct StartContainerRequest<'a> {
     pub environment: &'a [(String, String)],
     pub project_id: &'a str,
     pub persistent_paths: &'a [String],
+}
+
+/// Inputs for moving one stopped release directory into its first managed volume.
+#[derive(Debug)]
+pub struct MigrateVolumeRequest<'a> {
+    pub docker_binary: &'a str,
+    pub project_id: &'a str,
+    pub container_id: &'a str,
+    pub image_id: &'a str,
+    pub container_path: &'a str,
+    pub workspace_root: &'a Path,
+    pub timeout: Duration,
 }
 
 /// Runtime identity needed for persistence, readiness, routing, and later cleanup.
@@ -82,6 +94,8 @@ pub enum RuntimeError {
     InvalidVolume,
     #[error("Docker could not inspect image volume metadata")]
     ImageInspectFailed,
+    #[error("Docker could not migrate existing container data into persistent storage")]
+    VolumeMigrationFailed,
     #[error("Docker could not read release container logs")]
     LogsFailed,
     #[error("active runtime identity does not match the requested route")]
@@ -297,6 +311,136 @@ pub async fn image_volume_paths(
         .collect())
 }
 
+/// Seeds a new named volume from a stopped predecessor container exactly once.
+pub async fn migrate_volume_from_container(
+    request: MigrateVolumeRequest<'_>,
+) -> Result<bool, RuntimeError> {
+    if !valid_container_path(request.container_path) {
+        return Err(RuntimeError::InvalidVolume);
+    }
+    let staging = request
+        .workspace_root
+        .join(format!("volume-seed-{}", uuid::Uuid::now_v7()));
+    std::fs::create_dir_all(&staging).map_err(|_| RuntimeError::VolumeMigrationFailed)?;
+    let volume_name = persistent_volume_name(request.project_id, request.container_path);
+    let mut inspect = Command::new(request.docker_binary);
+    inspect
+        .args(["volume", "inspect", &volume_name])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let inspected = match command_output(&mut inspect, request.timeout).await {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+    if inspected.status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Ok(false);
+    }
+
+    let mut create = Command::new(request.docker_binary);
+    create
+        .args(["volume", "create", &volume_name])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let created = match command_output(&mut create, request.timeout).await {
+        Ok(output) => output,
+        Err(error) => {
+            let _ = std::fs::remove_dir_all(&staging);
+            return Err(error);
+        }
+    };
+    if !created.status.success() {
+        let _ = std::fs::remove_dir_all(&staging);
+        return Err(RuntimeError::VolumeMigrationFailed);
+    }
+
+    let seed_name = format!("depot-volume-seed-{}", uuid::Uuid::now_v7());
+    let migration = seed_volume_contents(&request, &volume_name, &seed_name, &staging).await;
+    let _ = std::fs::remove_dir_all(&staging);
+    let mut remove_seed = Command::new(request.docker_binary);
+    remove_seed
+        .args(["rm", "--force", &seed_name])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let _ = command_output(&mut remove_seed, request.timeout).await;
+    if migration.is_err() {
+        let mut remove_volume = Command::new(request.docker_binary);
+        remove_volume
+            .args(["volume", "rm", &volume_name])
+            .stdin(Stdio::null())
+            .kill_on_drop(true);
+        let _ = command_output(&mut remove_volume, request.timeout).await;
+    }
+    migration.map(|()| true)
+}
+
+/// Copies one stopped container directory through bounded worker storage into a mounted seed container.
+async fn seed_volume_contents(
+    request: &MigrateVolumeRequest<'_>,
+    volume_name: &str,
+    seed_name: &str,
+    staging: &Path,
+) -> Result<(), RuntimeError> {
+    let source = format!("{}:{}/.", request.container_id, request.container_path);
+    let mut copy_out = Command::new(request.docker_binary);
+    copy_out
+        .arg("cp")
+        .arg(source)
+        .arg(staging)
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    if !command_output(&mut copy_out, request.timeout)
+        .await?
+        .status
+        .success()
+    {
+        return Err(RuntimeError::VolumeMigrationFailed);
+    }
+    let mount = format!(
+        "type=volume,src={volume_name},dst={}",
+        request.container_path
+    );
+    let mut create_seed = Command::new(request.docker_binary);
+    create_seed
+        .args([
+            "create",
+            "--name",
+            seed_name,
+            "--mount",
+            &mount,
+            request.image_id,
+        ])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    if !command_output(&mut create_seed, request.timeout)
+        .await?
+        .status
+        .success()
+    {
+        return Err(RuntimeError::VolumeMigrationFailed);
+    }
+    let staged_contents = format!("{}/.", staging.display());
+    let destination = format!("{seed_name}:{}", request.container_path);
+    let mut copy_in = Command::new(request.docker_binary);
+    copy_in
+        .arg("cp")
+        .arg(staged_contents)
+        .arg(destination)
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    if !command_output(&mut copy_in, request.timeout)
+        .await?
+        .status
+        .success()
+    {
+        return Err(RuntimeError::VolumeMigrationFailed);
+    }
+    Ok(())
+}
+
 /// Derives a stable project-scoped Docker volume name without exposing the path.
 fn persistent_volume_name(project_id: &str, path: &str) -> String {
     let digest = Sha256::digest(path.as_bytes());
@@ -493,9 +637,16 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
     use super::{
-        RouteIdentity, StartContainerRequest, container_logs, healthy_http_response,
-        image_volume_paths, inspect_route, start_container, verify_route,
+        MigrateVolumeRequest, RouteIdentity, StartContainerRequest, container_logs,
+        healthy_http_response, image_volume_paths, inspect_route, migrate_volume_from_container,
+        start_container, verify_route,
     };
+
+    /// Avoids executing a just-closed script while the test filesystem still holds it writable.
+    fn make_executable(path: &std::path::Path) {
+        fs::set_permissions(path, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        std::thread::sleep(Duration::from_millis(10));
+    }
 
     /// Proves runtime identity and ephemeral port mappings are strictly parsed.
     #[tokio::test]
@@ -508,8 +659,7 @@ mod tests {
             "#!/bin/sh\nif [ \"$1\" = \"run\" ]; then printf 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa'; else printf '43123'; fi\n",
         )
         .expect("fake Docker writes");
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
-        std::thread::sleep(Duration::from_millis(10));
+        make_executable(&fake);
         let running = start_container(StartContainerRequest {
             docker_binary: fake.to_str().expect("path is UTF-8"),
             deployment_id: "deployment",
@@ -544,7 +694,7 @@ mod tests {
             ),
         )
         .expect("fake Docker writes");
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        make_executable(&fake);
         start_container(StartContainerRequest {
             docker_binary: fake.to_str().expect("path is UTF-8"),
             deployment_id: "deployment",
@@ -578,7 +728,7 @@ mod tests {
             "#!/bin/sh\nprintf '%s' '{\"/data\":{},\"/var/lib/app\":{},\"relative\":{}}'\n",
         )
         .expect("fake Docker writes");
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        make_executable(&fake);
         let paths = image_volume_paths(
             fake.to_str().expect("path is UTF-8"),
             "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
@@ -587,6 +737,73 @@ mod tests {
         .await
         .expect("image metadata reads");
         assert_eq!(paths, vec!["/data", "/var/lib/app"]);
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Copies a stopped release directory into a newly created managed volume.
+    #[tokio::test]
+    async fn new_persistent_volume_is_seeded_from_predecessor() {
+        let root = std::env::temp_dir().join(format!(
+            "depot-runtime-volume-migration-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        let captured = root.join("commands");
+        fs::write(
+            &fake,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$*\" >> '{}'\nif [ \"$1 $2\" = \"volume inspect\" ]; then exit 1; fi\nexit 0\n",
+                captured.display()
+            ),
+        )
+        .expect("fake Docker writes");
+        make_executable(&fake);
+        let migrated = migrate_volume_from_container(MigrateVolumeRequest {
+            docker_binary: fake.to_str().expect("path is UTF-8"),
+            project_id: "project",
+            container_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            image_id: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            container_path: "/var/lib/app",
+            workspace_root: &root,
+            timeout: Duration::from_secs(5),
+        })
+        .await
+        .expect("volume migration succeeds");
+        assert!(migrated);
+        let commands = fs::read_to_string(captured).expect("commands read");
+        assert!(commands.contains("volume create depot-project-"));
+        assert!(commands.contains(
+            "cp aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa:/var/lib/app/."
+        ));
+        assert!(commands.contains("type=volume,src=depot-project-"));
+        assert!(commands.contains("dst=/var/lib/app"));
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Leaves an existing managed volume untouched on later deployments.
+    #[tokio::test]
+    async fn existing_persistent_volume_is_not_seeded_again() {
+        let root = std::env::temp_dir().join(format!(
+            "depot-runtime-existing-volume-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        fs::write(&fake, "#!/bin/sh\nexit 0\n").expect("fake Docker writes");
+        make_executable(&fake);
+        let migrated = migrate_volume_from_container(MigrateVolumeRequest {
+            docker_binary: fake.to_str().expect("path is UTF-8"),
+            project_id: "project",
+            container_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            image_id: "sha256:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            container_path: "/data",
+            workspace_root: &root,
+            timeout: Duration::from_secs(5),
+        })
+        .await
+        .expect("existing volume is accepted");
+        assert!(!migrated);
         fs::remove_dir_all(root).expect("test root is removed");
     }
 
@@ -602,7 +819,7 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb' 'true' 'other-deployment' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}'\n",
         )
         .expect("fake Docker writes");
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        make_executable(&fake);
         let result = verify_route(
             fake.to_str().expect("path is UTF-8"),
             RouteIdentity {
@@ -631,7 +848,7 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'true' 'deployment' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}'\n",
         )
         .expect("fake Docker writes");
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        make_executable(&fake);
         verify_route(
             fake.to_str().expect("path is UTF-8"),
             RouteIdentity {
@@ -660,7 +877,7 @@ mod tests {
             "#!/bin/sh\nprintf '%s\\n' 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa' 'false' 'deployment' '{}' '{\"80/tcp\":[{\"HostIp\":\"127.0.0.1\",\"HostPort\":\"43123\"}]}'\n",
         )
         .expect("fake Docker writes");
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        make_executable(&fake);
         let state = inspect_route(
             fake.to_str().expect("path is UTF-8"),
             RouteIdentity {
@@ -692,8 +909,7 @@ mod tests {
             ),
         )
         .expect("fake Docker writes");
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
-        std::thread::sleep(Duration::from_millis(10));
+        make_executable(&fake);
         let environment = vec![("DATABASE_URL".to_owned(), "secret-value".to_owned())];
         start_container(StartContainerRequest {
             docker_binary: fake.to_str().expect("path is UTF-8"),
@@ -733,7 +949,7 @@ mod tests {
         let fake = root.join("fake-docker");
         fs::write(&fake, "#!/bin/sh\nprintf '2026-01-01T00:00:00Z ready\\n'\n")
             .expect("fake Docker writes");
-        fs::set_permissions(&fake, fs::Permissions::from_mode(0o700)).expect("fake is executable");
+        make_executable(&fake);
         let logs = container_logs(
             fake.to_str().expect("path is UTF-8"),
             "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",

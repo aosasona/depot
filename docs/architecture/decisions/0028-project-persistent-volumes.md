@@ -25,7 +25,10 @@ path reuses the same data while cloned projects remain isolated.
 Repository inspection suggests final-stage Dockerfile `VOLUME` paths. Deployment also inspects the
 built image and mounts declared OCI volumes, covering builders such as Railpack when their output
 contains volume metadata. Explicit user configuration is merged with image declarations and takes
-effect on the next deployment. Static projects do not receive runtime volumes.
+effect on the next deployment. Users can add an existing directory directly from the live
+container file browser or enter paths in service settings. On the first stateful cutover, Depot
+stops the predecessor and seeds each new managed volume with that directory's existing contents
+before starting the replacement. Static projects do not receive runtime volumes.
 
 Depot never accepts a host source path from project configuration. Volume removal is not coupled
 to project or release deletion; destructive cleanup must be an explicit future operation.

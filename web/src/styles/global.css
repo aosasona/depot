@@ -2093,11 +2093,14 @@ td {
 }
 .file-row {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto auto;
+  grid-template-columns: minmax(0, 1fr) repeat(3, auto);
   border-bottom: 1px solid var(--border);
 }
 .file-row:last-child {
   border-bottom: 0;
+}
+.file-row-action-placeholder {
+  min-width: 5rem;
 }
 .file-entry {
   display: grid;

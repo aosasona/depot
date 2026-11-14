@@ -1,13 +1,15 @@
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useRef, useState } from "react";
 import {
   ApiError,
   createContainerDirectory,
   deleteContainerFile,
   downloadContainerFile,
+  getServiceConfig,
   listContainerFiles,
   renameContainerFile,
   uploadContainerFile,
+  updateServiceConfig,
 } from "../../lib/api/client";
 
 type ContainerFileBrowserProps = {
@@ -33,6 +35,45 @@ export function ContainerFileBrowser({
     queryFn: () => listContainerFiles(projectId, path),
     enabled: available,
   });
+  const config = useQuery({
+    queryKey: ["projects", projectId, "config"],
+    queryFn: () => getServiceConfig(projectId),
+    enabled: available,
+  });
+  const persist = useMutation({
+    mutationFn: async (directory: string) => {
+      const current = await getServiceConfig(projectId);
+      if (current.persistent_volumes.includes(directory)) return current;
+      return updateServiceConfig(projectId, {
+        project_kind: current.project_kind,
+        builder: current.builder,
+        context_path: current.context_path,
+        dockerfile_path: current.dockerfile_path,
+        static_output_dir: current.static_output_dir,
+        exposed_port: current.exposed_port,
+        healthcheck_path: current.healthcheck_path,
+        persistent_volumes: [...current.persistent_volumes, directory],
+      });
+    },
+  });
+
+  /** Adds a browsed container directory to project-scoped persistent storage. */
+  async function makePersistent(directory: string) {
+    if (directory === "/") {
+      setMessage("The container root cannot be mounted as persistent storage.");
+      return;
+    }
+    setMessage(`Configuring persistent storage for ${directory}…`);
+    try {
+      const saved = await persist.mutateAsync(directory);
+      client.setQueryData(["projects", projectId, "config"], saved);
+      setMessage(
+        `${directory} will use persistent storage on the next deployment. Existing contents will be copied during the stateful cutover.`,
+      );
+    } catch (error) {
+      setMessage(fileError(error));
+    }
+  }
 
   /** Refreshes the currently visible directory after a successful mutation. */
   async function refresh() {
@@ -220,6 +261,22 @@ export function ContainerFileBrowser({
               >
                 Upload files
               </button>
+              {path !== "/" && (
+                <button
+                  className="table-action"
+                  type="button"
+                  disabled={
+                    busy ||
+                    persist.isPending ||
+                    config.data?.persistent_volumes.includes(path)
+                  }
+                  onClick={() => void makePersistent(path)}
+                >
+                  {config.data?.persistent_volumes.includes(path)
+                    ? "Persistent"
+                    : "Make folder persistent"}
+                </button>
+              )}
               <input
                 ref={picker}
                 type="file"
@@ -278,6 +335,33 @@ export function ContainerFileBrowser({
                         : entry.kind}
                     </small>
                   </button>
+                  {entry.kind === "directory" && (
+                    <button
+                      type="button"
+                      disabled={
+                        busy ||
+                        persist.isPending ||
+                        config.data?.persistent_volumes.includes(
+                          joinPath(path, entry.name),
+                        )
+                      }
+                      onClick={() =>
+                        void makePersistent(joinPath(path, entry.name))
+                      }
+                    >
+                      {config.data?.persistent_volumes.includes(
+                        joinPath(path, entry.name),
+                      )
+                        ? "Persistent"
+                        : "Persist"}
+                    </button>
+                  )}
+                  {entry.kind !== "directory" && (
+                    <span
+                      className="file-row-action-placeholder"
+                      aria-hidden="true"
+                    />
+                  )}
                   <button
                     type="button"
                     disabled={busy}

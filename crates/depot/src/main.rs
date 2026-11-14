@@ -1663,6 +1663,32 @@ async fn execute_deployment(
     } else {
         stop_stateful_predecessor(store, worker_config, project_id).await?
     };
+    if let Some(predecessor) = predecessor.as_ref() {
+        for path in &persistent_paths {
+            if let Err(error) =
+                depot_runtime::migrate_volume_from_container(depot_runtime::MigrateVolumeRequest {
+                    docker_binary: &worker_config.docker_binary,
+                    project_id,
+                    container_id: &predecessor.container_id,
+                    image_id: &build.image_id,
+                    container_path: path,
+                    workspace_root: std::path::Path::new(&worker_config.workspace_root),
+                    timeout: std::time::Duration::from_secs(worker_config.docker_timeout_seconds),
+                })
+                .await
+            {
+                let healthcheck_path = config.healthcheck_path.as_deref().unwrap_or("/");
+                restore_stateful_predecessor(worker_config, Some(predecessor), healthcheck_path)
+                    .await;
+                for (_, value) in &mut environment {
+                    value.zeroize();
+                }
+                return Err(format!(
+                    "Could not preserve existing data from {path}: {error}"
+                ));
+            }
+        }
+    }
     let start_result = depot_runtime::start_container(depot_runtime::StartContainerRequest {
         docker_binary: &worker_config.docker_binary,
         deployment_id: &deployment.id,
