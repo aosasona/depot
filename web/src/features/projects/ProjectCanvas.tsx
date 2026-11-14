@@ -745,8 +745,11 @@ function ShellDialog({
   >("connecting");
   const [output, setOutput] = useState("");
   const [command, setCommand] = useState("");
+  const [historyIndex, setHistoryIndex] = useState<number>();
+  const history = useRef<string[]>([]);
   const socket = useRef<WebSocket | undefined>(undefined);
   const terminal = useRef<HTMLPreElement>(null);
+  const commandInput = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (!available) {
       setStatus("closed");
@@ -759,7 +762,10 @@ function ShellDialog({
     connection.binaryType = "arraybuffer";
     socket.current = connection;
     const decoder = new TextDecoder();
-    connection.onopen = () => setStatus("open");
+    connection.onopen = () => {
+      setStatus("open");
+      window.requestAnimationFrame(() => commandInput.current?.focus());
+    };
     connection.onmessage = (event) => {
       const chunk =
         typeof event.data === "string"
@@ -784,7 +790,31 @@ function ShellDialog({
     if (!value || socket.current?.readyState !== WebSocket.OPEN) return;
     socket.current.send(`${value}\n`);
     setOutput((current) => `${current}$ ${value}\n`);
+    history.current = [...history.current.slice(-99), value];
+    setHistoryIndex(undefined);
     setCommand("");
+  }
+
+  /** Recalls commands without sending browser navigation keys to the shell. */
+  function navigateHistory(event: React.KeyboardEvent<HTMLInputElement>) {
+    if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+    event.preventDefault();
+    const commands = history.current;
+    if (commands.length === 0) return;
+    if (event.key === "ArrowUp") {
+      const next = Math.max(0, (historyIndex ?? commands.length) - 1);
+      setHistoryIndex(next);
+      setCommand(commands[next]);
+      return;
+    }
+    const next = (historyIndex ?? commands.length - 1) + 1;
+    if (next >= commands.length) {
+      setHistoryIndex(undefined);
+      setCommand("");
+      return;
+    }
+    setHistoryIndex(next);
+    setCommand(commands[next]);
   }
   return (
     <div className="canvas-dialog-backdrop">
@@ -806,31 +836,45 @@ function ShellDialog({
         </header>
         {available ? (
           <>
-            <p>
+            <p className="browser-shell-note">
               Commands run inside the active release. The session closes after
               15 minutes or when this dialog disconnects. Full-screen TTY
               programs are not supported yet.
             </p>
-            <pre ref={terminal} className="browser-shell-output">
-              {output || "Connecting to Depot worker…\n"}
-            </pre>
-            <form className="browser-shell-input" onSubmit={submit}>
-              <span aria-hidden="true">$</span>
-              <input
-                aria-label="Shell command"
-                autoComplete="off"
-                spellCheck={false}
-                value={command}
-                disabled={status !== "open"}
-                onChange={(event) => setCommand(event.target.value)}
-              />
-              <button
-                type="submit"
-                disabled={status !== "open" || !command.trim()}
+            <div className="browser-terminal">
+              <pre
+                ref={terminal}
+                className="browser-shell-output"
+                role="log"
+                aria-live="polite"
               >
-                Run
-              </button>
-            </form>
+                {output || "Connecting to Depot worker…\n"}
+              </pre>
+              <form className="browser-shell-input" onSubmit={submit}>
+                <span aria-hidden="true">$</span>
+                <input
+                  ref={commandInput}
+                  aria-label="Shell command"
+                  autoComplete="off"
+                  autoCapitalize="off"
+                  spellCheck={false}
+                  value={command}
+                  disabled={status !== "open"}
+                  onKeyDown={navigateHistory}
+                  onChange={(event) => {
+                    setHistoryIndex(undefined);
+                    setCommand(event.target.value);
+                  }}
+                />
+                <button
+                  className="visually-hidden"
+                  type="submit"
+                  disabled={status !== "open" || !command.trim()}
+                >
+                  Run command
+                </button>
+              </form>
+            </div>
             <footer>
               <button
                 className="table-action"
