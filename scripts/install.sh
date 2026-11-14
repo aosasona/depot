@@ -36,11 +36,16 @@ install -m 0755 "$repository_root/scripts/setup.sh" "$stage/usr/local/sbin/depot
 
 if [ "$mode" = "vm" ]; then
     install -d -m 0770 "$stage/var/lib/depot" "$stage/var/lib/depot/workspaces" "$stage/var/lib/depot/static"
+    install -d -m 0755 "$stage/var/lib/depot/updater"
+    install -d -m 0700 "$stage/var/lib/depot/updater/inbox"
+    install -m 0755 "$repository_root/scripts/system-update.sh" "$stage/usr/local/sbin/depot-system-update"
     if [ ! -e "$stage/etc/depot/config.toml" ]; then
         install -m 0640 "$repository_root/deploy/config.example.toml" "$stage/etc/depot/config.toml"
     fi
     install -m 0644 "$repository_root/deploy/systemd/depot.service" "$stage/etc/systemd/system/depot.service"
     install -m 0644 "$repository_root/deploy/systemd/depot-worker.service" "$stage/etc/systemd/system/depot-worker.service"
+    install -m 0644 "$repository_root/deploy/systemd/depot-updater.service" "$stage/etc/systemd/system/depot-updater.service"
+    install -m 0644 "$repository_root/deploy/systemd/depot-updater.path" "$stage/etc/systemd/system/depot-updater.path"
     if [ ! -e "$stage/etc/depot/master.key" ]; then
         "$stage/usr/local/bin/depot" generate-key --output "$stage/etc/depot/master.key"
     fi
@@ -66,6 +71,10 @@ if [ "$mode" = "vm" ]; then
     id depot-worker >/dev/null 2>&1 || useradd --system --gid depot --home-dir /var/lib/depot --shell /usr/sbin/nologin depot-worker
     chown -R depot:depot /var/lib/depot
     chmod -R g+rwX /var/lib/depot
+    chown root:root /var/lib/depot/updater
+    chmod 0755 /var/lib/depot/updater
+    chown depot:depot /var/lib/depot/updater/inbox
+    chmod 0700 /var/lib/depot/updater/inbox
     chown depot:depot /etc/depot/config.toml
     chown root:depot /etc/depot/master.key
     chmod 0640 /etc/depot/master.key
@@ -84,4 +93,7 @@ else
 fi
 
 systemctl daemon-reload
+if [ "$mode" = "vm" ]; then
+    systemctl enable --now depot-updater.path
+fi
 echo "Depot $mode files installed. Review configuration before enabling services."

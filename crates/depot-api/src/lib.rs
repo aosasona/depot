@@ -37,6 +37,7 @@ use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, KeyInit, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
+use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt, path::Path};
 use tracing::error;
 
 const SESSION_COOKIE: &str = "depot_session";
@@ -45,6 +46,9 @@ const CSRF_HEADER: &str = "x-csrf-token";
 const SESSION_HOURS: i64 = 12;
 const GITHUB_PRIVATE_KEY_CONTEXT: &[u8] = b"depot:github-app:v1:private-key";
 const GITHUB_WEBHOOK_SECRET_CONTEXT: &[u8] = b"depot:github-app:v1:webhook-secret";
+const SYSTEM_UPDATE_DIR: &str = "/var/lib/depot/updater";
+const SYSTEM_UPDATE_INBOX: &str = "/var/lib/depot/updater/inbox";
+const SYSTEM_UPDATE_HELPER: &str = "/usr/local/sbin/depot-system-update";
 
 /// Shared dependencies available to API request handlers.
 #[derive(Clone, Debug)]
@@ -110,6 +114,23 @@ struct ReadinessResponse {
     status: &'static str,
     database: &'static str,
     version: &'static str,
+}
+
+/// Durable dashboard update state produced by the root-owned helper.
+#[derive(Debug, Deserialize, Serialize)]
+struct SystemUpdateResponse {
+    version: &'static str,
+    available: bool,
+    state: String,
+    message: String,
+    updated_at: Option<i64>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PersistedSystemUpdateStatus {
+    state: String,
+    message: String,
+    updated_at: i64,
 }
 
 /// Minimal identity returned after successful first-admin creation.
@@ -342,6 +363,9 @@ enum ApiError {
     InvalidShellOrigin,
     InvalidContainerPath,
     FileBroker,
+    SystemUpdateUnavailable,
+    SystemUpdateInProgress,
+    SystemUpdateState,
 }
 
 #[derive(Debug, Deserialize)]
@@ -633,6 +657,10 @@ pub fn router_with_shell_and_domains(
             post(regenerate_two_factor_recovery_codes),
         )
         .route("/api/v1/system/readiness", get(system_readiness))
+        .route(
+            "/api/v1/system/update",
+            get(system_update_status).post(request_system_update),
+        )
         .route("/api/v1/users", get(list_users).post(create_user))
         .route("/api/v1/users/{user_id}", axum::routing::patch(update_user))
         .route("/api/v1/projects", get(list_projects).post(create_project))
@@ -2526,6 +2554,124 @@ async fn system_readiness(
     }))
 }
 
+/// Returns root-helper state to administrators without exposing privileged logs.
+async fn system_update_status(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+) -> Result<Json<SystemUpdateResponse>, ApiError> {
+    require_admin(&state.store, &jar).await?;
+    Ok(Json(read_system_update_status(Path::new(
+        SYSTEM_UPDATE_DIR,
+    ))?))
+}
+
+/// Atomically requests the one fixed official-release update workflow.
+async fn request_system_update(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+) -> Result<(StatusCode, Json<SystemUpdateResponse>), ApiError> {
+    let actor = require_admin_mutation(&state.store, &jar, &headers).await?;
+    let state_dir = Path::new(SYSTEM_UPDATE_DIR);
+    if !system_update_available(state_dir) {
+        return Err(ApiError::SystemUpdateUnavailable);
+    }
+    let current = read_system_update_status(state_dir)?;
+    if matches!(current.state.as_str(), "queued" | "running") {
+        return Err(ApiError::SystemUpdateInProgress);
+    }
+    state
+        .store
+        .record_system_audit(
+            &actor.id,
+            "system.update.request",
+            "depot",
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    create_system_update_request(Path::new(SYSTEM_UPDATE_INBOX))?;
+    Ok((
+        StatusCode::ACCEPTED,
+        Json(SystemUpdateResponse {
+            version: env!("CARGO_PKG_VERSION"),
+            available: true,
+            state: "queued".into(),
+            message: "The official release update is queued.".into(),
+            updated_at: Some(time::OffsetDateTime::now_utc().unix_timestamp()),
+        }),
+    ))
+}
+
+fn system_update_available(state_dir: &Path) -> bool {
+    state_dir.is_dir() && Path::new(SYSTEM_UPDATE_HELPER).is_file()
+}
+
+fn read_system_update_status(state_dir: &Path) -> Result<SystemUpdateResponse, ApiError> {
+    let available = system_update_available(state_dir);
+    if !available {
+        return Ok(SystemUpdateResponse {
+            version: env!("CARGO_PKG_VERSION"),
+            available: false,
+            state: "unavailable".into(),
+            message: "Run one CLI update to install the dashboard updater.".into(),
+            updated_at: None,
+        });
+    }
+    if Path::new(SYSTEM_UPDATE_INBOX).join("requested").exists() {
+        return Ok(SystemUpdateResponse {
+            version: env!("CARGO_PKG_VERSION"),
+            available: true,
+            state: "queued".into(),
+            message: "The official release update is queued.".into(),
+            updated_at: None,
+        });
+    }
+    let status_path = state_dir.join("status.json");
+    let status = match std::fs::read(&status_path) {
+        Ok(bytes) => serde_json::from_slice::<PersistedSystemUpdateStatus>(&bytes)
+            .map_err(|_| ApiError::SystemUpdateState)?,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(SystemUpdateResponse {
+                version: env!("CARGO_PKG_VERSION"),
+                available: true,
+                state: "idle".into(),
+                message: "Depot is ready to install the latest official release.".into(),
+                updated_at: None,
+            });
+        }
+        Err(_) => return Err(ApiError::SystemUpdateState),
+    };
+    if !matches!(status.state.as_str(), "running" | "succeeded" | "failed") {
+        return Err(ApiError::SystemUpdateState);
+    }
+    Ok(SystemUpdateResponse {
+        version: env!("CARGO_PKG_VERSION"),
+        available: true,
+        state: status.state,
+        message: status.message,
+        updated_at: Some(status.updated_at),
+    })
+}
+
+fn create_system_update_request(state_dir: &Path) -> Result<(), ApiError> {
+    let request_path = state_dir.join("requested");
+    let mut request = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(request_path)
+        .map_err(|error| {
+            if error.kind() == std::io::ErrorKind::AlreadyExists {
+                ApiError::SystemUpdateInProgress
+            } else {
+                ApiError::SystemUpdateState
+            }
+        })?;
+    request
+        .write_all(b"official-latest\n")
+        .map_err(|_| ApiError::SystemUpdateState)
+}
+
 /// Verifies credentials and returns secure cookies bound to a server-side session.
 async fn login(
     State(state): State<ApiState>,
@@ -3446,6 +3592,21 @@ impl IntoResponse for ApiError {
                 "container_file_failed",
                 "The active container could not complete that file operation.",
             ),
+            Self::SystemUpdateUnavailable => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "system_update_unavailable",
+                "Run one CLI update to install the dashboard updater, then try again.",
+            ),
+            Self::SystemUpdateInProgress => (
+                StatusCode::CONFLICT,
+                "system_update_in_progress",
+                "A Depot system update is already queued or running.",
+            ),
+            Self::SystemUpdateState => (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "system_update_state_failed",
+                "Depot could not read or request the system update safely.",
+            ),
             Self::Store(StoreError::InvalidRole(_))
             | Self::Auth(AuthError::Store(StoreError::InvalidRole(_))) => (
                 StatusCode::UNPROCESSABLE_ENTITY,
@@ -3503,9 +3664,10 @@ mod tests {
     use tower::ServiceExt;
 
     use super::{
-        UpdateServiceConfigRequest, router, router_with_secrets, validate_known_hosts,
-        validate_private_key, validate_repository_full_name, validate_service_config,
-        validate_variable_name, validate_variable_value, verify_github_signature,
+        ApiError, UpdateServiceConfigRequest, create_system_update_request, router,
+        router_with_secrets, validate_known_hosts, validate_private_key,
+        validate_repository_full_name, validate_service_config, validate_variable_name,
+        validate_variable_value, verify_github_signature,
     };
 
     /// Parses a JSON response body for focused API assertions.
@@ -3540,6 +3702,22 @@ mod tests {
         let cipher = SecretCipher::load(&key_path).expect("key loads");
         fs::remove_file(key_path).expect("temporary key is removed");
         cipher
+    }
+
+    /// Proves concurrent privileged update requests collapse into one inbox file.
+    #[test]
+    fn system_update_request_creation_is_atomic() {
+        let inbox = std::env::temp_dir().join(format!(
+            "depot-update-inbox-{}",
+            time::OffsetDateTime::now_utc().unix_timestamp_nanos()
+        ));
+        fs::create_dir(&inbox).expect("temporary inbox is created");
+        create_system_update_request(&inbox).expect("first request is created");
+        assert!(matches!(
+            create_system_update_request(&inbox),
+            Err(ApiError::SystemUpdateInProgress)
+        ));
+        fs::remove_dir_all(inbox).expect("temporary inbox is removed");
     }
 
     /// Proves TOTP blocks session issuance and recovery codes are single-use.
@@ -4308,6 +4486,7 @@ mod tests {
         .expect("member logs in");
         let app = router(store);
         let response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/api/v1/users")
@@ -4321,6 +4500,20 @@ mod tests {
             .await
             .expect("request completes");
         assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        let update_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/system/update")
+                    .header(
+                        header::COOKIE,
+                        format!("depot_session={}", member_session.token),
+                    )
+                    .body(Body::empty())
+                    .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(update_response.status(), StatusCode::FORBIDDEN);
     }
 
     /// Proves an authenticated member can create, read, update, and delete a project.

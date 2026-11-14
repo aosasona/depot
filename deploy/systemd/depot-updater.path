@@ -1,0 +1,9 @@
+[Unit]
+Description=Watch for an administrator-approved Depot update request
+
+[Path]
+PathExists=/var/lib/depot/updater/inbox/requested
+Unit=depot-updater.service
+
+[Install]
+WantedBy=multi-user.target

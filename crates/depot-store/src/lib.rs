@@ -3009,6 +3009,28 @@ impl Store {
         .await?;
         Ok(())
     }
+
+    /// Records an instance-level administrative action without attaching it to a project.
+    pub async fn record_system_audit(
+        &self,
+        actor_user_id: &str,
+        action: &str,
+        target_id: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        sqlx::query(
+            "INSERT INTO audit_log
+             (actor_user_id, action, target_type, target_id, created_at)
+             VALUES (?, ?, 'system', ?, ?)",
+        )
+        .bind(actor_user_id)
+        .bind(action)
+        .bind(target_id)
+        .bind(now_unix)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
 }
 
 /// Rejects setup operations once any administrator exists.

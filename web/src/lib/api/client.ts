@@ -9,6 +9,20 @@ const readinessSchema = z.object({
   database: z.literal("ready"),
   version: z.string(),
 });
+const systemUpdateSchema = z.object({
+  version: z.string(),
+  available: z.boolean(),
+  state: z.enum([
+    "unavailable",
+    "idle",
+    "queued",
+    "running",
+    "succeeded",
+    "failed",
+  ]),
+  message: z.string(),
+  updated_at: z.number().int().nullable(),
+});
 const userSchema = z.object({
   id: z.string(),
   email: z.email(),
@@ -207,6 +221,7 @@ const projectGithubSourceSchema = z.object({
 const sshCredentialResponseSchema = z.object({ configured: z.literal(true) });
 
 export type User = z.infer<typeof userSchema>;
+export type SystemUpdate = z.infer<typeof systemUpdateSchema>;
 export type AdminUser = z.infer<typeof adminUserSchema>;
 export type Project = z.infer<typeof projectSchema>;
 export type JobStatus = z.infer<typeof jobStatusSchema>;
@@ -267,6 +282,19 @@ export function getBootstrapStatus() {
 /** Verifies that the control plane and its database are ready for requests. */
 export function getSystemReadiness() {
   return request("/api/v1/system/readiness", readinessSchema);
+}
+
+/** Returns durable state for the fixed official-release updater. */
+export function getSystemUpdate() {
+  return request("/api/v1/system/update", systemUpdateSchema);
+}
+
+/** Requests the latest verified official release; no artifact input is accepted. */
+export function requestSystemUpdate() {
+  return request("/api/v1/system/update", systemUpdateSchema, {
+    method: "POST",
+    headers: csrfHeaders(),
+  });
 }
 
 /** Consumes the operator token and creates the first local administrator. */

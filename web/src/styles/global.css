@@ -1311,7 +1311,8 @@ td {
 }
 .account-summary,
 .password-form,
-.two-factor-panel {
+.two-factor-panel,
+.system-update-panel {
   border: 1px solid var(--border);
   background: var(--surface);
 }
@@ -1379,6 +1380,63 @@ td {
   display: grid;
   gap: 1rem;
   padding: 1rem;
+}
+.system-update-panel {
+  display: grid;
+  gap: 1rem;
+  padding: 1rem;
+}
+.system-update-version,
+.system-update-state {
+  display: flex;
+  gap: 0.75rem;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.system-update-version span,
+.system-update-state span,
+.system-update-state small,
+.system-update-confirm span {
+  color: var(--muted);
+  font-size: 0.72rem;
+}
+.system-update-state {
+  display: grid;
+  justify-content: stretch;
+  padding: 0.75rem;
+  border-left: 2px solid var(--border);
+  background: var(--bg);
+}
+.system-update-state.running,
+.system-update-state.queued {
+  border-left-color: var(--accent);
+}
+.system-update-state.failed {
+  border-left-color: var(--danger);
+}
+.system-update-confirm {
+  display: grid;
+  gap: 0.6rem;
+  padding: 0.85rem;
+  border: 1px solid var(--border);
+  background: var(--bg);
+}
+.system-update-confirm > div {
+  display: flex;
+  gap: 0.5rem;
+}
+.system-update-panel .primary-action {
+  width: auto;
+  min-height: 38px;
+  margin: 0;
+  padding: 0 0.8rem;
+  justify-self: start;
+}
+.system-update-panel .quiet-button {
+  margin: 0;
+}
+.system-update-panel .notice {
+  margin: 0;
 }
 .two-factor-panel label {
   display: grid;

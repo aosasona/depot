@@ -42,6 +42,12 @@ migrations, runs `doctor`, and starts only after those checks succeed. On a
 failed check it leaves the services stopped and prints the recovery location.
 The update also requires successful end-to-end peer reachability.
 
+After one CLI update installs the dashboard updater, administrators can also
+open **Account → System update** and install the latest verified official
+release. The dashboard disconnects briefly while Depot restarts, retains
+durable progress, and restores the immediately preceding backup automatically
+if the update fails. The UI cannot select a URL, tag, file, or command.
+
 ### Manual installation
 
 Install Docker Engine and Git using the operating system or Docker's official
@@ -67,7 +73,8 @@ sudo ./scripts/install.sh vm ./depot-linux-x86_64
 ```
 
 The installer creates separate unprivileged `depot` and `depot-worker`
-accounts, shared persistent directories, two systemd units, and an example
+accounts, shared persistent directories, API, worker, and constrained updater
+systemd units, and an example
 configuration when one does not already exist. If the Docker group exists, it
 adds only `depot-worker` to that group. Docker daemon access is effectively
 root-equivalent; use a dedicated VM. It also creates `/etc/depot/master.key`

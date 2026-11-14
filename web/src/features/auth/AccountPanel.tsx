@@ -4,6 +4,7 @@ import { useState } from "react";
 import { z } from "zod";
 import { ApiError, changePassword, type User } from "../../lib/api/client";
 import { TwoFactorPanel } from "./TwoFactorPanel";
+import { SystemUpdatePanel } from "./SystemUpdatePanel";
 
 const passwordSchema = z
   .object({
@@ -126,6 +127,7 @@ export function AccountPanel({ user }: { user: User }) {
           </button>
         </form>
         <TwoFactorPanel />
+        {user.role === "admin" && <SystemUpdatePanel />}
       </div>
     </section>
   );
