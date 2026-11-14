@@ -651,7 +651,7 @@ function ProjectWizard({
             )}
             {values.projectKind !== "static" && (
               <label className="wide environment-textarea">
-                Persistent data paths
+                Persistent data directories
                 <textarea
                   spellCheck={false}
                   placeholder={"/data\n/var/lib/app"}
@@ -661,8 +661,9 @@ function ProjectWizard({
                   }
                 />
                 <small>
-                  One absolute container path per line. Depot reuses a private
-                  Docker volume for each path on every deployment.
+                  One absolute container directory per line. Use the directory
+                  containing a SQLite file, not the database filename itself.
+                  Depot reuses a private Docker volume on every deployment.
                 </small>
               </label>
             )}

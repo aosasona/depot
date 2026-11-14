@@ -414,7 +414,7 @@ function LoadedConfigForm({
       <form.Field name="persistent_volumes">
         {(field) => (
           <label className="wide environment-textarea">
-            Persistent data paths
+            Persistent data directories
             <textarea
               spellCheck={false}
               placeholder={"/data\n/var/lib/app"}
@@ -422,9 +422,10 @@ function LoadedConfigForm({
               onChange={(event) => field.handleChange(event.target.value)}
             />
             <small>
-              One absolute path inside the container per line. Data in these
-              paths survives deployments in project-scoped Docker volumes.
-              Removing or changing a path does not delete or migrate its data.
+              One absolute directory inside the container per line. For SQLite,
+              mount the directory containing the database, not the database
+              file. Removing or changing a directory does not delete or migrate
+              data.
             </small>
           </label>
         )}

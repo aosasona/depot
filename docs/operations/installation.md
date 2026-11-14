@@ -108,7 +108,9 @@ docker run --rm \
 ```
 
 Applications that do not declare image volumes must have their absolute data
-paths configured under **Project settings → Build and runtime**. The setting
+directories configured under **Project settings → Build and runtime**. For
+SQLite, configure the directory containing the database rather than the file
+itself. The setting
 takes effect on the next deployment; changing a path does not migrate data from
 the previous volume.
 
