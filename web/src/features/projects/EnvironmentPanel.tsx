@@ -6,6 +6,7 @@ import {
   ApiError,
   deleteVariable,
   listVariables,
+  revealVariable,
   upsertVariable,
 } from "../../lib/api/client";
 import { parseEnvironmentText } from "./environmentText";
@@ -26,6 +27,10 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
   const [bulkText, setBulkText] = useState("");
   const [bulkSecrets, setBulkSecrets] = useState(true);
   const [bulkSaving, setBulkSaving] = useState(false);
+  const [showEntryValue, setShowEntryValue] = useState(false);
+  const [revealedValues, setRevealedValues] = useState<Record<string, string>>(
+    {},
+  );
   const variables = useQuery({
     queryKey: ["projects", projectId, "variables"],
     queryFn: () => listVariables(projectId),
@@ -40,6 +45,9 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
       queryClient.invalidateQueries({
         queryKey: ["projects", projectId, "variables"],
       }),
+  });
+  const reveal = useMutation({
+    mutationFn: (variableId: string) => revealVariable(projectId, variableId),
   });
   const form = useForm({
     defaultValues: { name: "", value: "", is_secret: true },
@@ -79,6 +87,28 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
     }
   }
 
+  /** Keeps decrypted values only in this mounted panel and forgets them when hidden. */
+  async function toggleRevealedValue(variableId: string) {
+    setError(undefined);
+    if (revealedValues[variableId] !== undefined) {
+      setRevealedValues((current) => {
+        const next = { ...current };
+        delete next[variableId];
+        return next;
+      });
+      return;
+    }
+    try {
+      const response = await reveal.mutateAsync(variableId);
+      setRevealedValues((current) => ({
+        ...current,
+        [variableId]: response.value,
+      }));
+    } catch (reason) {
+      setError(variableError(reason));
+    }
+  }
+
   return (
     <div className="domain-panel environment-panel">
       <strong>Environment</strong>
@@ -95,14 +125,14 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
           aria-pressed={entryMode === "single"}
           onClick={() => setEntryMode("single")}
         >
-          One at a time
+          Key-value pair
         </button>
         <button
           type="button"
           aria-pressed={entryMode === "bulk"}
           onClick={() => setEntryMode("bulk")}
         >
-          Paste multiple
+          Raw text
         </button>
       </fieldset>
       {entryMode === "bulk" ? (
@@ -158,14 +188,23 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
           </form.Field>
           <form.Field name="value">
             {(field) => (
-              <input
-                aria-label="Environment variable value"
-                placeholder="Write-only value"
-                type="password"
-                autoComplete="new-password"
-                value={field.state.value}
-                onChange={(event) => field.handleChange(event.target.value)}
-              />
+              <div className="environment-value-input">
+                <input
+                  aria-label="Environment variable value"
+                  placeholder="Write-only value"
+                  type={showEntryValue ? "text" : "password"}
+                  autoComplete="new-password"
+                  value={field.state.value}
+                  onChange={(event) => field.handleChange(event.target.value)}
+                />
+                <button
+                  type="button"
+                  aria-pressed={showEntryValue}
+                  onClick={() => setShowEntryValue((current) => !current)}
+                >
+                  {showEntryValue ? "Hide" : "Show"}
+                </button>
+              </div>
             )}
           </form.Field>
           <form.Field name="is_secret">
@@ -199,7 +238,24 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
           <span className="deployment-status active">
             {variable.is_secret ? "secret" : "variable"}
           </span>
-          <span title="Stored value is concealed">••••••••</span>
+          <span className="environment-stored-value">
+            <span title="Stored encrypted value">
+              {revealedValues[variable.id] ?? "••••••••"}
+            </span>
+            <button
+              className="text-action"
+              type="button"
+              aria-pressed={revealedValues[variable.id] !== undefined}
+              disabled={reveal.isPending && reveal.variables === variable.id}
+              onClick={() => void toggleRevealedValue(variable.id)}
+            >
+              {reveal.isPending && reveal.variables === variable.id
+                ? "Loading…"
+                : revealedValues[variable.id] !== undefined
+                  ? "Hide"
+                  : "Show"}
+            </button>
+          </span>
           <button
             className="text-action"
             type="button"

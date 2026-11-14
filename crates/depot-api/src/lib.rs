@@ -329,6 +329,7 @@ enum ApiError {
     InvalidDeployRequest,
     InvalidRuntimeAction,
     InvalidVariable,
+    VariableNotFound,
     SecretsUnavailable,
     InvalidWebhook,
     InvalidSshCredential,
@@ -511,6 +512,12 @@ struct VariableResponse {
     is_secret: bool,
     created_at: i64,
     updated_at: i64,
+}
+
+/// One explicitly requested decrypted value which must never be cached.
+#[derive(Debug, Serialize)]
+struct RevealedVariableResponse {
+    value: String,
 }
 
 /// Authenticated request to create or rotate a GitHub push webhook.
@@ -722,6 +729,10 @@ pub fn router_with_shell_and_domains(
         .route(
             "/api/v1/projects/{project_id}/variables/{variable_id}",
             axum::routing::delete(delete_variable),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/variables/{variable_id}/reveal",
+            post(reveal_variable),
         )
         .route(
             "/api/v1/projects/{project_id}/github-webhook",
@@ -1469,6 +1480,41 @@ async fn delete_variable(
         .delete_project_variable(&project_id, &variable_id)
         .await?;
     Ok(StatusCode::NO_CONTENT)
+}
+
+/// Decrypts one value only after an explicit CSRF-protected request and audits the access.
+async fn reveal_variable(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path((project_id, variable_id)): axum::extract::Path<(String, String)>,
+) -> Result<impl IntoResponse, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let encrypted = state
+        .store
+        .encrypted_project_variable(&project_id, &variable_id)
+        .await?
+        .ok_or(ApiError::VariableNotFound)?;
+    let cipher = state.secrets.as_ref().ok_or(ApiError::SecretsUnavailable)?;
+    let context = variable_context(&project_id, &encrypted.name);
+    let value = cipher
+        .decrypt(&encrypted.ciphertext, &encrypted.nonce, context.as_bytes())
+        .map_err(|_| ApiError::SecretsUnavailable)?;
+    let metadata = serde_json::json!({"variable_name": encrypted.name});
+    state
+        .store
+        .record_project_audit(
+            &actor.id,
+            "project.variable.reveal",
+            &project_id,
+            &metadata.to_string(),
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok((
+        [(header::CACHE_CONTROL, "no-store")],
+        Json(RevealedVariableResponse { value }),
+    ))
 }
 
 /// Accepts portable POSIX-style environment names with bounded length.
@@ -3320,6 +3366,11 @@ impl IntoResponse for ApiError {
                 "invalid_variable",
                 "Use an uppercase environment name and a value without line breaks.",
             ),
+            Self::VariableNotFound => (
+                StatusCode::NOT_FOUND,
+                "variable_not_found",
+                "The requested environment variable does not exist.",
+            ),
             Self::SecretsUnavailable => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "secrets_unavailable",
@@ -3841,11 +3892,13 @@ mod tests {
         let body = json_body(response).await;
         assert_eq!(body["name"], "DATABASE_URL");
         assert!(body.get("value").is_none());
+        let variable_id = body["id"].as_str().expect("variable id exists").to_owned();
 
         let response = app
+            .clone()
             .oneshot(
                 Request::get(format!("/api/v1/projects/{}/variables", project.id))
-                    .header(header::COOKIE, cookie)
+                    .header(header::COOKIE, &cookie)
                     .body(Body::empty())
                     .expect("request builds"),
             )
@@ -3853,6 +3906,39 @@ mod tests {
             .expect("request completes");
         let body = json_body(response).await;
         assert!(!body.to_string().contains("super-secret-value"));
+
+        let response = app
+            .clone()
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/projects/{}/variables/{variable_id}/reveal",
+                    project.id
+                ))
+                .header(header::COOKIE, &cookie)
+                .body(Body::empty())
+                .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+
+        let response = app
+            .oneshot(
+                Request::post(format!(
+                    "/api/v1/projects/{}/variables/{variable_id}/reveal",
+                    project.id
+                ))
+                .header(header::COOKIE, cookie)
+                .header("x-csrf-token", &session.csrf_token)
+                .body(Body::empty())
+                .expect("request builds"),
+            )
+            .await
+            .expect("request completes");
+        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.headers()[header::CACHE_CONTROL], "no-store");
+        let body = json_body(response).await;
+        assert_eq!(body["value"], "super-secret-value");
         let encrypted = store
             .encrypted_project_variables(&project.id)
             .await

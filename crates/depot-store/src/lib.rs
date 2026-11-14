@@ -1096,6 +1096,31 @@ impl Store {
             .collect()
     }
 
+    /// Loads one encrypted runtime value for an explicit authenticated reveal operation.
+    pub async fn encrypted_project_variable(
+        &self,
+        project_id: &str,
+        variable_id: &str,
+    ) -> Result<Option<EncryptedProjectVariable>, StoreError> {
+        self.project_by_id(project_id).await?;
+        let row = sqlx::query(
+            "SELECT name, ciphertext, nonce FROM project_variables
+             WHERE project_id = ? AND id = ?",
+        )
+        .bind(project_id)
+        .bind(variable_id)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|row| {
+            Ok(EncryptedProjectVariable {
+                name: row.try_get("name")?,
+                ciphertext: row.try_get("ciphertext")?,
+                nonce: row.try_get("nonce")?,
+            })
+        })
+        .transpose()
+    }
+
     /// Deletes one runtime variable by project and opaque identifier.
     pub async fn delete_project_variable(
         &self,

@@ -839,6 +839,15 @@ export function upsertVariable(
   });
 }
 
+/** Reveals one encrypted value after explicit session-bound CSRF verification. */
+export function revealVariable(projectId: string, variableId: string) {
+  return request(
+    `/api/v1/projects/${projectId}/variables/${variableId}/reveal`,
+    z.object({ value: z.string() }),
+    { method: "POST", headers: csrfHeaders() },
+  );
+}
+
 /** Deletes one encrypted runtime value after CSRF validation. */
 export async function deleteVariable(projectId: string, variableId: string) {
   const response = await fetch(

@@ -760,6 +760,38 @@ h1 {
   background: var(--surface);
   color: var(--text);
 }
+.environment-value-input {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-width: 0;
+}
+.environment-value-input input:not([type="checkbox"]) {
+  border-right: 0;
+}
+.environment-value-input button {
+  min-width: 3.6rem;
+  border: 1px solid var(--border);
+  background: var(--surface-raised);
+  color: var(--muted);
+  font: 0.62rem var(--mono-font);
+}
+.environment-value-input button:hover {
+  color: var(--text);
+}
+.environment-stored-value {
+  display: flex;
+  gap: 0.55rem;
+  align-items: center;
+  min-width: 0;
+  font-family: var(--mono-font);
+  font-size: 0.68rem;
+}
+.environment-stored-value > span {
+  max-width: min(24rem, 30vw);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
 
 .environment-secret {
   display: flex;
