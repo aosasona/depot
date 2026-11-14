@@ -286,7 +286,13 @@ export function EnvironmentPanel({ projectId }: { projectId: string }) {
         variables.data?.map((variable) => (
           <div className="domain-row" key={variable.id}>
             <code>{variable.name}</code>
-            <span className="deployment-status active">
+            <span
+              className={`deployment-status ${
+                variable.is_secret
+                  ? "environment-label-secret"
+                  : "environment-label-variable"
+              }`}
+            >
               {variable.is_secret ? "secret" : "variable"}
             </span>
             <span className="environment-stored-value">

@@ -908,6 +908,14 @@ h1 {
 .environment-panel .domain-row code {
   text-transform: none;
 }
+.deployment-status.environment-label-secret {
+  border-color: var(--warning);
+  color: var(--warning);
+}
+.deployment-status.environment-label-variable {
+  border-color: var(--success);
+  color: var(--success);
+}
 .deployment-status.active {
   border-color: #8edb91;
   color: #8edb91;
