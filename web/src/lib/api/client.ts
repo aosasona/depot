@@ -7,6 +7,7 @@ const bootstrapStatusSchema = z.object({ initialized: z.boolean() });
 const readinessSchema = z.object({
   status: z.literal("ready"),
   database: z.literal("ready"),
+  version: z.string(),
 });
 const userSchema = z.object({
   id: z.string(),

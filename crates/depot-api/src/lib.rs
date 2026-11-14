@@ -109,6 +109,7 @@ struct BootstrapStatus {
 struct ReadinessResponse {
     status: &'static str,
     database: &'static str,
+    version: &'static str,
 }
 
 /// Minimal identity returned after successful first-admin creation.
@@ -2521,6 +2522,7 @@ async fn system_readiness(
     Ok(Json(ReadinessResponse {
         status: "ready",
         database: "ready",
+        version: env!("CARGO_PKG_VERSION"),
     }))
 }
 
