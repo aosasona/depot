@@ -2145,6 +2145,32 @@ impl Store {
             .collect()
     }
 
+    /// Detaches an exact stale active runtime after Docker proves its container is gone.
+    pub async fn detach_missing_active_runtime(
+        &self,
+        deployment_id: &str,
+        container_id: &str,
+        now_unix: i64,
+    ) -> Result<(), StoreError> {
+        let result = sqlx::query(
+            "UPDATE deployments
+             SET active = 0, runtime_route_status = 'error',
+                 runtime_route_error = 'Recorded container no longer exists in Docker; detached automatically before recovery deployment.',
+                 runtime_route_checked_at = ?, updated_at = ?
+             WHERE id = ? AND container_id = ? AND active = 1 AND status = 'succeeded'",
+        )
+        .bind(now_unix)
+        .bind(now_unix)
+        .bind(deployment_id)
+        .bind(container_id)
+        .execute(&self.pool)
+        .await?;
+        if result.rows_affected() != 1 {
+            return Err(StoreError::DeploymentNotFound);
+        }
+        Ok(())
+    }
+
     /// Invalidates prior runtime checks before startup reconciliation begins.
     pub async fn reset_active_runtime_route_health(&self, now_unix: i64) -> Result<(), StoreError> {
         sqlx::query(
@@ -4028,6 +4054,67 @@ mod tests {
             .await
             .expect("sixth deployment promotes");
         assert_eq!(cleanup.image_ids, vec!["sha256:container-first"]);
+    }
+
+    /// Detaches only the exact active runtime proven missing by Docker.
+    #[tokio::test]
+    async fn missing_active_runtime_detachment_is_identity_guarded() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let project = store
+            .create_project(NewProject {
+                slug: "missing-runtime",
+                name: "Missing runtime",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/project.git",
+                branch: "main",
+                now_unix: 100,
+            })
+            .await
+            .expect("project is created");
+        let deployment = create_test_deployment(&store, &project.id, &admin_id, 'a', 200).await;
+        let job = store
+            .claim_job("worker", 201, 60)
+            .await
+            .expect("claim succeeds")
+            .expect("job is claimed");
+        record_test_runtime(&store, &deployment.id, "missing-container", 40_001, 202).await;
+        store
+            .complete_job(&job.id, "worker", Some("{}"), 203)
+            .await
+            .expect("deployment promotes");
+
+        assert!(matches!(
+            store
+                .detach_missing_active_runtime(&deployment.id, "wrong-container", 204)
+                .await,
+            Err(StoreError::DeploymentNotFound)
+        ));
+        assert!(
+            store
+                .deployment_by_id(&deployment.id)
+                .await
+                .expect("deployment loads")
+                .active
+        );
+
+        store
+            .detach_missing_active_runtime(&deployment.id, "missing-container", 205)
+            .await
+            .expect("exact stale runtime detaches");
+        let detached = store
+            .deployment_by_id(&deployment.id)
+            .await
+            .expect("deployment loads");
+        assert!(!detached.active);
+        assert_eq!(detached.status, "succeeded");
+        assert_eq!(detached.runtime_route_status, "error");
+        assert!(
+            detached
+                .runtime_route_error
+                .as_deref()
+                .is_some_and(|error| error.contains("detached automatically"))
+        );
     }
 
     /// Creates one test deployment with a distinct repeated hexadecimal SHA.

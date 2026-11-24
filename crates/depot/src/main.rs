@@ -1611,6 +1611,7 @@ async fn execute_deployment(
         .exposed_port
         .and_then(|port| u16::try_from(port).ok())
         .ok_or_else(|| "Service deployments require a valid exposed port.".to_owned())?;
+    let previously_persistent_paths = config.persistent_volumes.clone();
     let image_volume_paths = depot_runtime::image_volume_paths(
         &worker_config.docker_binary,
         &build.image_id,
@@ -1661,7 +1662,13 @@ async fn execute_deployment(
     let predecessor = if persistent_paths.is_empty() {
         None
     } else {
-        stop_stateful_predecessor(store, worker_config, project_id).await?
+        stop_stateful_predecessor(
+            store,
+            worker_config,
+            project_id,
+            &previously_persistent_paths,
+        )
+        .await?
     };
     if let Some(predecessor) = predecessor.as_ref() {
         for path in &persistent_paths {
@@ -1770,6 +1777,7 @@ async fn stop_stateful_predecessor(
     store: &Store,
     worker_config: &depot_core::WorkerConfig,
     project_id: &str,
+    existing_persistent_paths: &[String],
 ) -> Result<Option<depot_store::ActiveServiceRuntime>, String> {
     let predecessor = store
         .active_service_runtimes()
@@ -1780,7 +1788,7 @@ async fn stop_stateful_predecessor(
     let Some(runtime) = predecessor else {
         return Ok(None);
     };
-    depot_runtime::control_container(
+    let result = depot_runtime::control_container(
         &worker_config.docker_binary,
         depot_runtime::RouteIdentity {
             deployment_id: &runtime.deployment_id,
@@ -1790,9 +1798,55 @@ async fn stop_stateful_predecessor(
         depot_runtime::ContainerAction::Stop,
         std::time::Duration::from_secs(30),
     )
-    .await
-    .map_err(|error| format!("Could not stop the active stateful release safely: {error}"))?;
-    Ok(Some(runtime))
+    .await;
+    match result {
+        Ok(_) => Ok(Some(runtime)),
+        Err(depot_runtime::RuntimeError::ContainerMissing) => {
+            for path in existing_persistent_paths {
+                match depot_runtime::persistent_volume_exists(
+                    &worker_config.docker_binary,
+                    project_id,
+                    path,
+                    std::time::Duration::from_secs(30),
+                )
+                .await
+                {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        return Err(format!(
+                            "The active container and its persistent volume for {path} are both missing. Restore the volume from backup before deploying."
+                        ));
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "Could not verify the persistent volume for {path} before recovery: {error}"
+                        ));
+                    }
+                }
+            }
+            store
+                .detach_missing_active_runtime(
+                    &runtime.deployment_id,
+                    &runtime.container_id,
+                    time::OffsetDateTime::now_utc().unix_timestamp(),
+                )
+                .await
+                .map_err(|_| {
+                    "The missing active runtime changed while it was being recovered; retry the deployment."
+                        .to_owned()
+                })?;
+            tracing::warn!(
+                project_id,
+                deployment_id = %runtime.deployment_id,
+                container_id = %runtime.container_id,
+                "detached missing active runtime before stateful deployment"
+            );
+            Ok(None)
+        }
+        Err(error) => Err(format!(
+            "Could not stop the active stateful release safely: {error}"
+        )),
+    }
 }
 
 /// Restarts a stopped stateful release when its replacement fails before promotion.

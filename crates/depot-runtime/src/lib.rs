@@ -96,8 +96,12 @@ pub enum RuntimeError {
     ImageInspectFailed,
     #[error("Docker could not migrate existing container data into persistent storage")]
     VolumeMigrationFailed,
+    #[error("Docker could not inspect persistent volume state")]
+    VolumeInspectFailed,
     #[error("Docker could not read release container logs")]
     LogsFailed,
+    #[error("the recorded active container no longer exists in Docker")]
+    ContainerMissing,
     #[error("active runtime identity does not match the requested route")]
     RouteMismatch,
 }
@@ -133,6 +137,10 @@ pub async fn inspect_route(
         .kill_on_drop(true);
     let output = command_output(&mut inspect, timeout).await?;
     if !output.status.success() {
+        let error = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+        if error.contains("no such object") || error.contains("no such container") {
+            return Err(RuntimeError::ContainerMissing);
+        }
         return Err(RuntimeError::RouteMismatch);
     }
     let output = String::from_utf8(output.stdout).map_err(|_| RuntimeError::RouteMismatch)?;
@@ -315,6 +323,33 @@ pub async fn image_volume_paths(
         .into_keys()
         .filter(|path| valid_container_path(path))
         .collect())
+}
+
+/// Confirms whether an existing project-scoped volume is still present in Docker.
+pub async fn persistent_volume_exists(
+    docker_binary: &str,
+    project_id: &str,
+    container_path: &str,
+    timeout: Duration,
+) -> Result<bool, RuntimeError> {
+    if !valid_container_path(container_path) {
+        return Err(RuntimeError::InvalidVolume);
+    }
+    let volume_name = persistent_volume_name(project_id, container_path);
+    let mut inspect = Command::new(docker_binary);
+    inspect
+        .args(["volume", "inspect", &volume_name])
+        .stdin(Stdio::null())
+        .kill_on_drop(true);
+    let output = command_output(&mut inspect, timeout).await?;
+    if output.status.success() {
+        return Ok(true);
+    }
+    let error = String::from_utf8_lossy(&output.stderr).to_ascii_lowercase();
+    if error.contains("no such volume") {
+        return Ok(false);
+    }
+    Err(RuntimeError::VolumeInspectFailed)
 }
 
 /// Seeds a new named volume from a stopped predecessor container exactly once.
@@ -643,9 +678,9 @@ mod tests {
     use std::{fs, os::unix::fs::PermissionsExt, time::Duration};
 
     use super::{
-        MigrateVolumeRequest, RouteIdentity, StartContainerRequest, container_logs,
+        MigrateVolumeRequest, RouteIdentity, RuntimeError, StartContainerRequest, container_logs,
         healthy_http_response, image_volume_paths, inspect_route, migrate_volume_from_container,
-        start_container, verify_route,
+        persistent_volume_exists, start_container, verify_route,
     };
 
     /// Avoids executing a just-closed script while the test filesystem still holds it writable.
@@ -837,6 +872,92 @@ mod tests {
         )
         .await;
         assert!(result.is_err());
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Distinguishes a definitely deleted container from an unverifiable identity.
+    #[tokio::test]
+    async fn route_inspection_reports_a_missing_container() {
+        let root = std::env::temp_dir().join(format!(
+            "depot-runtime-route-missing-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' 'Error: No such object: missing' >&2\nexit 1\n",
+        )
+        .expect("fake Docker writes");
+        make_executable(&fake);
+        let result = inspect_route(
+            fake.to_str().expect("path is UTF-8"),
+            RouteIdentity {
+                deployment_id: "deployment",
+                container_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                host_port: 43123,
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(matches!(result, Err(RuntimeError::ContainerMissing)));
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Keeps Docker daemon and permission failures out of the automatic recovery path.
+    #[tokio::test]
+    async fn route_inspection_fails_closed_on_docker_error() {
+        let root = std::env::temp_dir().join(format!(
+            "depot-runtime-route-error-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' 'permission denied' >&2\nexit 1\n",
+        )
+        .expect("fake Docker writes");
+        make_executable(&fake);
+        let result = inspect_route(
+            fake.to_str().expect("path is UTF-8"),
+            RouteIdentity {
+                deployment_id: "deployment",
+                container_id: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                host_port: 43123,
+            },
+            Duration::from_secs(5),
+        )
+        .await;
+        assert!(matches!(result, Err(RuntimeError::RouteMismatch)));
+        fs::remove_dir_all(root).expect("test root is removed");
+    }
+
+    /// Checks existing named volumes without creating replacements.
+    #[tokio::test]
+    async fn persistent_volume_check_distinguishes_missing_from_errors() {
+        let root = std::env::temp_dir().join(format!(
+            "depot-runtime-volume-check-test-{}",
+            uuid::Uuid::now_v7()
+        ));
+        fs::create_dir_all(&root).expect("test root is created");
+        let fake = root.join("fake-docker");
+        fs::write(
+            &fake,
+            "#!/bin/sh\nprintf '%s\\n' 'Error: No such volume: missing' >&2\nexit 1\n",
+        )
+        .expect("fake Docker writes");
+        make_executable(&fake);
+        assert!(
+            !persistent_volume_exists(
+                fake.to_str().expect("path is UTF-8"),
+                "project",
+                "/data",
+                Duration::from_secs(5),
+            )
+            .await
+            .expect("missing volume is classified")
+        );
         fs::remove_dir_all(root).expect("test root is removed");
     }
 
