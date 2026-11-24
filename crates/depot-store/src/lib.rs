@@ -2012,7 +2012,7 @@ impl Store {
         self.project_by_id(project_id).await
     }
 
-    /// Deletes a project which has no retained deployment children and records the action.
+    /// Deletes a project and its retained deployment history, then records the action.
     pub async fn delete_project(
         &self,
         project_id: &str,
@@ -2020,13 +2020,35 @@ impl Store {
         now_unix: i64,
     ) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin().await?;
+        let project_exists =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE id = ?")
+                .bind(project_id)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if project_exists == 0 {
+            return Err(StoreError::ProjectNotFound);
+        }
+
+        // Deployment rows reference durable jobs with ON DELETE RESTRICT. Remove the
+        // history first so the project cascade can safely remove those jobs. GitHub App
+        // delivery history is installation-scoped, so retain it after detaching the
+        // deployment reference just as webhook delivery history already does.
+        sqlx::query(
+            "UPDATE github_app_deliveries SET deployment_id = NULL
+             WHERE deployment_id IN (SELECT id FROM deployments WHERE project_id = ?)",
+        )
+        .bind(project_id)
+        .execute(&mut *transaction)
+        .await?;
+        sqlx::query("DELETE FROM deployments WHERE project_id = ?")
+            .bind(project_id)
+            .execute(&mut *transaction)
+            .await?;
         let result = sqlx::query("DELETE FROM projects WHERE id = ?")
             .bind(project_id)
             .execute(&mut *transaction)
             .await?;
-        if result.rows_affected() == 0 {
-            return Err(StoreError::ProjectNotFound);
-        }
+        debug_assert_eq!(result.rows_affected(), 1);
         insert_project_audit(
             &mut transaction,
             actor_user_id,
@@ -3893,6 +3915,57 @@ mod tests {
                 desired_state: "running".to_owned(),
             }
         );
+    }
+
+    /// Project deletion removes deployment rows before their restricted durable jobs.
+    #[tokio::test]
+    async fn deployed_project_can_be_deleted_with_its_history() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let project = store
+            .create_project(NewProject {
+                slug: "delete-deployed",
+                name: "Delete deployed",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/delete-deployed.git",
+                branch: "main",
+                now_unix: 200,
+            })
+            .await
+            .expect("project is created");
+        let deployment = store
+            .create_deployment(NewDeployment {
+                project_id: &project.id,
+                commit_sha: "0123456789abcdef0123456789abcdef01234567",
+                created_by_user_id: &admin_id,
+                trigger_kind: "manual",
+                now_unix: 210,
+            })
+            .await
+            .expect("deployment is created");
+
+        store
+            .delete_project(&project.id, &admin_id, 220)
+            .await
+            .expect("project and history are deleted");
+
+        assert!(matches!(
+            store.project_by_id(&project.id).await,
+            Err(StoreError::ProjectNotFound)
+        ));
+        let deployment_count =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM deployments WHERE id = ?")
+                .bind(&deployment.id)
+                .fetch_one(&store.pool)
+                .await
+                .expect("deployment count loads");
+        let job_count = sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM jobs WHERE id = ?")
+            .bind(&deployment.job_id)
+            .fetch_one(&store.pool)
+            .await
+            .expect("job count loads");
+        assert_eq!(deployment_count, 0);
+        assert_eq!(job_count, 0);
     }
 
     /// Keeps exact hostnames bound to their own active project runtime identities.
