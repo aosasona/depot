@@ -1547,7 +1547,6 @@ async fn execute_deployment(
         .map(|token| depot_git::GitHttpCredentials { token });
     let checkout = depot_git::checkout_repository(
         &project.repository_url,
-        &project.branch,
         &deployment.commit_sha,
         std::path::Path::new(&worker_config.workspace_root),
         std::time::Duration::from_secs(worker_config.git_timeout_seconds),

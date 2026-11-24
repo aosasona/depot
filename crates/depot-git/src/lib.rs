@@ -95,6 +95,8 @@ pub enum GitError {
     MissingSshCredentials,
     #[error("checked out repository did not resolve to a valid commit SHA")]
     InvalidCommit,
+    #[error("Git could not fetch the recorded commit; it may no longer be available or accessible")]
+    CommitUnavailable,
 }
 
 /// Clones one branch without a shell, resolves its immutable SHA, and detects a build plan.
@@ -168,7 +170,6 @@ pub async fn inspect_repository(
 /// Checks out a branch and verifies it resolves to the deployment's recorded commit SHA.
 pub async fn checkout_repository(
     repository_url: &str,
-    branch: &str,
     expected_commit_sha: &str,
     workspace_root: &Path,
     timeout: Duration,
@@ -184,35 +185,64 @@ pub async fn checkout_repository(
     }
     validate_repository_url(repository_url)?;
     require_ssh_credentials(repository_url, ssh_credentials)?;
+    checkout_validated_repository(
+        repository_url,
+        expected_commit_sha,
+        workspace_root,
+        timeout,
+        ssh_credentials,
+        http_credentials,
+    )
+    .await
+}
+
+/// Fetches and detaches the immutable recorded commit after source validation.
+async fn checkout_validated_repository(
+    repository_url: &str,
+    expected_commit_sha: &str,
+    workspace_root: &Path,
+    timeout: Duration,
+    ssh_credentials: Option<GitSshCredentials<'_>>,
+    http_credentials: Option<GitHttpCredentials<'_>>,
+) -> Result<RepositoryCheckout, GitError> {
     std::fs::create_dir_all(workspace_root).map_err(GitError::Workspace)?;
     let checkout_path = workspace_root.join(format!("deploy-{}", uuid::Uuid::now_v7()));
-    let mut clone = git_command();
-    let ssh = prepare_ssh_command(workspace_root, ssh_credentials)?;
-    if let Some(ssh) = &ssh {
-        ssh.configure(&mut clone);
-    }
-    let http = prepare_http_command(workspace_root, http_credentials)?;
-    if let Some(http) = &http {
-        http.configure(&mut clone);
-    }
-    clone.args([
-        "clone",
-        "--depth",
-        "1",
-        "--single-branch",
-        "--no-tags",
-        "--branch",
-        branch,
-        "--",
-        repository_url,
-    ]);
-    clone.arg(&checkout_path);
-    if let Err(error) = run_status(&mut clone, timeout).await {
+    let mut initialize = git_command();
+    initialize.args(["init", "--quiet"]).arg(&checkout_path);
+    if let Err(error) = run_status(&mut initialize, timeout).await {
         let _ = std::fs::remove_dir_all(&checkout_path);
         return Err(error);
     }
+    let ssh = prepare_ssh_command(workspace_root, ssh_credentials)?;
+    let http = prepare_http_command(workspace_root, http_credentials)?;
+    let mut fetch = git_command();
+    if let Some(ssh) = &ssh {
+        ssh.configure(&mut fetch);
+    }
+    if let Some(http) = &http {
+        http.configure(&mut fetch);
+    }
+    fetch
+        .arg("-C")
+        .arg(&checkout_path)
+        .args(["fetch", "--depth", "1", "--no-tags", "--"])
+        .arg(repository_url)
+        .arg(expected_commit_sha);
+    if run_status(&mut fetch, timeout).await.is_err() {
+        let _ = std::fs::remove_dir_all(&checkout_path);
+        return Err(GitError::CommitUnavailable);
+    }
     drop(ssh);
     drop(http);
+    let mut checkout = git_command();
+    checkout
+        .arg("-C")
+        .arg(&checkout_path)
+        .args(["checkout", "--quiet", "--detach", "FETCH_HEAD"]);
+    if let Err(error) = run_status(&mut checkout, timeout).await {
+        let _ = std::fs::remove_dir_all(&checkout_path);
+        return Err(error);
+    }
     let mut revision = git_command();
     revision
         .arg("-C")
@@ -572,11 +602,12 @@ impl Drop for RepositoryCheckout {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, os::unix::fs::PermissionsExt};
+    use std::{fs, os::unix::fs::PermissionsExt, process::Command as StdCommand};
 
     use super::{
-        DetectedBuilder, GitError, GitSshCredentials, detect_builder, dockerfile_exposed_ports,
-        dockerfile_volume_paths, prepare_ssh_command, require_ssh_credentials,
+        DetectedBuilder, GitError, GitSshCredentials, checkout_validated_repository,
+        detect_builder, dockerfile_exposed_ports, dockerfile_volume_paths, prepare_ssh_command,
+        require_ssh_credentials,
     };
 
     /// Creates an isolated test directory without adding a runtime temp dependency.
@@ -682,6 +713,88 @@ mod tests {
         ));
         require_ssh_credentials("https://example.com/repository.git", None)
             .expect("HTTPS does not need SSH material");
+    }
+
+    /// Fetches an older recorded commit even after the tracked branch advances.
+    #[tokio::test]
+    async fn deployment_checkout_is_not_raced_by_a_newer_branch_head() {
+        let root = test_directory();
+        let repository = root.join("repository");
+        run_git(
+            StdCommand::new("git")
+                .args(["init", "--quiet", "--initial-branch", "main"])
+                .arg(&repository),
+        );
+        run_git(StdCommand::new("git").arg("-C").arg(&repository).args([
+            "config",
+            "user.email",
+            "depot@example.com",
+        ]));
+        run_git(StdCommand::new("git").arg("-C").arg(&repository).args([
+            "config",
+            "user.name",
+            "Depot test",
+        ]));
+        fs::write(repository.join("version.txt"), "first").expect("first file writes");
+        run_git(
+            StdCommand::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["add", "version.txt"]),
+        );
+        run_git(
+            StdCommand::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["commit", "--quiet", "-m", "first"]),
+        );
+        let first_commit = git_output(
+            StdCommand::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["rev-parse", "HEAD"]),
+        );
+        fs::write(repository.join("version.txt"), "second").expect("second file writes");
+        run_git(
+            StdCommand::new("git")
+                .arg("-C")
+                .arg(&repository)
+                .args(["commit", "--quiet", "-am", "second"]),
+        );
+
+        let workspace = root.join("workspaces");
+        let checkout = checkout_validated_repository(
+            repository.to_str().expect("repository path is UTF-8"),
+            &first_commit,
+            &workspace,
+            std::time::Duration::from_secs(10),
+            None,
+            None,
+        )
+        .await
+        .expect("recorded commit checks out");
+        assert_eq!(checkout.commit_sha(), first_commit);
+        assert_eq!(
+            fs::read_to_string(checkout.path().join("version.txt")).expect("file reads"),
+            "first"
+        );
+        drop(checkout);
+        fs::remove_dir_all(root).expect("test directory is removed");
+    }
+
+    /// Runs one local Git setup command and requires success.
+    fn run_git(command: &mut StdCommand) {
+        assert!(command.status().expect("Git starts").success());
+    }
+
+    /// Runs one local Git command and returns trimmed UTF-8 output.
+    fn git_output(command: &mut StdCommand) -> String {
+        let output = command.output().expect("Git starts");
+        assert!(output.status.success());
+        String::from_utf8(output.stdout)
+            .expect("Git output is UTF-8")
+            .trim()
+            .to_owned()
     }
 
     /// Exercises a real public remote only when an operator explicitly supplies its URL.
