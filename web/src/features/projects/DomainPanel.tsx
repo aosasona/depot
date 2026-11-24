@@ -8,6 +8,7 @@ import {
   deleteDomain,
   listDomains,
   retryDomainReconciliation,
+  setPrimaryDomain,
 } from "../../lib/api/client";
 
 const hostnameSchema = z
@@ -36,6 +37,14 @@ export function DomainPanel({ projectId }: { projectId: string }) {
   });
   const remove = useMutation({
     mutationFn: deleteDomain,
+    onSuccess: async () => {
+      await queryClient.invalidateQueries({
+        queryKey: ["projects", projectId, "domains"],
+      });
+    },
+  });
+  const makePrimary = useMutation({
+    mutationFn: setPrimaryDomain,
     onSuccess: async () => {
       await queryClient.invalidateQueries({
         queryKey: ["projects", projectId, "domains"],
@@ -114,6 +123,9 @@ export function DomainPanel({ projectId }: { projectId: string }) {
       {remove.error && (
         <p className="inspection-error">{domainError(remove.error)}</p>
       )}
+      {makePrimary.error && (
+        <p className="inspection-error">{domainError(makePrimary.error)}</p>
+      )}
       {retry.error && (
         <p className="inspection-error">{domainError(retry.error)}</p>
       )}
@@ -125,6 +137,18 @@ export function DomainPanel({ projectId }: { projectId: string }) {
         {domains.data?.map((domain) => (
           <div className="domain-row" key={domain.id}>
             <code>{domain.hostname}</code>
+            {domain.is_primary ? (
+              <span className="deployment-status primary">primary</span>
+            ) : (
+              <button
+                className="text-action"
+                type="button"
+                disabled={makePrimary.isPending}
+                onClick={() => makePrimary.mutate(domain.id)}
+              >
+                Set as primary
+              </button>
+            )}
             <span className={`deployment-status ${domain.routing_status}`}>
               {domain.routing_status === "error"
                 ? "sync failed"

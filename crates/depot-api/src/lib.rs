@@ -486,6 +486,7 @@ struct DomainResponse {
     id: String,
     project_id: String,
     hostname: String,
+    is_primary: bool,
     routing_status: String,
     last_error: Option<String>,
     created_at: i64,
@@ -834,6 +835,10 @@ pub fn router_with_shell_and_domains(
         .route(
             "/api/v1/domains/{domain_id}",
             axum::routing::delete(delete_domain),
+        )
+        .route(
+            "/api/v1/domains/{domain_id}/primary",
+            post(set_primary_domain),
         )
         .route("/api/v1/jobs/{job_id}", get(get_job_status))
         .layer(DefaultBodyLimit::max(1024 * 1024))
@@ -2442,6 +2447,25 @@ async fn delete_domain(
     Ok(StatusCode::NO_CONTENT)
 }
 
+/// Selects one attached hostname as the project's primary public destination.
+async fn set_primary_domain(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(domain_id): axum::extract::Path<String>,
+) -> Result<Json<DomainResponse>, ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let domain = state
+        .store
+        .set_primary_domain(
+            &domain_id,
+            &actor.id,
+            time::OffsetDateTime::now_utc().unix_timestamp(),
+        )
+        .await?;
+    Ok(Json(domain_response(domain)))
+}
+
 /// Requeues the complete desired-domain snapshot after authenticated operator action.
 async fn enqueue_domain_reconciliation(
     State(state): State<ApiState>,
@@ -3405,6 +3429,7 @@ fn domain_response(domain: Domain) -> DomainResponse {
         id: domain.id,
         project_id: domain.project_id,
         hostname: domain.hostname,
+        is_primary: domain.is_primary,
         routing_status: domain.routing_status,
         last_error: domain.last_error,
         created_at: domain.created_at,

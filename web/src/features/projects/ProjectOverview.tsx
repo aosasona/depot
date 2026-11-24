@@ -22,9 +22,7 @@ export function ProjectOverview({ project }: { project: Project }) {
   });
   const latest = deployments.data?.[0];
   const active = deployments.data?.find((deployment) => deployment.active);
-  const primaryDomain = domains.data?.find(
-    (domain) => domain.routing_status === "active",
-  );
+  const primaryDomain = domains.data?.find((domain) => domain.is_primary);
   const loading =
     config.isPending || deployments.isPending || domains.isPending;
 

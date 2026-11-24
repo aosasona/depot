@@ -420,7 +420,7 @@ function buildNodes(
       id: domain.id,
       kind: "domain",
       label: domain.hostname,
-      detail: `Public route · ${domain.routing_status}`,
+      detail: `${domain.is_primary ? "Primary" : "Public"} route · ${domain.routing_status}`,
       active: domain.routing_status === "active",
     });
   return nodes;

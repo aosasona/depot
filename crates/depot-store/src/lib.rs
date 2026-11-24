@@ -432,6 +432,7 @@ pub struct Domain {
     pub id: String,
     pub project_id: String,
     pub hostname: String,
+    pub is_primary: bool,
     pub routing_status: String,
     pub last_error: Option<String>,
     pub created_at: i64,
@@ -2121,8 +2122,9 @@ impl Store {
     pub async fn list_domains(&self, project_id: &str) -> Result<Vec<Domain>, StoreError> {
         self.project_by_id(project_id).await?;
         let rows = sqlx::query(
-            "SELECT id, project_id, hostname, routing_status, last_error, created_at, updated_at
-             FROM domains WHERE project_id = ? ORDER BY created_at, hostname",
+            "SELECT id, project_id, hostname, is_primary, routing_status, last_error,
+                    created_at, updated_at
+             FROM domains WHERE project_id = ? ORDER BY is_primary DESC, created_at, hostname",
         )
         .bind(project_id)
         .fetch_all(&self.pool)
@@ -2156,15 +2158,21 @@ impl Store {
         if exists > 0 {
             return Err(StoreError::DomainAlreadyExists);
         }
+        let is_primary =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) = 0 FROM domains WHERE project_id = ?")
+                .bind(project_id)
+                .fetch_one(&mut *transaction)
+                .await?;
         let id = Uuid::now_v7().to_string();
         sqlx::query(
             "INSERT INTO domains
-             (id, project_id, hostname, routing_status, created_at, updated_at)
-             VALUES (?, ?, ?, 'pending', ?, ?)",
+             (id, project_id, hostname, is_primary, routing_status, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'pending', ?, ?)",
         )
         .bind(&id)
         .bind(project_id)
         .bind(hostname)
+        .bind(is_primary)
         .bind(now_unix)
         .bind(now_unix)
         .execute(&mut *transaction)
@@ -2182,6 +2190,7 @@ impl Store {
             id,
             project_id: project_id.to_owned(),
             hostname: hostname.to_owned(),
+            is_primary: is_primary != 0,
             routing_status: "pending".to_owned(),
             last_error: None,
             created_at: now_unix,
@@ -2197,16 +2206,30 @@ impl Store {
         now_unix: i64,
     ) -> Result<(), StoreError> {
         let mut transaction = self.pool.begin().await?;
-        let project_id =
-            sqlx::query_scalar::<_, String>("SELECT project_id FROM domains WHERE id = ?")
-                .bind(domain_id)
-                .fetch_optional(&mut *transaction)
-                .await?
-                .ok_or(StoreError::DomainNotFound)?;
+        let domain = sqlx::query("SELECT project_id, is_primary FROM domains WHERE id = ?")
+            .bind(domain_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StoreError::DomainNotFound)?;
+        let project_id: String = domain.try_get("project_id")?;
+        let was_primary: bool = domain.try_get("is_primary")?;
         sqlx::query("DELETE FROM domains WHERE id = ?")
             .bind(domain_id)
             .execute(&mut *transaction)
             .await?;
+        if was_primary {
+            sqlx::query(
+                "UPDATE domains SET is_primary = 1, updated_at = ?
+                 WHERE id = (
+                     SELECT id FROM domains WHERE project_id = ?
+                     ORDER BY created_at, hostname LIMIT 1
+                 )",
+            )
+            .bind(now_unix)
+            .bind(&project_id)
+            .execute(&mut *transaction)
+            .await?;
+        }
         insert_project_audit(
             &mut transaction,
             actor_user_id,
@@ -2217,6 +2240,49 @@ impl Store {
         .await?;
         transaction.commit().await?;
         Ok(())
+    }
+
+    /// Selects one attached hostname as the project's canonical UI destination.
+    pub async fn set_primary_domain(
+        &self,
+        domain_id: &str,
+        actor_user_id: &str,
+        now_unix: i64,
+    ) -> Result<Domain, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let project_id =
+            sqlx::query_scalar::<_, String>("SELECT project_id FROM domains WHERE id = ?")
+                .bind(domain_id)
+                .fetch_optional(&mut *transaction)
+                .await?
+                .ok_or(StoreError::DomainNotFound)?;
+        sqlx::query("UPDATE domains SET is_primary = 0 WHERE project_id = ?")
+            .bind(&project_id)
+            .execute(&mut *transaction)
+            .await?;
+        sqlx::query("UPDATE domains SET is_primary = 1, updated_at = ? WHERE id = ?")
+            .bind(now_unix)
+            .bind(domain_id)
+            .execute(&mut *transaction)
+            .await?;
+        insert_project_audit(
+            &mut transaction,
+            actor_user_id,
+            "domain.set_primary",
+            &project_id,
+            now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        let row = sqlx::query(
+            "SELECT id, project_id, hostname, is_primary, routing_status, last_error,
+                    created_at, updated_at
+             FROM domains WHERE id = ?",
+        )
+        .bind(domain_id)
+        .fetch_one(&self.pool)
+        .await?;
+        domain_from_row(row)
     }
 
     /// Resolves a hostname only to the explicitly active verified project runtime.
@@ -3326,6 +3392,7 @@ fn domain_from_row(row: SqliteRow) -> Result<Domain, StoreError> {
         id: row.try_get("id")?,
         project_id: row.try_get("project_id")?,
         hostname: row.try_get("hostname")?,
+        is_primary: row.try_get("is_primary")?,
         routing_status: row.try_get("routing_status")?,
         last_error: row.try_get("last_error")?,
         created_at: row.try_get("created_at")?,
@@ -3402,8 +3469,8 @@ async fn insert_project_domain(
     }
     sqlx::query(
         "INSERT INTO domains
-         (id, project_id, hostname, routing_status, created_at, updated_at)
-         VALUES (?, ?, ?, 'pending', ?, ?)",
+         (id, project_id, hostname, is_primary, routing_status, created_at, updated_at)
+         VALUES (?, ?, ?, 1, 'pending', ?, ?)",
     )
     .bind(Uuid::now_v7().to_string())
     .bind(project_id)
@@ -3714,6 +3781,7 @@ mod tests {
             .await
             .expect("domain is created");
         assert_eq!(domain.routing_status, "pending");
+        assert!(domain.is_primary);
         assert_eq!(
             store.list_domains(&project.id).await.expect("domains list"),
             vec![domain.clone()]
@@ -3750,6 +3818,25 @@ mod tests {
             .await
             .expect_err("duplicate is rejected");
         assert!(matches!(duplicate, StoreError::DomainAlreadyExists));
+        let alternate = store
+            .create_domain(&project.id, "alternate.example.com", &admin_id, 213)
+            .await
+            .expect("alternate domain is created");
+        assert!(!alternate.is_primary);
+        let selected = store
+            .set_primary_domain(&alternate.id, &admin_id, 214)
+            .await
+            .expect("primary domain changes");
+        assert!(selected.is_primary);
+        let domains = store.list_domains(&project.id).await.expect("domains list");
+        assert_eq!(domains[0].id, alternate.id);
+        assert!(domains[0].is_primary);
+        assert!(!domains[1].is_primary);
+        store
+            .delete_domain(&alternate.id, &admin_id, 219)
+            .await
+            .expect("primary domain deletes");
+        assert!(store.list_domains(&project.id).await.expect("domains list")[0].is_primary);
         store
             .delete_domain(&domain.id, &admin_id, 220)
             .await

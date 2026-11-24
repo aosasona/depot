@@ -161,6 +161,7 @@ const domainSchema = z.object({
   id: z.string(),
   project_id: z.string(),
   hostname: z.string(),
+  is_primary: z.boolean(),
   routing_status: z.enum(["pending", "active", "error"]),
   last_error: z.string().nullable(),
   created_at: z.number(),
@@ -836,6 +837,14 @@ export function createDomain(projectId: string, hostname: string) {
     method: "POST",
     headers: csrfHeaders(),
     body: JSON.stringify({ hostname }),
+  });
+}
+
+/** Marks one attached hostname as the project's primary public destination. */
+export function setPrimaryDomain(domainId: string) {
+  return request(`/api/v1/domains/${domainId}/primary`, domainSchema, {
+    method: "POST",
+    headers: csrfHeaders(),
   });
 }
 
