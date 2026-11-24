@@ -11,6 +11,7 @@ import {
 import { DeploymentLogsPanel } from "./DeploymentLogsPanel";
 import { DeploymentPanel } from "./DeploymentPanel";
 import { DomainPanel } from "./DomainPanel";
+import { DuplicateProjectPanel } from "./DuplicateProjectPanel";
 import { EnvironmentPanel } from "./EnvironmentPanel";
 import { GithubImportPanel } from "./GithubImportPanel";
 import { ProjectCanvas } from "./ProjectCanvas";
@@ -376,6 +377,15 @@ function ProjectWorkspace({
                 </div>
               </div>
               <ProjectIdentityForm project={project} />
+            </section>
+            <section className="project-surface">
+              <div className="surface-heading">
+                <div>
+                  <strong>Duplicate project</strong>
+                  <span>Start clean without rebuilding the configuration.</span>
+                </div>
+              </div>
+              <DuplicateProjectPanel project={project} />
             </section>
             {project.repository_url.startsWith("ssh://") && (
               <section className="project-surface">

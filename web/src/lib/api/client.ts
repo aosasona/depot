@@ -485,6 +485,18 @@ export function createProject(input: {
   });
 }
 
+/** Duplicates project configuration into a fresh runtime identity. */
+export function duplicateProject(
+  projectId: string,
+  input: { slug: string; name: string },
+) {
+  return request(`/api/v1/projects/${projectId}/duplicate`, projectSchema, {
+    method: "POST",
+    headers: csrfHeaders(),
+    body: JSON.stringify(input),
+  });
+}
+
 /** Updates mutable source metadata for an existing project. */
 export function updateProject(
   projectId: string,

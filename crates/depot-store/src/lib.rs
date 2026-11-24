@@ -131,6 +131,28 @@ pub struct NewProject<'a> {
     pub now_unix: i64,
 }
 
+/// One re-encrypted environment value ready for transactional project duplication.
+#[derive(Debug)]
+pub struct DuplicateProjectVariable {
+    pub name: String,
+    pub ciphertext: Vec<u8>,
+    pub nonce: Vec<u8>,
+    pub is_secret: bool,
+}
+
+/// Validated identity and values required to duplicate project configuration.
+#[derive(Debug)]
+pub struct DuplicateProject<'a> {
+    pub source_project_id: &'a str,
+    pub target_project_id: &'a str,
+    pub slug: &'a str,
+    pub name: &'a str,
+    pub owner_user_id: &'a str,
+    pub variables: &'a [DuplicateProjectVariable],
+    pub default_hostname: Option<&'a str>,
+    pub now_unix: i64,
+}
+
 /// Non-secret build and runtime settings attached one-to-one to a project.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct ServiceConfig {
@@ -296,6 +318,7 @@ pub struct EncryptedProjectVariable {
     pub name: String,
     pub ciphertext: Vec<u8>,
     pub nonce: Vec<u8>,
+    pub is_secret: bool,
 }
 
 /// Authenticated encrypted value ready for insertion or replacement.
@@ -1081,7 +1104,7 @@ impl Store {
     ) -> Result<Vec<EncryptedProjectVariable>, StoreError> {
         self.project_by_id(project_id).await?;
         let rows = sqlx::query(
-            "SELECT name, ciphertext, nonce FROM project_variables
+            "SELECT name, ciphertext, nonce, is_secret FROM project_variables
              WHERE project_id = ? ORDER BY name",
         )
         .bind(project_id)
@@ -1093,6 +1116,7 @@ impl Store {
                     name: row.try_get("name")?,
                     ciphertext: row.try_get("ciphertext")?,
                     nonce: row.try_get("nonce")?,
+                    is_secret: row.try_get("is_secret")?,
                 })
             })
             .collect()
@@ -1106,7 +1130,7 @@ impl Store {
     ) -> Result<Option<EncryptedProjectVariable>, StoreError> {
         self.project_by_id(project_id).await?;
         let row = sqlx::query(
-            "SELECT name, ciphertext, nonce FROM project_variables
+            "SELECT name, ciphertext, nonce, is_secret FROM project_variables
              WHERE project_id = ? AND id = ?",
         )
         .bind(project_id)
@@ -1118,6 +1142,7 @@ impl Store {
                 name: row.try_get("name")?,
                 ciphertext: row.try_get("ciphertext")?,
                 nonce: row.try_get("nonce")?,
+                is_secret: row.try_get("is_secret")?,
             })
         })
         .transpose()
@@ -1836,6 +1861,113 @@ impl Store {
             owner_user_id: input.owner_user_id.to_owned(),
             repository_url: input.repository_url.to_owned(),
             branch: input.branch.to_owned(),
+            created_at: input.now_unix,
+            updated_at: input.now_unix,
+            latest_inspection_job_id: None,
+            github_repository_full_name: None,
+        })
+    }
+
+    /// Duplicates source and service settings while excluding every runtime identity.
+    pub async fn duplicate_project(
+        &self,
+        input: DuplicateProject<'_>,
+    ) -> Result<ProjectSummary, StoreError> {
+        let mut transaction = self.pool.begin().await?;
+        let source = sqlx::query("SELECT repository_url, branch FROM projects WHERE id = ?")
+            .bind(input.source_project_id)
+            .fetch_optional(&mut *transaction)
+            .await?
+            .ok_or(StoreError::ProjectNotFound)?;
+        let repository_url: String = source.try_get("repository_url")?;
+        let branch: String = source.try_get("branch")?;
+        let slug_exists =
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM projects WHERE slug = ?")
+                .bind(input.slug)
+                .fetch_one(&mut *transaction)
+                .await?;
+        if slug_exists > 0 {
+            return Err(StoreError::ProjectSlugAlreadyExists);
+        }
+        sqlx::query(
+            "INSERT INTO projects
+             (id, slug, name, owner_user_id, repository_url, branch, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .bind(input.target_project_id)
+        .bind(input.slug)
+        .bind(input.name)
+        .bind(input.owner_user_id)
+        .bind(&repository_url)
+        .bind(&branch)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .execute(&mut *transaction)
+        .await?;
+        let copied = sqlx::query(
+            "INSERT INTO service_configs
+             (project_id, project_kind, builder, context_path, dockerfile_path,
+              static_output_dir, exposed_port, healthcheck_path,
+              created_at, updated_at, persistent_volumes_json)
+             SELECT ?, project_kind, builder, context_path, dockerfile_path,
+                    static_output_dir, exposed_port, healthcheck_path,
+                    ?, ?, persistent_volumes_json
+             FROM service_configs WHERE project_id = ?",
+        )
+        .bind(input.target_project_id)
+        .bind(input.now_unix)
+        .bind(input.now_unix)
+        .bind(input.source_project_id)
+        .execute(&mut *transaction)
+        .await?;
+        if copied.rows_affected() != 1 {
+            return Err(StoreError::ProjectNotFound);
+        }
+        for variable in input.variables {
+            sqlx::query(
+                "INSERT INTO project_variables
+                 (id, project_id, name, ciphertext, nonce, is_secret,
+                  created_by_user_id, created_at, updated_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            )
+            .bind(Uuid::now_v7().to_string())
+            .bind(input.target_project_id)
+            .bind(&variable.name)
+            .bind(&variable.ciphertext)
+            .bind(&variable.nonce)
+            .bind(variable.is_secret)
+            .bind(input.owner_user_id)
+            .bind(input.now_unix)
+            .bind(input.now_unix)
+            .execute(&mut *transaction)
+            .await?;
+        }
+        if let Some(hostname) = input.default_hostname {
+            insert_project_domain(
+                &mut transaction,
+                input.target_project_id,
+                hostname,
+                input.owner_user_id,
+                input.now_unix,
+            )
+            .await?;
+        }
+        insert_project_audit(
+            &mut transaction,
+            input.owner_user_id,
+            "project.duplicate",
+            input.target_project_id,
+            input.now_unix,
+        )
+        .await?;
+        transaction.commit().await?;
+        Ok(ProjectSummary {
+            id: input.target_project_id.to_owned(),
+            slug: input.slug.to_owned(),
+            name: input.name.to_owned(),
+            owner_user_id: input.owner_user_id.to_owned(),
+            repository_url,
+            branch,
             created_at: input.now_unix,
             updated_at: input.now_unix,
             latest_inspection_job_id: None,
@@ -3292,9 +3424,9 @@ async fn insert_project_audit(
 #[cfg(test)]
 mod tests {
     use super::{
-        BootstrapAdmin, GatewayTarget, NewDeployment, NewJob, NewProject, NewUser, Store,
-        StoreError, UpdateServiceConfig, UpsertGithubAppConfiguration, UpsertGithubWebhook,
-        UpsertProjectVariable, UserRole,
+        BootstrapAdmin, DuplicateProject, DuplicateProjectVariable, GatewayTarget, NewDeployment,
+        NewJob, NewProject, NewUser, Store, StoreError, UpdateServiceConfig,
+        UpsertGithubAppConfiguration, UpsertGithubWebhook, UpsertProjectVariable, UserRole,
     };
 
     /// Creates one administrator in a fresh store for project-focused tests.
@@ -4114,6 +4246,93 @@ mod tests {
                 .runtime_route_error
                 .as_deref()
                 .is_some_and(|error| error.contains("detached automatically"))
+        );
+    }
+
+    /// Copies configuration and re-encrypted variables without deployment history.
+    #[tokio::test]
+    async fn project_duplication_starts_with_fresh_runtime_state() {
+        let store = Store::connect_in_memory().await.expect("store opens");
+        let admin_id = create_test_admin(&store).await;
+        let source = store
+            .create_project(NewProject {
+                slug: "source-project",
+                name: "Source project",
+                owner_user_id: &admin_id,
+                repository_url: "https://github.com/example/project.git",
+                branch: "main",
+                now_unix: 100,
+            })
+            .await
+            .expect("source project is created");
+        store
+            .update_service_config(
+                &source.id,
+                UpdateServiceConfig {
+                    project_kind: "service",
+                    builder: "dockerfile",
+                    context_path: "apps/web",
+                    dockerfile_path: "apps/web/Dockerfile",
+                    static_output_dir: None,
+                    exposed_port: Some(8080),
+                    healthcheck_path: Some("/health"),
+                    persistent_volumes: &["/data".to_owned()],
+                    actor_user_id: &admin_id,
+                    now_unix: 110,
+                },
+            )
+            .await
+            .expect("source config updates");
+        let target_id = uuid::Uuid::now_v7().to_string();
+        let duplicated = store
+            .duplicate_project(DuplicateProject {
+                source_project_id: &source.id,
+                target_project_id: &target_id,
+                slug: "source-project-copy",
+                name: "Source project copy",
+                owner_user_id: &admin_id,
+                variables: &[DuplicateProjectVariable {
+                    name: "DATABASE_URL".to_owned(),
+                    ciphertext: vec![9, 8, 7],
+                    nonce: vec![1; 24],
+                    is_secret: true,
+                }],
+                default_hostname: Some("source-project-copy.example.com"),
+                now_unix: 120,
+            })
+            .await
+            .expect("project duplicates");
+
+        assert_eq!(duplicated.id, target_id);
+        assert_eq!(duplicated.repository_url, source.repository_url);
+        assert!(duplicated.github_repository_full_name.is_none());
+        let config = store
+            .service_config(&duplicated.id)
+            .await
+            .expect("copied config loads");
+        assert_eq!(config.context_path, "apps/web");
+        assert_eq!(config.persistent_volumes, vec!["/data"]);
+        let variables = store
+            .encrypted_project_variables(&duplicated.id)
+            .await
+            .expect("copied variables load");
+        assert_eq!(variables.len(), 1);
+        assert_eq!(variables[0].ciphertext, vec![9, 8, 7]);
+        assert!(variables[0].is_secret);
+        assert!(
+            store
+                .list_deployments(&duplicated.id)
+                .await
+                .expect("deployments load")
+                .is_empty()
+        );
+        assert_eq!(
+            store
+                .list_domains(&duplicated.id)
+                .await
+                .expect("domains load")
+                .len(),
+            1
         );
     }
 

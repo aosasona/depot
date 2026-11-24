@@ -28,9 +28,10 @@ use depot_core::{
 use depot_github::{GithubAppClient, GithubError, Repository, RepositoryEntry};
 use depot_secrets::SecretCipher;
 use depot_store::{
-    Deployment, Domain, GithubInstallation, GithubProjectRepository, JobEvent, JobStatus,
-    NewDeployment, NewJob, NewProject, ProjectSummary, ProjectVariable, ServiceConfig, SessionUser,
-    Store, StoreError, UpdateServiceConfig, UpsertGithubAppConfiguration, UpsertGithubWebhook,
+    Deployment, Domain, DuplicateProject, DuplicateProjectVariable, GithubInstallation,
+    GithubProjectRepository, JobEvent, JobStatus, NewDeployment, NewJob, NewProject,
+    ProjectSummary, ProjectVariable, ServiceConfig, SessionUser, Store, StoreError,
+    UpdateServiceConfig, UpsertGithubAppConfiguration, UpsertGithubWebhook,
     UpsertProjectSshCredential, UpsertProjectVariable, UserRole, UserSummary,
 };
 use futures_util::{SinkExt, StreamExt};
@@ -39,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{fs::OpenOptions, io::Write, os::unix::fs::OpenOptionsExt, path::Path};
 use tracing::error;
+use zeroize::Zeroize;
 
 const SESSION_COOKIE: &str = "depot_session";
 const CSRF_COOKIE: &str = "depot_csrf";
@@ -279,6 +281,13 @@ struct CreateProjectRequest {
     name: String,
     repository_url: String,
     branch: String,
+}
+
+/// New identity chosen for a configuration-only copy of an existing project.
+#[derive(Debug, Deserialize)]
+struct DuplicateProjectRequest {
+    slug: String,
+    name: String,
 }
 
 /// Mutable project metadata; stable slug and ownership are intentionally omitted.
@@ -715,6 +724,10 @@ pub fn router_with_shell_and_domains(
             get(get_project)
                 .patch(update_project)
                 .delete(delete_project),
+        )
+        .route(
+            "/api/v1/projects/{project_id}/duplicate",
+            post(duplicate_project),
         )
         .route(
             "/api/v1/projects/{project_id}/inspect",
@@ -2506,6 +2519,72 @@ async fn create_project(
             },
             default_hostname.as_deref(),
         )
+        .await?;
+    if default_hostname.is_some() {
+        state.store.enqueue_domain_reconciliation(now).await?;
+    }
+    Ok((StatusCode::CREATED, Json(project_response(project))))
+}
+
+/// Copies project configuration into a fresh identity without any runtime history.
+async fn duplicate_project(
+    State(state): State<ApiState>,
+    jar: CookieJar,
+    headers: HeaderMap,
+    axum::extract::Path(source_project_id): axum::extract::Path<String>,
+    Json(request): Json<DuplicateProjectRequest>,
+) -> Result<(StatusCode, Json<ProjectResponse>), ApiError> {
+    let actor = require_mutation(&state.store, &jar, &headers).await?;
+    let source = state.store.project_by_id(&source_project_id).await?;
+    validate_project_input(
+        Some(&request.slug),
+        &request.name,
+        &source.repository_url,
+        &source.branch,
+    )?;
+    let target_project_id = uuid::Uuid::now_v7().to_string();
+    let source_variables = state
+        .store
+        .encrypted_project_variables(&source_project_id)
+        .await?;
+    let mut copied_variables = Vec::with_capacity(source_variables.len());
+    if !source_variables.is_empty() {
+        let cipher = state.secrets.as_ref().ok_or(ApiError::SecretsUnavailable)?;
+        for variable in source_variables {
+            let source_context = variable_context(&source_project_id, &variable.name);
+            let mut plaintext = cipher
+                .decrypt(
+                    &variable.ciphertext,
+                    &variable.nonce,
+                    source_context.as_bytes(),
+                )
+                .map_err(|_| ApiError::SecretsUnavailable)?;
+            let target_context = variable_context(&target_project_id, &variable.name);
+            let encrypted = cipher.encrypt(&plaintext, target_context.as_bytes());
+            plaintext.zeroize();
+            let encrypted = encrypted.map_err(|_| ApiError::SecretsUnavailable)?;
+            copied_variables.push(DuplicateProjectVariable {
+                name: variable.name,
+                ciphertext: encrypted.ciphertext,
+                nonce: encrypted.nonce.to_vec(),
+                is_secret: variable.is_secret,
+            });
+        }
+    }
+    let now = time::OffsetDateTime::now_utc().unix_timestamp();
+    let default_hostname = default_project_hostname(&state, &request.slug);
+    let project = state
+        .store
+        .duplicate_project(DuplicateProject {
+            source_project_id: &source_project_id,
+            target_project_id: &target_project_id,
+            slug: &request.slug,
+            name: request.name.trim(),
+            owner_user_id: &actor.id,
+            variables: &copied_variables,
+            default_hostname: default_hostname.as_deref(),
+            now_unix: now,
+        })
         .await?;
     if default_hostname.is_some() {
         state.store.enqueue_domain_reconciliation(now).await?;

@@ -3,15 +3,13 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   ApiError,
   controlProjectRuntime,
-  createProject,
+  duplicateProject,
   getLatestRuntimeAction,
-  getServiceConfig,
   listDeployments,
   listDomains,
   listVariables,
   rollbackDeployment,
   type Project,
-  updateServiceConfig,
   upsertVariable,
 } from "../../lib/api/client";
 import { ContainerFileBrowser } from "./ContainerFileBrowser";
@@ -156,7 +154,7 @@ export function ProjectCanvas({ project }: { project: Project }) {
     });
   }
 
-  /** Clones project source and build configuration without copying secrets or domains. */
+  /** Duplicates reusable configuration into a project with fresh runtime state. */
   async function cloneProject() {
     const name = window
       .prompt("Name for the cloned project", `${project.name} copy`)
@@ -165,27 +163,12 @@ export function ProjectCanvas({ project }: { project: Project }) {
     const slug = `${slugify(name).slice(0, 50)}-${Date.now().toString(36).slice(-6)}`;
     setMessage("Cloning project configuration…");
     try {
-      const config = await getServiceConfig(project.id);
-      const created = await createProject({
+      const created = await duplicateProject(project.id, {
         name,
         slug,
-        repository_url: project.repository_url,
-        branch: project.branch,
-      });
-      await updateServiceConfig(created.id, {
-        project_kind: config.project_kind,
-        builder: config.builder,
-        context_path: config.context_path,
-        dockerfile_path: config.dockerfile_path,
-        static_output_dir: config.static_output_dir,
-        exposed_port: config.exposed_port,
-        healthcheck_path: config.healthcheck_path,
-        persistent_volumes: config.persistent_volumes,
       });
       await client.invalidateQueries({ queryKey: ["projects"] });
-      setMessage(
-        `Created ${name}. Secrets and domains were intentionally not copied.`,
-      );
+      setMessage(`Created ${created.name} with fresh deployment state.`);
     } catch (reason) {
       setMessage(errorMessage(reason));
     }
